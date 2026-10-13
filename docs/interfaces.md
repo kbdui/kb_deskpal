@@ -102,7 +102,7 @@ V0.1 SQLite 文字搜索，非向量语义检索；query 为空返回最近记�
 
 ## 配置与日志
 
-`load_config(path: str | Path | None = None, *, environ: Mapping[str,str] | None = None) -> AppConfig`。配置与字段定义在 `config/__init__.py`；`ConfigError` 代表文件/格式/类型/必需值失败。environ 用于可测试的隔离环境，None 时读取 os.environ。读取不创建工作目录；Application 负责创建 storage 路径。
+`load_config(path: str | Path | None = None, *, environ: Mapping[str,str] | None = None) -> AppConfig`。配置与字段定义在 `config/__init__.py`；`ConfigError` 代表文件/格式/类型/必需值失败。environ 非 None 时只使用该隔离映射，完全跳过 `.env` 和进程变量。None 时读取配置文件父目录（无配置路径则当前目录）的 `.env`，优先级为 os.environ > .env > TOML > 默认值。使用 python-dotenv 按字面读取，过滤无值声明的 None，保留空字符串，不修改 os.environ。读取不创建工作目录；Application 负责创建 storage 路径。
 
 | 配置字段 | 环境变量 |
 | --- | --- |
@@ -111,7 +111,7 @@ V0.1 SQLite 文字搜索，非向量语义检索；query 为空返回最近记�
 | storage.data_dir | DESKPAL_DATA_DIR |
 | agent.max_tool_steps | DESKPAL_MAX_TOOL_STEPS |
 
-llm.api_key 不可写入 TOML，加载后只来自 llm.api_key_env 指向的环境变量。offline 模式不读取 API key。配置中数量/超时必须正值，整数配置拒绝 bool/浮点数。错误信息和 repr 不包含凭据。
+llm.api_key 不可写入 TOML，加载后来自 llm.api_key_env 指向的进程环境变量或本地 `.env`。变量名称必须匹配 `[A-Za-z_][A-Za-z0-9_]*`，误填凭据时错误不回显原值。offline 模式不读取 API key 字段；本地 `.env` 仍可提供非凭据配置。配置中数量/超时必须正值，整数配置拒绝 bool/浮点数。错误信息和 repr 不包含凭据；`.env` 不进入 Git。
 
 ```python
 ExecutionLog.record(event: str, task_id: str | None = None,
@@ -142,7 +142,7 @@ AgentCore(*, llm, planner, tasks, memory, tools, workspace_dir,
 create_agent(config: AppConfig | None = None) -> AgentCore
 ```
 
-Provider 的可注入 transport 是可信测试/适配边界；生产调用优先通过配置和 Application，API key 只从环境变量加载。SQLiteMemoryManager 支持 context manager 和幂等 close，关闭后拒绝业务方法。AgentCore 拒绝并发/重入 run，运行中拒绝 close；close 只调用明确传入的 on_close，不自行寻找并关闭所有依赖。工厂拥有 SQLite，设置 `on_close=memory.close`，组装失败也关闭连接；外部注入资源由调用者负责。
+Provider 的可注入 transport 是可信测试/适配边界；生产调用优先通过配置和 Application，API key 从进程变量或被忽略的本地 `.env` 加载。SQLiteMemoryManager 支持 context manager 和幂等 close，关闭后拒绝业务方法。AgentCore 拒绝并发/重入 run，运行中拒绝 close；close 只调用明确传入的 on_close，不自行寻找并关闭所有依赖。工厂拥有 SQLite，设置 `on_close=memory.close`，组装失败也关闭连接；外部注入资源由调用者负责。
 
 ```python
 from deskpal.application import create_agent

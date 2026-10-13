@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "Local-first personal agent backend"
 readme = "README.md"
 requires-python = ">=3.11"
-dependencies = []
+dependencies = ["python-dotenv>=1.0"]
 
 [project.scripts]
 deskpal = "deskpal.application.cli:main"

@@ -118,6 +118,7 @@ def test_interactive_cli_handles_eof_and_does_not_authorize_write(run_cli, tmp_p
 
 
 def test_console_main_entry_returns_exit_code_and_json(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
     for name in tuple(os.environ):
         if name.upper().startswith(("OPENAI_", "DESKPAL_")):
             monkeypatch.delenv(name)

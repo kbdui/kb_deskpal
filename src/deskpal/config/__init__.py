@@ -2,10 +2,13 @@
 
 import math
 import os
+import re
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping
+
+from dotenv import dotenv_values
 
 
 class ConfigError(ValueError):
@@ -47,8 +50,11 @@ class AppConfig:
 
 
 def load_config(path: str | Path | None = None, *, environ: Mapping[str, str] | None = None) -> AppConfig:
-    """Priority: environment > TOML > defaults; relative paths use TOML parent."""
-    env = os.environ if environ is None else environ
+    """Priority: process environment > sibling .env > TOML > defaults.
+
+    An explicit environ mapping is hermetic: no .env file is read. Environment
+    files are parsed literally and never mutate the process environment.
+    """
     raw: dict[str, Any] = {}
     root = Path.cwd()
     if path is not None:
@@ -59,6 +65,23 @@ def load_config(path: str | Path | None = None, *, environ: Mapping[str, str] | 
                 raw = tomllib.load(stream)
         except (OSError, tomllib.TOMLDecodeError) as exc:
             raise ConfigError("Cannot read valid TOML configuration") from exc
+
+    env: Mapping[str, str]
+    if environ is not None:
+        env = environ
+    else:
+        env_file = root / ".env"
+        file_values: dict[str, str] = {}
+        try:
+            if env_file.is_file():
+                file_values = {
+                    key: value for key, value in dotenv_values(
+                        env_file, interpolate=False, encoding="utf-8"
+                    ).items() if value is not None
+                }
+        except (OSError, UnicodeError):
+            raise ConfigError("Cannot read local environment configuration") from None
+        env = {**file_values, **os.environ}
 
     sections: dict[str, dict[str, Any]] = {}
     for name in ("llm", "sandbox", "storage", "agent"):
@@ -111,6 +134,8 @@ def load_config(path: str | Path | None = None, *, environ: Mapping[str, str] | 
         raise ConfigError("llm.provider must be offline or openai")
     if not api_key_env:
         raise ConfigError("llm.api_key_env must not be empty")
+    if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", api_key_env) is None:
+        raise ConfigError("llm.api_key_env must name a valid environment variable, not a credential")
     api_key = env.get(api_key_env, "") if provider == "openai" else ""
     if provider == "openai" and (not model or not api_key.strip()):
         raise ConfigError("OpenAI mode requires an explicit model and an API key environment variable")

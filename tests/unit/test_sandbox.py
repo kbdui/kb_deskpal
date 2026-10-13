@@ -1,11 +1,15 @@
 """Workspace policies protect trusted tools; no OS isolation is assumed."""
 
 from pathlib import Path
+import os
+import stat
+import subprocess
+import sys
 
 import pytest
 
 from deskpal.sandbox import PathViolation, PermissionDenied, WorkspaceSandbox
-from deskpal.tools import PermissionLevel, ToolContext, ToolSpec
+from deskpal.tools import BuiltinToolManager, PermissionLevel, ToolCall, ToolContext, ToolSpec
 
 
 @pytest.fixture
@@ -64,7 +68,62 @@ def test_symlink_escape_is_rejected_if_platform_allows_links(workspace, tmp_path
         sandbox.resolve_path("escape/existing.txt")
     with pytest.raises(PathViolation):
         sandbox.resolve_path("escape/new.txt", for_write=True)
+    _check_linked_file_tools(sandbox, workspace, outside)
     assert not (outside / "new.txt").exists()
+
+
+def _check_linked_file_tools(sandbox, workspace, outside):
+    """Exercise real manager permission and I/O paths through a real link."""
+    manager = BuiltinToolManager(sandbox)
+    manager.register_builtin()
+    normal = ToolContext("link-test", workspace)
+    write = ToolCall("write_text", {"path": "escape/new.txt", "text": "must-not-write"}, "write")
+    with pytest.raises(PathViolation):
+        manager.execute(ToolCall("read_text", {"path": "escape/existing.txt"}, "read"), normal)
+    with pytest.raises(PermissionDenied):
+        manager.execute(write, normal)
+    authorized = ToolContext("link-test", workspace, frozenset({"write_text"}))
+    with pytest.raises(PathViolation):
+        manager.execute(write, authorized)
+    assert not (outside / "new.txt").exists()
+    assert (outside / "existing.txt").read_text(encoding="utf-8") == "private"
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Real junction creation requires Windows")
+def test_windows_junction_escape_rejects_actual_read_and_authorized_write(workspace, tmp_path):
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "existing.txt").write_text("private", encoding="utf-8")
+    junction = workspace / "escape"
+    # cmd's built-in is required for mklink. Pass a fixed argv list and only
+    # controlled temporary paths; reject metacharacters instead of interpolating.
+    if any(char in str(path) for path in (junction, outside) for char in '%!&|<>\r\n'):
+        pytest.skip("Temporary paths contain unsupported cmd metacharacters")
+    try:
+        try:
+            created = subprocess.run(["cmd.exe", "/d", "/c", "mklink", "/J", str(junction), str(outside)],
+                                     capture_output=True, text=True, errors="replace", timeout=10, check=False)
+        except (OSError, subprocess.TimeoutExpired) as error:
+            pytest.skip(f"Cannot create real junction: {type(error).__name__}, "
+                        f"winerror={getattr(error, 'winerror', None)}, errno={getattr(error, 'errno', None)}")
+        if created.returncode != 0:
+            detail = (created.stderr or created.stdout).strip()
+            pytest.skip(f"mklink /J failed with exit {created.returncode}: {detail}")
+        assert junction.lstat().st_file_attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT
+        assert junction.resolve() == outside.resolve()
+        sandbox = WorkspaceSandbox(workspace)
+        with pytest.raises(PathViolation):
+            sandbox.resolve_path("escape/existing.txt")
+        with pytest.raises(PathViolation):
+            sandbox.resolve_path("escape/new.txt", for_write=True)
+        _check_linked_file_tools(sandbox, workspace, outside)
+    finally:
+        # Nonrecursive rmdir removes only the junction itself on Windows. Never
+        # pass this link to recursive cleanup that could traverse its target.
+        if os.path.lexists(junction):
+            os.rmdir(junction)
+    assert outside.is_dir()
+    assert (outside / "existing.txt").read_text(encoding="utf-8") == "private"
 
 
 def test_resolved_path_membership_rejects_neighbor_with_same_prefix(workspace, monkeypatch):

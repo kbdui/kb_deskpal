@@ -42,7 +42,7 @@ Application 的 `create_agent(config=None)` 是实际组装入口：选择 Provi
 | `src/deskpal/execution_log` | ExecutionLog、NullExecutionLog、JsonlExecutionLog；UTC JSONL 审计与凭据键脱敏 |
 | `src/deskpal/application` | 组装具体实现、CLI 入口；未来 UI 也通过这里创建 Agent |
 
-Python 使用 `src` 布局，包名 `deskpal`。运行依赖为空，HTTP、TOML、SQLite、日志均优先标准库。测试使用已有 pytest，`pyproject.toml` 配置 `src` 导入路径，仓库根目录运行 `python -m pytest` 无需先安装项目。
+Python 使用 `src` 布局，包名 `deskpal`。HTTP、TOML、SQLite、日志使用标准库，本地 `.env` 解析依赖 `python-dotenv`。先安装项目开发依赖后运行 pytest；`pyproject.toml` 配置 `src` 导入路径。
 
 ## 单次请求流程
 
@@ -65,13 +65,13 @@ V0.1 不提供自动重试、恢复或后台任务执行。Waiting 是已有任�
 
 ## 配置、模型与数据
 
-`config.example.toml` 默认 `provider = "offline"`，离线响应须明确显示 demo 标识，不能伪称真实模型或自然语言理解。API 模式必须显式配置 `provider = "openai"` 和 `model`，API key 只从 `api_key_env` 指定的环境变量获取，字段 `repr=False`；不能写入 TOML、日志或仓库。
+`config.example.toml` 默认 `provider = "offline"`，离线响应须明确显示 demo 标识，不能伪称真实模型或自然语言理解。API 模式必须显式配置 `provider = "openai"` 和 `model`，API key 从 `api_key_env` 指定的进程环境变量或本地 `.env` 获取，字段 `repr=False`；不能写入 TOML、日志或仓库。变量名称必须为可移植标识符，误填凭据会得到不包含原值的配置错误。
 
 API 适配采用 OpenAI Responses API、`store: false`；外部接口仍是厂商无关的 `chat()/generate()`。云端模型模式会把请求、选中的记忆及必要工具结果发给配置的模型服务；本地持久化不意味着模型推理全在本地。服务端行为以其产品政策为准。
 
 V0.1 支持首轮规划提出工具调用，并通过独立 Reflect 请求总结执行结果；不支持推理模型完整的 native 多轮工具续接。此类续接可能要求保留并回传 reasoning items，而当前 DTO 不含这些内部协议数据，适配器丢弃 reasoning 输出且不记录或持久化。未来若支持续接，应在 Provider 内处理不透明的内存续接状态并扩展专用契约，不能误用当前文本/ToolCall DTO 宣称完整支持。
 
-配置优先级为 env > TOML > 默认值。路径相对于配置文件所在目录解析；未指定文件时相对于当前目录。`data/`、`workspace/`、真实配置、`.env`、SQLite、JSONL 默认忽略；原始 `doc/` 文件保留。运行时数据路径由 Application 组装，不由领域模块自行选择。
+配置优先级为进程环境变量 > 配置目录的 `.env` > TOML > 默认值。路径相对于配置文件所在目录解析；未指定文件时相对于当前目录。`.env` 按字面值解析，不改变进程环境；显式传入 `environ` 时完全跳过 `.env`，以隔离测试与真实凭据。`data/`、`workspace/`、真实配置、`.env`、SQLite、JSONL 默认忽略；仅提交无密钥的 `.env.example`，原始 `doc/` 文件保留。运行时数据路径由 Application 组装，不由领域模块自行选择。
 
 日志包含请求、任务转换、计划、工具调用参数、权限判断、结果与错误；只记录显式业务输出，不记录模型内部推理、API headers 或原始请求/响应体。按凭据键递归脱敏只是补充保护，不能从普通自然语言内容中识别所有秘密，调用方仍需避免注入凭据。JSONL 锁覆盖同一日志实例的线程内追加，V0.1 单进程共享一个实例，不承诺跨进程锁。
 

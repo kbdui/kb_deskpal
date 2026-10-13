@@ -1,6 +1,6 @@
 # Personal AI Agent Desktop Companion — V0.1
 
-Windows 个人智能 Agent 桌宠项目的基础后端。V0.1 提供 Agent Core、Planner、模型适配、七状态任务管理、SQLite 基础记忆、工具框架、权限与路径策略、配置及执行日志。Python 3.11+，运行依赖使用标准库。
+Windows 个人智能 Agent 桌宠项目的基础后端。V0.1 提供 Agent Core、Planner、模型适配、七状态任务管理、SQLite 基础记忆、工具框架、权限与路径策略、配置及执行日志。Python 3.11+，后端以标准库为主，`.env` 读取使用 `python-dotenv`。
 
 当前入口是命令行；Live2D、Qt UI、人格、情绪和高级自主行为属于后续版本。
 
@@ -41,9 +41,27 @@ deskpal --request "read note.txt"
 
 ## 配置与 API 模式
 
-`config.example.toml` 给出所有配置项。可复制为本地 `config.toml` 后通过 `--config config.toml` 加载。优先级是环境变量 > TOML > 默认值；相对路径以配置文件所在目录为准，未指定文件时以当前目录为准。
+`config.example.toml` 给出所有配置项。可复制为本地 `config.toml` 后通过 `--config config.toml` 加载。优先级是进程环境变量 > 配置目录的 `.env` > TOML > 默认值；相对路径以配置文件所在目录为准，未指定文件时以当前目录为准。读取 `.env` 不改变全局环境，也不对值进行变量插值。
 
-真实模型模式须明确指定可访问的模型，并从环境变量提供 API 密钥：
+真实模型模式须明确指定可访问的模型，密钥可从进程环境变量或本地 `.env` 提供。`api_key_env` 是变量名称，不是密钥值。DeepSeek 示例 `config.toml`：
+
+```toml
+[llm]
+provider = "openai"
+model = "deepseek-flash"
+base_url = "https://api.deepseek.com"
+api_key_env = "DEEPSEEK_API_KEY"
+```
+
+将 `.env.example` 复制为 `.env`，仅在本地填写 `DEEPSEEK_API_KEY=` 后的值，然后运行：
+
+```powershell
+python -m deskpal --config config.toml --request "调用 time 工具查询当前 UTC 时间"
+```
+
+这里的 `openai` 表示兼容的 Responses 协议适配器，服务商由 `base_url` 决定。[DeepSeek 官方 Responses 支持](https://api-docs.deepseek.com/guides/responses_api/)
+
+OpenAI 服务也可直接使用进程环境变量：
 
 ```powershell
 $env:DESKPAL_LLM_PROVIDER = "openai"
@@ -84,13 +102,26 @@ python -m pytest -q -rs
 python -m mypy src --ignore-missing-imports --disallow-untyped-defs
 ```
 
-测试使用临时数据、离线 Provider 和模拟 HTTP，不需要真实 API 密钥。实际执行环境、阶段结果和未实测部分见 [测试报告](docs/TEST_REPORT.md)。
+默认测试使用临时数据、离线 Provider 和模拟 HTTP，不访问真实密钥或网络。历史验收见 [原始测试报告](docs/TEST_REPORT.md)，Python 3.11/3.12、`.env`、DeepSeek 和真实 Windows 路径补测见 [后续测试报告](docs/V0.1_FOLLOWUP_TEST_REPORT.md)。
+
+真实 API 测试须显式启用，最多 3 次请求，每次限制 128 个输出 token 并关闭推理。仅用于测试进程加载 `.env`：
+
+```powershell
+$env:DESKPAL_RUN_LIVE_API_TESTS = "1"
+$env:DESKPAL_LLM_MODEL = "deepseek-flash"
+$env:DESKPAL_LLM_BASE_URL = "https://api.deepseek.com"
+python -c "from dotenv import load_dotenv; load_dotenv(override=False, interpolate=False); import pytest; raise SystemExit(pytest.main(['tests/integration/test_live_api.py', '-q', '--tb=no']))"
+Remove-Item Env:DESKPAL_RUN_LIVE_API_TESTS
+```
+
+强制 echo 的真实用例验证协议与本地执行，不宣称完整自主规划或所有模型能力已获认证。
 
 - [总体架构](ARCHITECTURE.md)
 - [V0.1 开发计划与角色分工](docs/V0.1_PLAN.md)
 - [接口契约](docs/interfaces.md)
 - [扩展与开发约定](docs/DEVELOPMENT.md)
 - [测试计划](docs/TEST_PLAN.md)
+- [V0.2 环境准备评估](docs/V0.2_READINESS.md)
 
 ## 当前边界
 
