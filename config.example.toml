@@ -1,0 +1,19 @@
+# Offline is an explicit deterministic demo, not a real language model.
+[llm]
+provider = "offline"
+# API mode: provider = "openai", model = a model available to your account.
+model = ""
+base_url = "https://api.openai.com/v1"
+api_key_env = "OPENAI_API_KEY"
+timeout_seconds = 30.0
+
+[sandbox]
+workspace_dir = "workspace"
+max_file_bytes = 1048576
+
+[storage]
+data_dir = "data"
+
+[agent]
+max_tool_steps = 8
+
