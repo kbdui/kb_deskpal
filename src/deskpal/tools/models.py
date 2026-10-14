@@ -32,6 +32,7 @@ class ToolContext:
     task_id: str
     workspace_dir: Path
     authorized_tools: frozenset[str] = frozenset()
+    high_risk_authorized_tools: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True)

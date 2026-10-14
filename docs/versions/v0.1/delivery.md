@@ -10,7 +10,7 @@ V0.1 已完成基础 Agent 后端：Agent Core 生命周期及 `run()` / `handle
 
 | 角色 | 主要改动 | 接口与设计 | 验证 |
 | --- | --- | --- | --- |
-| Agent 1 架构 | `ARCHITECTURE.md`、`docs/interfaces.md`、工程配置、各模块 models/ports、config、execution_log | 同步 Protocol/DTO；TOML/env；UTC JSONL；模块依赖与资源所有权 | 基础设施最终 59 项测试；多轮独立架构审查 |
+| Agent 1 架构 | `ARCHITECTURE.md`、`docs/versions/v0.1/interfaces.md`、工程配置、各模块 models/ports、config、execution_log | 同步 Protocol/DTO；TOML/env；UTC JSONL；模块依赖与资源所有权 | 基础设施最终 59 项测试；多轮独立架构审查 |
 | Agent 6 LLM | `llm/providers.py`、导出 | `LLMProvider.chat/generate`；Offline/OpenAI Provider；Responses 协议转换和脱敏错误 | 76 项模拟传输及离线测试 |
 | Agent 5 工具 | `tools/manager.py`、`builtin.py`、`_schema.py`、`sandbox/workspace.py`、导出 | 注册元数据冻结、发现快照、参数校验、权限及路径策略；echo/time/read_text/write_text | 66 项通过，1 项实际 symlink 测试跳过 |
 | Agent 3 任务 | `tasks/manager.py`、导出 | `create/get/update_status/list_tasks`；七状态、合法转换、幂等同态、JSON 快照与审计 | 33 项覆盖全部 49 个状态对及故障边界 |
@@ -48,7 +48,7 @@ python -m pip wheel . --no-deps --no-build-isolation --no-index --wheel-dir dist
 
 发布包已离线安装至仓库内的隔离验证目录。安装生成的 `deskpal.exe` 从源码目录之外运行，验证了中文验收请求、权限等待、授权新任务、实际中文读写、路径拒绝、显式记忆和 SQLite 重开。导入位置确认为安装目标，未借用源码包。wheel、构建缓存和验证运行数据均在忽略目录内，未纳入源代码提交。
 
-完整用例与阶段证据见 `docs/TEST_REPORT.md`。
+完整用例与阶段证据见 `docs/versions/v0.1/test-report.md`。
 
 ## 已知限制
 
@@ -60,4 +60,4 @@ python -m pip wheel . --no-deps --no-build-isolation --no-index --wheel-dir dist
 - 规划是一轮有界静态计划，工具步骤不提供事务回滚；原生推理模型多轮工具续接未实现。
 - 日志按凭据键脱敏，不记录内部推理；普通文本中的秘密无法自动完整识别。
 
-后续实现应遵循 `ARCHITECTURE.md`、`docs/interfaces.md` 与 `docs/DEVELOPMENT.md`，在现有接口上扩展。
+后续实现应遵循 `ARCHITECTURE.md`、`docs/versions/v0.1/interfaces.md` 与 `docs/guides/development.md`，在现有接口上扩展。

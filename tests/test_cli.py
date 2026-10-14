@@ -39,7 +39,8 @@ def test_module_cli_acceptance_and_utf8_json_result(run_cli):
     completed = run_cli("--request", "帮我执行一个任务", "--json")
     assert completed.returncode == 0, completed.stderr
     result = json.loads(completed.stdout)
-    assert set(result) == {"task_id", "status", "response", "tool_results", "required_authorizations", "error"}
+    assert set(result) == {"task_id", "status", "response", "tool_results", "required_authorizations", "error",
+                           "required_high_risk_authorizations", "authorization_requests", "planned_calls"}
     assert result["status"] == "Completed"
     assert result["tool_results"][0]["output"] == "离线演示任务已执行"
     assert "离线演示" in result["response"]
@@ -75,8 +76,12 @@ def test_cli_lists_trusted_tools_in_json(run_cli):
     result = run_cli("--list-tools", "--json")
     assert result.returncode == 0, result.stderr
     specs = {spec["name"]: spec for spec in json.loads(result.stdout)}
-    assert set(specs) == {"echo", "time", "read_text", "write_text"}
+    assert set(specs) == {"echo", "time", "read_text", "write_text", "calendar_create", "calendar_list",
+                          "calendar_update", "calendar_delete", "calendar_events", "timer_create", "timer_list",
+                          "timer_cancel", "timer_events", "document_search", "document_classify", "document_copy", "document_move",
+                          "document_delete", "screenshot_capture"}
     assert specs["write_text"]["permission_level"] == 1
+    assert specs["document_delete"]["permission_level"] == 2
 
 
 @pytest.mark.parametrize("arguments", [("--request", "echo x", "--list-tools"),
@@ -127,3 +132,121 @@ def test_console_main_entry_returns_exit_code_and_json(tmp_path, monkeypatch, ca
     monkeypatch.setenv("DESKPAL_DATA_DIR", str(tmp_path / "data"))
     assert main(["--request", "echo 控制台", "--json"]) == 0
     assert json.loads(capsys.readouterr().out)["tool_results"][0]["output"] == "控制台"
+
+
+@pytest.mark.parametrize("arguments", ['{"text":NaN}', '{"text":"one","text":"two"}', '[]', 'null', '{broken'])
+def test_direct_tool_malformed_json_fails_before_storage_io(run_cli, tmp_path, arguments):
+    result = run_cli("--tool", "echo", "--arguments", arguments)
+    assert result.returncode == 2
+    assert not (tmp_path / "workspace").exists()
+    assert not (tmp_path / "data").exists()
+
+
+def test_direct_tool_waiting_preview_and_high_risk_flag_are_separate(run_cli, tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    target = workspace / "delete.txt"
+    target.write_text("temporary", encoding="utf-8")
+    arguments = json.dumps({"path": "delete.txt"})
+    denied = run_cli("--tool", "document_delete", "--arguments", arguments,
+                     "--authorize", "document_delete", "--json")
+    waiting = json.loads(denied.stdout)
+    assert denied.returncode == 2
+    assert waiting["required_high_risk_authorizations"] == ["document_delete"]
+    assert waiting["planned_calls"][0]["arguments"] == {"path": "delete.txt"}
+    assert waiting["authorization_requests"][0]["permission_level"] == 2
+    assert target.exists()
+    allowed = run_cli("--tool", "document_delete", "--arguments", arguments,
+                      "--authorize-high-risk", "document_delete", "--json")
+    assert allowed.returncode == 0, allowed.stderr
+    assert json.loads(allowed.stdout)["status"] == "Completed"
+    assert not target.exists()
+
+
+def test_direct_timer_create_and_list_are_persistent_without_blocking(run_cli):
+    created = run_cli("--tool", "timer_create", "--arguments", '{"duration_seconds":60,"label":"测试计时"}',
+                      "--authorize", "timer_create", "--json")
+    assert created.returncode == 0, created.stderr
+    record = json.loads(created.stdout)["tool_results"][0]["output"]
+    listed = run_cli("--tool", "timer_list", "--json")
+    assert listed.returncode == 0, listed.stderr
+    assert any(item["id"] == record["id"] for item in json.loads(listed.stdout)["tool_results"][0]["output"])
+
+
+def _interactive_environment(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    for name in tuple(os.environ):
+        if name.upper().startswith(("OPENAI_", "DESKPAL_")):
+            monkeypatch.delenv(name)
+    monkeypatch.setenv("DESKPAL_LLM_PROVIDER", "offline")
+    monkeypatch.setenv("DESKPAL_WORKSPACE_DIR", str(tmp_path / "workspace"))
+    monkeypatch.setenv("DESKPAL_DATA_DIR", str(tmp_path / "data"))
+
+
+def test_interactive_confirmation_requires_separate_high_risk_and_never_repeats(tmp_path, monkeypatch, capsys):
+    _interactive_environment(tmp_path, monkeypatch)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    target = workspace / "delete.txt"
+    target.write_text("temporary", encoding="utf-8")
+    outputs, errors = [], []
+    task_id = None
+    step = 0
+
+    def command(prompt):
+        nonlocal step, task_id
+        captured = capsys.readouterr()
+        errors.append(captured.err)
+        outputs.extend(json.loads(line) for line in captured.out.splitlines() if line.strip())
+        step += 1
+        if step == 1:
+            return 'tool document_delete {"path":"delete.txt"}'
+        if step == 2:
+            task_id = outputs[-1]["task_id"]
+            assert target.exists()
+            return f"/confirm {task_id}"
+        if step == 3:
+            assert outputs[-1]["status"] == "Waiting"
+            assert target.exists()
+            return f"/confirm-high-risk {task_id}"
+        if step == 4:
+            assert not target.exists()
+            return f"/confirm-high-risk {task_id}"
+        return "/quit"
+
+    monkeypatch.setattr("builtins.input", command)
+    assert main(["--json"]) == 1
+    assert [item["status"] for item in outputs] == ["Waiting", "Waiting", "Completed"]
+    assert {item["task_id"] for item in outputs} == {task_id}
+    assert "Unknown pending task" in "".join(errors)
+    entries = [json.loads(line) for line in (tmp_path / "data" / "execution.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert len([entry for entry in entries if entry["event"] == "tool_started"]) == 1
+
+
+def test_interactive_cancel_removes_pending_plan_without_write(tmp_path, monkeypatch, capsys):
+    _interactive_environment(tmp_path, monkeypatch)
+    outputs, errors = [], []
+    task_id = None
+    step = 0
+
+    def command(prompt):
+        nonlocal step, task_id
+        captured = capsys.readouterr()
+        errors.append(captured.err)
+        outputs.extend(json.loads(line) for line in captured.out.splitlines() if line.strip())
+        step += 1
+        if step == 1:
+            return "write cancelled.txt never"
+        if step == 2:
+            task_id = outputs[-1]["task_id"]
+            return f"/cancel {task_id}"
+        if step == 3:
+            return f"/confirm {task_id}"
+        return "/quit"
+
+    monkeypatch.setattr("builtins.input", command)
+    assert main(["--json"]) == 1
+    assert len(outputs) == 1 and outputs[0]["status"] == "Waiting"
+    assert not (tmp_path / "workspace" / "cancelled.txt").exists()
+    assert "Task cancelled" in "".join(errors)
+    assert "Unknown pending task" in "".join(errors)

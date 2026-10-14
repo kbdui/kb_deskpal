@@ -20,10 +20,10 @@ from deskpal.planner.ports import Planner
 from deskpal.sandbox.errors import PathViolation, PermissionDenied, ToolNotFound
 from deskpal.tasks.models import Task, TaskStatus
 from deskpal.tasks.ports import TaskManager
-from deskpal.tools.models import ToolCall, ToolContext, ToolResult
+from deskpal.tools.models import PermissionLevel, ToolCall, ToolContext, ToolResult
 from deskpal.tools.ports import ToolManager
 
-from .models import AgentResult
+from .models import AgentResult, AuthorizationRequest
 
 
 def _call_copy(call: ToolCall) -> ToolCall:
@@ -65,6 +65,8 @@ class AgentCore:
         self._lock = Lock()
         self._closed = False
         self._running = False
+        # Private snapshots never share argument dictionaries with returned DTOs.
+        self._pending: dict[str, tuple[str, Plan, frozenset[str], frozenset[str]]] = {}
 
     def close(self) -> None:
         with self._lock:
@@ -72,9 +74,12 @@ class AgentCore:
                 return
             if self._running:
                 raise RuntimeError("Cannot close AgentCore while a request is running")
+            self._closed = True
+            self._pending.clear()
+            # Cleanup can fail after releasing some resources; the facade must
+            # remain closed instead of accepting requests against partial state.
             if self._on_close is not None:
                 self._on_close()
-            self._closed = True
 
     def __enter__(self) -> "AgentCore":
         with self._lock:
@@ -86,8 +91,48 @@ class AgentCore:
                  traceback: TracebackType | None) -> None:
         self.close()
 
-    def handle_request(self, request: str, *, authorized_tools: Iterable[str] = ()) -> AgentResult:
-        return self.run(request, authorized_tools=authorized_tools)
+    def handle_request(self, request: str, *, authorized_tools: Iterable[str] = (),
+                       high_risk_authorized_tools: Iterable[str] = ()) -> AgentResult:
+        return self.run(request, authorized_tools=authorized_tools,
+                        high_risk_authorized_tools=high_risk_authorized_tools)
+
+    @staticmethod
+    def _authorization(names: Iterable[str]) -> frozenset[str]:
+        if isinstance(names, (str, bytes)):
+            raise ValueError("Authorization must be an iterable of tool names")
+        try:
+            result = frozenset(names)
+        except (TypeError, ValueError):
+            raise ValueError("Authorization must contain tool names") from None
+        if any(not isinstance(name, str) or not name.strip() for name in result):
+            raise ValueError("Authorization must contain non-empty tool names")
+        return result
+
+    def confirm_task(self, task_id: str, *, authorized_tools: Iterable[str] = (),
+                     high_risk_authorized_tools: Iterable[str] = ()) -> AgentResult:
+        """Execute only this instance's stored plan, using task-scoped grants."""
+        authorization = self._authorization(authorized_tools)
+        high_risk = self._authorization(high_risk_authorized_tools)
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("AgentCore is closed")
+            if self._running:
+                raise RuntimeError("AgentCore already has a running request")
+            task = self.tasks.get(task_id)
+            pending = self._pending.get(task_id)
+            if task is None:
+                raise KeyError(task_id)
+            if task.status != TaskStatus.WAITING or pending is None:
+                self._pending.pop(task_id, None)
+                raise ValueError("Task has no pending plan in this AgentCore")
+            request, plan, old_authorization, old_high_risk = pending
+            self._running = True
+        try:
+            return self._run(request, old_authorization | authorization, old_high_risk | high_risk,
+                             task_id=task_id, confirmed_plan=plan)
+        finally:
+            with self._lock:
+                self._running = False
 
     def cancel_task(self, task_id: str) -> Task:
         """Audit cancellation before storage; repeated cancellation is idempotent."""
@@ -98,25 +143,23 @@ class AgentCore:
         if current is None:
             raise KeyError(task_id)
         if current.status == TaskStatus.CANCELLED:
+            self._pending.pop(task_id, None)
             return current
         if current.status not in {TaskStatus.CREATED, TaskStatus.PLANNING,
                                   TaskStatus.RUNNING, TaskStatus.WAITING}:
             raise ValueError("A completed or failed task cannot be cancelled")
         self._event("task_status_changed", task_id,
                     {"previous_status": current.status.value, "status": TaskStatus.CANCELLED.value})
-        return self.tasks.update_status(task_id, TaskStatus.CANCELLED)
+        result = self.tasks.update_status(task_id, TaskStatus.CANCELLED)
+        self._pending.pop(task_id, None)
+        return result
 
-    def run(self, request: str, *, authorized_tools: Iterable[str] = ()) -> AgentResult:
+    def run(self, request: str, *, authorized_tools: Iterable[str] = (),
+            high_risk_authorized_tools: Iterable[str] = ()) -> AgentResult:
         if not isinstance(request, str) or not request.strip():
             raise ValueError("Request must be a non-empty string")
-        if isinstance(authorized_tools, (str, bytes)):
-            raise ValueError("authorized_tools must be an iterable of tool names")
-        try:
-            authorization = frozenset(authorized_tools)
-        except (TypeError, ValueError):
-            raise ValueError("authorized_tools must contain tool names") from None
-        if any(not isinstance(name, str) or not name.strip() for name in authorization):
-            raise ValueError("authorized_tools must contain non-empty tool names")
+        authorization = self._authorization(authorized_tools)
+        high_risk = self._authorization(high_risk_authorized_tools)
         with self._lock:
             if self._closed:
                 raise RuntimeError("AgentCore is closed")
@@ -124,7 +167,7 @@ class AgentCore:
                 raise RuntimeError("AgentCore already has a running request")
             self._running = True
         try:
-            return self._run(request, authorization)
+            return self._run(request, authorization, high_risk)
         finally:
             with self._lock:
                 self._running = False
@@ -178,33 +221,44 @@ class AgentCore:
             calls.append(_call_copy(call))
         return Plan(plan.reply, tuple(calls))
 
-    def _run(self, request: str, authorization: frozenset[str]) -> AgentResult:
+    def _run(self, request: str, authorization: frozenset[str], high_risk: frozenset[str],
+             *, task_id: str | None = None, confirmed_plan: Plan | None = None) -> AgentResult:
         # Failure before create returns has no valid task id and propagates clearly.
-        task = self.tasks.create(request)
-        task_id = task.id
+        if task_id is None:
+            task_id = self.tasks.create(request).id
         results: list[ToolResult] = []
         phase = "observe"
         try:
-            self._event("task_status_changed", task_id, {"previous_status": None, "status": TaskStatus.CREATED.value})
-            self._stage(task_id, "Observe")
-            self._event("request_received", task_id, {"request": request,
-                                                      "authorized_tools": sorted(authorization)})
-            self._boundary(task_id)
-            memories = tuple(self.memory.search(request, limit=5))
-            if not memories:
-                memories = tuple(self.memory.search("", limit=5))
-            phase = "planning"
-            self._transition(task_id, TaskStatus.PLANNING)
-            self._stage(task_id, "Think")
-            self._stage(task_id, "Plan")
-            plan = self._plan_copy(self.planner.plan(request, memories=memories, tools=self.tools.list_tools()))
-            self._boundary(task_id)
-            self._event("plan_created", task_id, {"reply": plan.reply, "steps": [
-                {"name": call.name, "arguments": _json_copy(call.arguments), "call_id": call.call_id}
-                for call in plan.steps]})
+            if confirmed_plan is None:
+                self._event("task_status_changed", task_id, {"previous_status": None, "status": TaskStatus.CREATED.value})
+                self._stage(task_id, "Observe")
+                self._event("request_received", task_id, {"request": request,
+                                                          "authorized_tools": sorted(authorization),
+                                                          "high_risk_authorized_tools": sorted(high_risk)})
+                self._boundary(task_id)
+                memories = tuple(self.memory.search(request, limit=5))
+                if not memories:
+                    memories = tuple(self.memory.search("", limit=5))
+                phase = "planning"
+                self._transition(task_id, TaskStatus.PLANNING)
+                self._stage(task_id, "Think")
+                self._stage(task_id, "Plan")
+                plan = self._plan_copy(self.planner.plan(request, memories=memories, tools=self.tools.list_tools()))
+                self._boundary(task_id)
+                self._event("plan_created", task_id, {"reply": plan.reply, "steps": [
+                    {"name": call.name, "arguments": _json_copy(call.arguments), "call_id": call.call_id}
+                    for call in plan.steps]})
+            else:
+                plan = self._plan_copy(confirmed_plan)
+                self._event("plan_confirmation_received", task_id,
+                            {"authorized_tools": sorted(authorization),
+                             "high_risk_authorized_tools": sorted(high_risk)})
             phase = "permission preflight"
-            context = ToolContext(task_id, self.workspace_dir, authorization)
+            context = ToolContext(task_id, self.workspace_dir, authorization, high_risk)
             required: list[str] = []
+            required_high_risk: list[str] = []
+            details: list[AuthorizationRequest] = []
+            specs = {spec.name: spec for spec in self.tools.list_tools()}
             for call in plan.steps:
                 self._boundary(task_id)
                 try:
@@ -212,12 +266,25 @@ class AgentCore:
                 except PermissionDenied:
                     if call.name not in required:
                         required.append(call.name)
+                    level = specs[call.name].permission_level
+                    if level == PermissionLevel.HIGH_RISK and call.name not in required_high_risk:
+                        required_high_risk.append(call.name)
+                    details.append(AuthorizationRequest(call.name, _json_copy(call.arguments), call.call_id, level))
             self._boundary(task_id)
             if required:
-                response = "Explicit authorization required for: " + ", ".join(required) + ". Resubmit this request with authorized_tools."
-                self._transition(task_id, TaskStatus.WAITING, result={"required_authorizations": required})
+                response = "Explicit authorization required for: " + ", ".join(required) + ". Confirm this task's displayed plan."
+                current = self.tasks.get(task_id)
+                if current is None or current.status != TaskStatus.WAITING:
+                    self._transition(task_id, TaskStatus.WAITING, result={
+                        "required_authorizations": required, "required_high_risk_authorizations": required_high_risk})
+                self._pending[task_id] = (request, self._plan_copy(plan), authorization, high_risk)
+                self._boundary(task_id)
                 return AgentResult(task_id, TaskStatus.WAITING, response,
-                                   required_authorizations=tuple(required))
+                                   required_authorizations=tuple(required),
+                                   required_high_risk_authorizations=tuple(required_high_risk),
+                                   authorization_requests=tuple(details),
+                                   planned_calls=tuple(_call_copy(call) for call in plan.steps))
+            self._pending.pop(task_id, None)
             phase = "tool execution"
             self._transition(task_id, TaskStatus.RUNNING)
             self._stage(task_id, "Act")
@@ -287,6 +354,7 @@ class AgentCore:
             return self._fail(task_id, error, results)
 
     def _fail(self, task_id: str, error: str, results: list[ToolResult]) -> AgentResult:
+        self._pending.pop(task_id, None)
         # A second audit/storage failure must not hide the primary failure. Failure
         # persistence uses a single attempt, without recursively retrying transitions.
         try:
@@ -313,6 +381,7 @@ class AgentCore:
         return AgentResult(task_id, TaskStatus.FAILED, error, tuple(results), error=error)
 
     def _cancelled_result(self, task_id: str, results: list[ToolResult]) -> AgentResult:
+        self._pending.pop(task_id, None)
         error = None
         response = "Task cancelled."
         try:

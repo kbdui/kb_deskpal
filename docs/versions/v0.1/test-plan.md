@@ -2,9 +2,9 @@
 
 ## 范围与依据
 
-本计划以 `docs/V0.1_PLAN.md` 的本次范围为准，并参考 `doc/` 的设计与交接文档。验收对象为 Windows 上可运行的 Python 3.11+ 基础 Agent：统一模型接口、工具与权限、七状态任务、本地 SQLite 记忆、核心循环、日志及 CLI。Live2D、Qt、人格、情绪、向量数据库、不可信插件隔离及后台自主调度不属于本次验收。
+本计划以 `docs/versions/v0.1/development-plan.md` 的本次范围为准，并参考 `doc/` 的设计与交接文档。验收对象为 Windows 上可运行的 Python 3.11+ 基础 Agent：统一模型接口、工具与权限、七状态任务、本地 SQLite 记忆、核心循环、日志及 CLI。Live2D、Qt、人格、情绪、向量数据库、不可信插件隔离及后台自主调度不属于本次验收。
 
-测试实现以主 Agent 审查冻结后的各包 `src/deskpal/<module>/models.py`、`ports.py` 和 `docs/interfaces.md` 为契约。配置与日志定义在各自包的 `__init__.py`。具体模块尚未交付时只准备场景，不根据推测编写测试或改变实现接口。开发与阶段测试顺序严格为 LLM → Tools → Tasks → Memory → Core；CLI 和跨模块集成在模块交付后验证。
+测试实现以主 Agent 审查冻结后的各包 `src/deskpal/<module>/models.py`、`ports.py` 和 `docs/versions/v0.1/interfaces.md` 为契约。配置与日志定义在各自包的 `__init__.py`。具体模块尚未交付时只准备场景，不根据推测编写测试或改变实现接口。开发与阶段测试顺序严格为 LLM → Tools → Tasks → Memory → Core；CLI 和跨模块集成在模块交付后验证。
 
 ## 验收矩阵
 
@@ -47,9 +47,9 @@
 4. Tasks 交付：运行七状态、查询、深拷贝与取消测试，并回归已交付模块。
 5. Memory 交付：运行 CRUD、排序/过滤和关闭重开持久化测试，并回归已交付模块。
 6. Core/CLI 交付：添加依赖替身单元与真实离线集成测试；验证 Waiting 无部分执行、失败传播、已确认的同步取消边界、反思/记忆/日志和可复现 CLI。
-7. 最终交付：运行完整 suite，更新 `docs/TEST_REPORT.md`，列出执行环境、命令、通过/失败/跳过、缺陷修复结果及未实际验证的部分。模块修复后先重跑失败用例及受影响范围，最终再跑完整 suite。
+7. 最终交付：运行完整 suite，更新 `docs/versions/v0.1/test-report.md`，列出执行环境、命令、通过/失败/跳过、缺陷修复结果及未实际验证的部分。模块修复后先重跑失败用例及受影响范围，最终再跑完整 suite。
 
-缺陷报告包括编号、模块、复现输入、期望/实际、失败命令、副作用证据及严重程度。阻止阶段验收的缺陷包括权限绕过、路径越界、密钥泄漏、任务非法终态、数据丢失和主流程无法完成。测试 Agent 拥有 `tests/`、`docs/TEST_PLAN.md`、`docs/TEST_REPORT.md`；实现缺陷交还对应负责人，不覆盖其他 Agent 文件，不提交 Git。
+缺陷报告包括编号、模块、复现输入、期望/实际、失败命令、副作用证据及严重程度。阻止阶段验收的缺陷包括权限绕过、路径越界、密钥泄漏、任务非法终态、数据丢失和主流程无法完成。测试 Agent 拥有 `tests/`、`docs/versions/v0.1/test-plan.md`、`docs/versions/v0.1/test-report.md`；实现缺陷交还对应负责人，不覆盖其他 Agent 文件，不提交 Git。
 
 ## 当前准备状态
 

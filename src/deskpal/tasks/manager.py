@@ -16,7 +16,7 @@ _TRANSITIONS: dict[TaskStatus, frozenset[TaskStatus]] = {
     TaskStatus.CREATED: frozenset((TaskStatus.PLANNING, TaskStatus.CANCELLED, TaskStatus.FAILED)),
     TaskStatus.PLANNING: frozenset((TaskStatus.RUNNING, TaskStatus.WAITING, TaskStatus.FAILED, TaskStatus.CANCELLED)),
     TaskStatus.RUNNING: frozenset((TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED)),
-    TaskStatus.WAITING: frozenset((TaskStatus.CANCELLED,)),
+    TaskStatus.WAITING: frozenset((TaskStatus.RUNNING, TaskStatus.FAILED, TaskStatus.CANCELLED)),
     TaskStatus.COMPLETED: frozenset(),
     TaskStatus.FAILED: frozenset(),
     TaskStatus.CANCELLED: frozenset(),

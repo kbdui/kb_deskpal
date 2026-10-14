@@ -17,3 +17,9 @@ data_dir = "data"
 [agent]
 max_tool_steps = 8
 
+[scheduling]
+poll_interval_seconds = 1.0
+
+[screenshot]
+max_pixels = 16000000
+

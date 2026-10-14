@@ -1,5 +1,7 @@
 # V0.1 同步接口契约
 
+本页保留 V0.1 契约及未改变的接口。当前 V0.2 的双授权、Waiting 原计划确认、任务状态、调度服务、工具与配置变化，以 [V0.2 接口契约](../v0.2/interfaces.md) 为准；下面关于 Waiting 只能取消、Level 2 预留和授权后只能重新提交的描述已被新版本替代。
+
 本文规定 Phase 1 的 DTO/Protocol；后续实现不能各自发明相似但不兼容的参数名。所有业务接口同步，时间为有时区 UTC `datetime`。跨工具/LLM/日志的 `Any` 值必须是 JSON 可序列化数据（对象键为字符串，拒绝 NaN/Infinity）。dataclass 为 frozen，但内部 Mapping 不自动冻结；注册工具时须复制参数 schema，`list_tools()` 返回与内部隔离的数据，不能允许调用方修改可信注册信息。
 
 ## Agent 与 Planner

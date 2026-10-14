@@ -1,10 +1,12 @@
-# V0.2 环境准备与范围评估
+                 # V0.2 环境准备与范围评估
 
-评估日期：2026-10-13。本文只规划下一阶段，不实现 V0.2，不安装依赖，不修改用户配置或系统权限。路线依据为 `doc/` 两份原始设计文档及 [当前架构](../ARCHITECTURE.md)。本地环境状态采用主 Agent 本轮实际检查结果；官方文档说明的是产品能力，不等同于本机已经安装或验证成功。
+本页保留开工前的环境评估。实施后的安装状态、实际能力与验证结果见 [V0.2 交付说明](delivery.md) 和 [测试报告](test-report.md)；例如 mss 在开发阶段已安装至 deskpal_env，下面的“缺少”记录是检查当时的状态。
+
+评估日期：2026-10-13。本文只规划下一阶段，不实现 V0.2，不安装依赖，不修改用户配置或系统权限。路线依据为 `doc/` 两份原始设计文档及 [当前架构](../../../ARCHITECTURE.md)。本地环境状态采用主 Agent 本轮实际检查结果；官方文档说明的是产品能力，不等同于本机已经安装或验证成功。
 
 ## 结论与范围
 
-**可以直接开始 V0.2 的本地后端工具设计与开发，无需预先安装 Qt、Live2D、OpenAI SDK 或新的编译工具。** 截图工具进入实际联调时再添加截图依赖。Python 3.11/3.12 完整回归与 DeepSeek 真实调用已补验收，详见 [补测报告](V0.1_FOLLOWUP_TEST_REPORT.md)。
+**可以直接开始 V0.2 的本地后端工具设计与开发，无需预先安装 Qt、Live2D、OpenAI SDK 或新的编译工具。** 截图工具进入实际联调时再添加截图依赖。Python 3.11/3.12 完整回归与 DeepSeek 真实调用已补验收，详见 [补测报告](../v0.1/followup-test-report.md)。
 
 原路线的 V0.2 是 Screenshot、Calendar、Document Manager、Timer 四类工具，以及三级权限与 Sandbox。V0.1 的 echo/time/read_text/write_text 已提供工具框架、基础权限和工作区路径策略，但不等于四类生产工具全部完成。Live2D、人格、情绪与桌宠交互在原路线属于 V1.0；本次没有把桌宠预览加入 V0.2 的范围。
 
@@ -17,7 +19,7 @@
 | 系统 | Windows 11 Home x64，版本 10.0.26200 | 可继续 Windows 优先的后端开发 |
 | 用户 Python 环境 | `D:\anaconda\Anaconda3\envs\deskpal_env`，Python 3.12.4 | 保持现有环境，不为 3.11 补测降级 |
 | 项目与开发工具 | 当前环境已安装 editable 项目、pytest 9.1.1、mypy 2.4.0、python-dotenv 1.2.4 | 已具备本地开发与测试条件；密钥由本地 `.env` 提供 |
-| Python 3.11 补测 | 另在 `data/validation/py311` 建立隔离 Python 3.11.17 | 验证最低支持版本；最终结果见 [补测报告](V0.1_FOLLOWUP_TEST_REPORT.md) |
+| Python 3.11 补测 | 另在 `data/validation/py311` 建立隔离 Python 3.11.17 | 验证最低支持版本；最终结果见 [补测报告](../v0.1/followup-test-report.md) |
 | 截图/图像包 | 当前环境缺少 mss、Pillow | 实现截图时补 mss；Pillow 按后处理需求决定 |
 | 日历时区数据 | `deskpal_env` 实测 `ZoneInfo("Asia/Shanghai")` 可用；未安装独立 Python tzdata 包 | 当前无需先补 tzdata；打包或迁移到无时区数据的 Windows 环境时再验证并补充 |
 | UI/Live2D 包 | 当前环境缺少 PySide6、PyQt6、live2d | 不阻塞原范围 V0.2；包名缺失不代表已核查所有 Cubism SDK 文件 |

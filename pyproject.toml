@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "deskpal"
-version = "0.1.0"
+version = "0.2.0"
 description = "Local-first personal agent backend"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -15,6 +15,7 @@ deskpal = "deskpal.application.cli:main"
 
 [project.optional-dependencies]
 dev = ["pytest>=7.4", "mypy>=1.10"]
+screenshot = ["mss>=10.0,<11"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

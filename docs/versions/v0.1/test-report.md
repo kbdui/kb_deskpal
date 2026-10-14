@@ -2,7 +2,7 @@
 
 ## Phase 1：配置与执行日志
 
-日期：2026-10-12。测试环境：Windows、Python 3.12.4、pytest 7.4.4。依据冻结的 `ARCHITECTURE.md`、`docs/interfaces.md` 和各包 DTO/Protocol；Python 3.11 尚未实际运行验证。
+日期：2026-10-12。测试环境：Windows、Python 3.12.4、pytest 7.4.4。依据冻结的 `ARCHITECTURE.md`、`docs/versions/v0.1/interfaces.md` 和各包 DTO/Protocol；Python 3.11 尚未实际运行验证。
 
 执行命令：
 
@@ -17,7 +17,7 @@ python -m pytest tests/unit/test_config.py tests/unit/test_execution_log.py -q
 | `tests/unit/test_config.py` | env > TOML > 默认值；所有公开配置环境变量覆盖；路径以配置目录或当前目录解析；加载不创建数据目录；API模式必要配置；假密钥不进入repr/错误；offline不读取密钥变量；TOML拒绝凭据字段；数量与超时正值、有限数与类型边界；非法TOML、错误配置结构、缺失文件 |
 | `tests/unit/test_execution_log.py` | 嵌套对象/数组/tuple凭据递归脱敏；保留中文、换行与非凭据业务数据；不修改调用方输入；UTC时间、有效UTF-8 JSONL与追加；同一日志实例80条/8线程记录完整且不丢失；非法事件与非JSON值拒绝；失败写入不产生部分记录；真实文件系统错误向调用方传播；NullExecutionLog |
 
-已将架构阶段的 `tests/test_config_and_log.py` 拆分迁移到上述单元测试，避免同一场景重复维护。同步修正 `docs/TEST_PLAN.md`：依据各包models/ports；删除Memory get/metadata、Task过滤、Core start/stop和多轮模型重规划假设；明确单轮静态计划、Waiting重新提交、同步取消边界及无事务回滚。
+已将架构阶段的 `tests/test_config_and_log.py` 拆分迁移到上述单元测试，避免同一场景重复维护。同步修正 `docs/versions/v0.1/test-plan.md`：依据各包models/ports；删除Memory get/metadata、Task过滤、Core start/stop和多轮模型重规划假设；明确单轮静态计划、Waiting重新提交、同步取消边界及无事务回滚。
 
 未发现需要模块实现修复的缺陷。当前结果仅覆盖已交付配置与日志，不代表尚未交付的LLM、Tools、Tasks、Memory、Core或CLI已通过验收。日志测试不证明跨进程互斥，也不保证从普通文本中识别任意秘密；验收范围仍为凭据键脱敏。
 

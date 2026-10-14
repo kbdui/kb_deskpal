@@ -1,5 +1,7 @@
 """Composition root: concrete adapters and resource ownership live here."""
 
+from contextlib import ExitStack
+
 from deskpal.agent.core import AgentCore
 from deskpal.config import AppConfig, ConfigError, load_config
 from deskpal.execution_log import JsonlExecutionLog
@@ -7,12 +9,20 @@ from deskpal.llm.ports import LLMProvider
 from deskpal.llm.providers import OfflineLLMProvider, OpenAILLMProvider
 from deskpal.memory.manager import SQLiteMemoryManager
 from deskpal.planner.llm_planner import LLMPlanner
+from deskpal.planner.ports import Planner
+from deskpal.scheduling import SchedulingService
 from deskpal.sandbox.workspace import WorkspaceSandbox
 from deskpal.tasks.manager import InMemoryTaskManager
 from deskpal.tools.manager import BuiltinToolManager
+from deskpal.tools.ports import Tool
+from deskpal.tools.calendar import calendar_tools
+from deskpal.tools.timer import timer_tools
+from deskpal.tools.documents import DocumentSearchTool, DocumentClassifyTool, DocumentCopyTool, DocumentMoveTool, DocumentDeleteTool
+from deskpal.tools.screenshot import ScreenshotBackend, ScreenshotCaptureTool
 
 
-def create_agent(config: AppConfig | None = None) -> AgentCore:
+def create_agent(config: AppConfig | None = None, *, planner: Planner | None = None,
+                 screenshot_backend: ScreenshotBackend | None = None) -> AgentCore:
     settings = load_config() if config is None else config
     if not isinstance(settings, AppConfig):
         raise ConfigError("config must be an AppConfig")
@@ -23,20 +33,34 @@ def create_agent(config: AppConfig | None = None) -> AgentCore:
         llm = OpenAILLMProvider(settings.llm)
     else:
         raise ConfigError("llm.provider must be offline or openai")
-    planner = LLMPlanner(llm, max_tool_steps=settings.agent.max_tool_steps)
+    selected_planner = planner if planner is not None else LLMPlanner(llm, max_tool_steps=settings.agent.max_tool_steps)
     sandbox = WorkspaceSandbox(settings.sandbox.workspace_dir,
                                max_file_bytes=settings.sandbox.max_file_bytes)
     settings.storage.data_dir.mkdir(parents=True, exist_ok=True)
     sandbox.workspace_dir.mkdir(parents=True, exist_ok=True)
     execution_log = JsonlExecutionLog(settings.storage.data_dir / "execution.jsonl")
-    memory = SQLiteMemoryManager(settings.storage.data_dir / "memory.sqlite3")
-    try:
+    with ExitStack() as resources:
+        memory = SQLiteMemoryManager(settings.storage.data_dir / "memory.sqlite3")
+        resources.callback(memory.close)
+        scheduling = SchedulingService(settings.storage.data_dir / "scheduling.sqlite3",
+                                       execution_log=execution_log,
+                                       poll_interval=settings.scheduling.poll_interval_seconds)
+        resources.callback(scheduling.close)
         tools = BuiltinToolManager(sandbox, execution_log=execution_log)
         tools.register_builtin()
-        return AgentCore(llm=llm, planner=planner, tasks=InMemoryTaskManager(), memory=memory,
+        new_tools: tuple[Tool, ...] = (*calendar_tools(scheduling), *timer_tools(scheduling),
+                     DocumentSearchTool(sandbox), DocumentClassifyTool(sandbox), DocumentCopyTool(sandbox),
+                     DocumentMoveTool(sandbox), DocumentDeleteTool(sandbox),
+                     ScreenshotCaptureTool(sandbox, backend=screenshot_backend,
+                                           max_pixels=settings.screenshot.max_pixels))
+        for tool in new_tools:
+            tools.register(tool)
+        scheduling.start()
+        owned = resources
+        agent = AgentCore(llm=llm, planner=selected_planner, tasks=InMemoryTaskManager(), memory=memory,
                          tools=tools, workspace_dir=sandbox.workspace_dir,
                          max_tool_steps=settings.agent.max_tool_steps, execution_log=execution_log,
-                         on_close=memory.close)
-    except BaseException:
-        memory.close()
-        raise
+                         on_close=lambda: owned.close())
+        # Transfer ownership only after every constructor/start has succeeded.
+        owned = resources.pop_all()
+        return agent

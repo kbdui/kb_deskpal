@@ -6,10 +6,17 @@ from .models import AgentResult
 
 
 class Agent(Protocol):
-    def run(self, request: str, *, authorized_tools: Iterable[str] = ()) -> AgentResult: ...
+    def run(self, request: str, *, authorized_tools: Iterable[str] = (),
+            high_risk_authorized_tools: Iterable[str] = ()) -> AgentResult: ...
 
-    def handle_request(self, request: str, *, authorized_tools: Iterable[str] = ()) -> AgentResult:
+    def handle_request(self, request: str, *, authorized_tools: Iterable[str] = (),
+                       high_risk_authorized_tools: Iterable[str] = ()) -> AgentResult:
         """Alias for run; authorization applies only to this request."""
+        ...
+
+    def confirm_task(self, task_id: str, *, authorized_tools: Iterable[str] = (),
+                     high_risk_authorized_tools: Iterable[str] = ()) -> AgentResult:
+        """Authorize the stored Waiting plan without invoking the planner again."""
         ...
 
     def cancel_task(self, task_id: str) -> Task:

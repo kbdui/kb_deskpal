@@ -162,6 +162,15 @@ class OfflineLLMProvider:
             name = "time"
         elif prompt.startswith("echo "):
             name, arguments = "echo", {"text": prompt[5:]}
+        elif prompt.startswith("tool "):
+            parts = prompt.split(maxsplit=2)
+            try:
+                parsed = _json_load(parts[2]) if len(parts) == 3 else {}
+                if not isinstance(parsed, dict) or len(parts) < 2:
+                    raise LLMError("Tool arguments must be an object")
+                name, arguments = parts[1], parsed
+            except LLMError:
+                return self._response('[离线演示] 命令格式：tool 工具名 {"参数名":"值"}，参数须为有限JSON对象。')
         elif prompt.startswith(("read ", "write ")):
             match = re.fullmatch(r'(read|write)\s+(?:"([^"\n]+)"|(\S+))(?:\s+([\s\S]+))?', prompt)
             if match and match[1] == "read" and match[4] is None:

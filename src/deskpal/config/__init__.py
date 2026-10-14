@@ -42,11 +42,23 @@ class AgentConfig:
 
 
 @dataclass(frozen=True)
+class SchedulingConfig:
+    poll_interval_seconds: float = 1.0
+
+
+@dataclass(frozen=True)
+class ScreenshotConfig:
+    max_pixels: int = 16_000_000
+
+
+@dataclass(frozen=True)
 class AppConfig:
     llm: LLMConfig = field(default_factory=LLMConfig)
     sandbox: SandboxConfig = field(default_factory=SandboxConfig)
     storage: StorageConfig = field(default_factory=StorageConfig)
     agent: AgentConfig = field(default_factory=AgentConfig)
+    scheduling: SchedulingConfig = field(default_factory=SchedulingConfig)
+    screenshot: ScreenshotConfig = field(default_factory=ScreenshotConfig)
 
 
 def load_config(path: str | Path | None = None, *, environ: Mapping[str, str] | None = None) -> AppConfig:
@@ -84,7 +96,7 @@ def load_config(path: str | Path | None = None, *, environ: Mapping[str, str] | 
         env = {**file_values, **os.environ}
 
     sections: dict[str, dict[str, Any]] = {}
-    for name in ("llm", "sandbox", "storage", "agent"):
+    for name in ("llm", "sandbox", "storage", "agent", "scheduling", "screenshot"):
         section = raw.get(name, {})
         if not isinstance(section, dict):
             raise ConfigError(f"Configuration section {name} must be a table")
@@ -141,6 +153,10 @@ def load_config(path: str | Path | None = None, *, environ: Mapping[str, str] | 
         raise ConfigError("OpenAI mode requires an explicit model and an API key environment variable")
     if provider == "openai" and not base_url.startswith(("https://", "http://")):
         raise ConfigError("llm.base_url must be an HTTP(S) URL")
+    poll_interval = positive_number(
+        "scheduling", "poll_interval_seconds", 1.0, "DESKPAL_SCHEDULING_POLL_INTERVAL_SECONDS")
+    if poll_interval > 60:
+        raise ConfigError("scheduling.poll_interval_seconds must not exceed 60")
     return AppConfig(
         llm=LLMConfig(provider, model, base_url, api_key_env,
                       positive_number("llm", "timeout_seconds", 30.0, "DESKPAL_LLM_TIMEOUT_SECONDS"), api_key),
@@ -148,8 +164,12 @@ def load_config(path: str | Path | None = None, *, environ: Mapping[str, str] | 
                               positive_number("sandbox", "max_file_bytes", 1_048_576, "DESKPAL_MAX_FILE_BYTES", True)),
         storage=StorageConfig(directory("storage", "data_dir", "data", "DESKPAL_DATA_DIR")),
         agent=AgentConfig(positive_number("agent", "max_tool_steps", 8, "DESKPAL_MAX_TOOL_STEPS", True)),
+        scheduling=SchedulingConfig(poll_interval),
+        screenshot=ScreenshotConfig(positive_number(
+            "screenshot", "max_pixels", 16_000_000, "DESKPAL_SCREENSHOT_MAX_PIXELS", True)),
     )
 
 
-__all__ = ["AppConfig", "LLMConfig", "SandboxConfig", "StorageConfig", "AgentConfig", "ConfigError", "load_config"]
+__all__ = ["AppConfig", "LLMConfig", "SandboxConfig", "StorageConfig", "AgentConfig",
+           "SchedulingConfig", "ScreenshotConfig", "ConfigError", "load_config"]
 

@@ -12,7 +12,7 @@ ALLOWED = {
     TaskStatus.CREATED: {TaskStatus.PLANNING, TaskStatus.CANCELLED, TaskStatus.FAILED},
     TaskStatus.PLANNING: {TaskStatus.RUNNING, TaskStatus.WAITING, TaskStatus.FAILED, TaskStatus.CANCELLED},
     TaskStatus.RUNNING: {TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED},
-    TaskStatus.WAITING: {TaskStatus.CANCELLED},
+    TaskStatus.WAITING: {TaskStatus.RUNNING, TaskStatus.FAILED, TaskStatus.CANCELLED},
     TaskStatus.COMPLETED: set(), TaskStatus.FAILED: set(), TaskStatus.CANCELLED: set(),
 }
 PATHS = {
@@ -148,11 +148,14 @@ def test_invalid_status_is_rejected_without_change(status):
     assert manager.get(previous.id) == previous
 
 
-def test_waiting_can_be_cancelled_but_cannot_resume():
+def test_waiting_can_resume_same_task_or_fail_or_cancel():
     manager = InMemoryTaskManager()
     waiting = task_at(manager, TaskStatus.WAITING)
-    with pytest.raises(ValueError):
-        manager.update_status(waiting.id, TaskStatus.RUNNING)
+    running = manager.update_status(waiting.id, TaskStatus.RUNNING)
+    assert running.id == waiting.id
+    assert running.status == TaskStatus.RUNNING
+    manager.update_status(running.id, TaskStatus.COMPLETED)
+    waiting = task_at(manager, TaskStatus.WAITING)
     cancelled = manager.update_status(waiting.id, TaskStatus.CANCELLED)
     assert cancelled.status == TaskStatus.CANCELLED
     assert manager.get(waiting.id).status == TaskStatus.CANCELLED

@@ -150,11 +150,35 @@ def test_permission_requires_specific_tool_in_current_context(workspace, level):
     denied = ToolContext("task", workspace, frozenset({"other_tool"}))
     with pytest.raises(PermissionDenied):
         sandbox.check_permission(spec, denied)
-    allowed = ToolContext("task", workspace, frozenset({"sensitive"}))
+    allowed = (ToolContext("task", workspace, high_risk_authorized_tools=frozenset({"sensitive"}))
+               if level == PermissionLevel.HIGH_RISK else ToolContext("task", workspace, frozenset({"sensitive"})))
     assert sandbox.check_permission(spec, allowed) is None
     with pytest.raises(PermissionDenied):
         sandbox.check_permission(spec, ToolContext("new-task", workspace))
     assert list(workspace.iterdir()) == []
+
+
+def test_level_one_and_high_risk_authorizations_are_independent(workspace):
+    sandbox = WorkspaceSandbox(workspace)
+    low = ToolSpec("low", "test", {"type": "object"}, PermissionLevel.CONFIRM)
+    high = ToolSpec("high", "test", {"type": "object"}, PermissionLevel.HIGH_RISK)
+    with pytest.raises(PermissionDenied):
+        sandbox.check_permission(high, ToolContext("task", workspace, frozenset({"high"})))
+    with pytest.raises(PermissionDenied):
+        sandbox.check_permission(low, ToolContext("task", workspace,
+                                                high_risk_authorized_tools=frozenset({"low"})))
+    sandbox.check_permission(high, ToolContext("task", workspace, high_risk_authorized_tools=frozenset({"high"})))
+
+
+@pytest.mark.parametrize("field", ["authorized_tools", "high_risk_authorized_tools"])
+def test_invalid_grant_containers_cannot_authorize_high_risk_tools(workspace, field):
+    sandbox = WorkspaceSandbox(workspace)
+    high = ToolSpec("danger", "test", {"type": "object"}, PermissionLevel.HIGH_RISK)
+    for invalid in ("danger", ("danger",), {"danger"}, ["danger"], frozenset({""}), frozenset({1})):
+        grants = {"authorized_tools": frozenset(), "high_risk_authorized_tools": frozenset({"danger"})}
+        grants[field] = invalid
+        with pytest.raises(PermissionDenied):
+            sandbox.check_permission(high, ToolContext("task", workspace, **grants))
 
 
 def test_automatic_tool_is_allowed_and_context_cannot_change_workspace(workspace, tmp_path):
