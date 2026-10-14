@@ -1,0 +1,2 @@
+# Base project plus the optional MSS screenshot backend.
+-e .[screenshot]

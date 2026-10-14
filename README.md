@@ -9,13 +9,15 @@ Windows 个人智能 Agent 桌宠项目的本地后端。V0.2 在 Agent Core、P
 在仓库根目录执行：
 
 ```powershell
-python -m pip install -e ".[dev]"
+python -m pip install -r requirements-dev.txt
 # 截图可选依赖；不影响其他工具：
-python -m pip install -e ".[dev,screenshot]"
+python -m pip install -r requirements-screenshot.txt
 deskpal --request "帮我执行一个任务"
 deskpal --request "echo 你好" --json
 deskpal --list-tools
 ```
+
+依赖统一在 pyproject.toml 声明；requirements.txt 为基础入口，开发、截图、embedding 各有独立安装清单，详见 [依赖维护](docs/guides/dependencies.md)。Embedding 候选可通过 `python -m pip install -r requirements-embedding.txt` 安装；完整传递依赖锁定与模型验证尚未完成。
 
 也可使用 `python -m deskpal`。不安装项目时，在当前 PowerShell 中设置 `$env:PYTHONPATH = "src"`，再运行 `python -m deskpal --request "帮我执行一个任务"`。
 

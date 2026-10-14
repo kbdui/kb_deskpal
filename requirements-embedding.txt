@@ -1,0 +1,3 @@
+# Base project plus the V0.3 CPU embedding candidate (fastembed==0.9.0).
+# Model files are downloaded separately by scripts/check_embedding.py.
+-e .[embedding]

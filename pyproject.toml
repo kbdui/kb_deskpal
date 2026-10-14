@@ -16,6 +16,8 @@ deskpal = "deskpal.application.cli:main"
 [project.optional-dependencies]
 dev = ["pytest>=7.4", "mypy>=1.10"]
 screenshot = ["mss>=10.0,<11"]
+# V0.3 candidate: installation metadata is checked; local inference is pending.
+embedding = ["fastembed==0.9.0"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

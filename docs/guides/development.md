@@ -8,6 +8,8 @@ Calendar/Timer 工具依赖 `SchedulingManager` Protocol，SQLite/线程实现�
 
 使用 Python 3.11 或更高版本。运行依赖尽量保持标准库；新增依赖必须有明确用途。业务模块只依赖接口和数据对象，具体实现由 Application 组装。
 
+依赖统一在 pyproject.toml 维护，按 requirements 分组入口安装；新增库、升级验证与锁定约束遵循 [依赖维护](dependencies.md)。
+
 ## 新增模型服务
 
 在 `llm` 内实现 `LLMProvider.chat()` 和 `generate()`，将厂商消息、工具调用和错误转换为统一对象。Core 和 Planner 不得导入厂商 SDK 或解析厂商响应。模拟传输必须覆盖正常响应、工具参数、异常及凭据保护；真实服务验证与离线测试分别报告。
