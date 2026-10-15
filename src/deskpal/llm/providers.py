@@ -225,6 +225,7 @@ class OpenAILLMProvider:
         api_key: str | None = None,
         base_url: str | None = None,
         timeout_seconds: float | None = None,
+        max_output_tokens: int | None = None,
         transport: Callable[..., Any] | None = None,
     ) -> None:
         if config is not None and not isinstance(config, LLMConfig):
@@ -234,6 +235,9 @@ class OpenAILLMProvider:
         self._api_key = values.api_key if api_key is None else api_key
         selected_url = values.base_url if base_url is None else base_url
         self.timeout_seconds = values.timeout_seconds if timeout_seconds is None else timeout_seconds
+        if max_output_tokens is not None and (type(max_output_tokens) is not int or max_output_tokens <= 0):
+            raise LLMError("max_output_tokens must be a positive integer")
+        self.max_output_tokens = max_output_tokens
         if not _nonempty(self.model) or not _nonempty(self._api_key):
             raise LLMError("OpenAI provider requires a model and an API key")
         if any(char in self._api_key for char in "\r\n"):
@@ -296,6 +300,8 @@ class OpenAILLMProvider:
                 inputs.append({"type": "function_call", "call_id": call.call_id, "name": call.name,
                                "arguments": _json_dump(dict(call.arguments))})
         payload: dict[str, Any] = {"model": self.model, "store": False, "input": inputs}
+        if self.max_output_tokens is not None:
+            payload["max_output_tokens"] = self.max_output_tokens
         if tools:
             payload["tools"] = [{"type": "function", "name": spec.name, "description": spec.description,
                                  "parameters": dict(spec.parameters), "strict": False} for spec in tools]

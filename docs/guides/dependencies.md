@@ -1,38 +1,42 @@
 # 依赖清单与维护
 
-项目依赖统一在根目录 [pyproject.toml](../../pyproject.toml) 声明，requirements 文件提供分组安装入口，使用同一声明。安装入口中的 `-e .` 表示安装本地项目及其运行依赖，`[extra]` 追加对应可选组；在仓库根目录执行命令。
+更新：2026-10-15，对应 0.3.0。直接依赖统一在 [pyproject.toml](../../pyproject.toml)，requirements 文件只提供分组入口；在仓库根目录运行。`-e .` 安装当前项目，extra 追加可选功能。
 
-## 当前直接依赖
-
-| 分组 | 声明 | 安装入口 | 状态 |
+| 分组 | 直接声明 | 安装入口 | 实际状态 |
 | --- | --- | --- | --- |
-| 基础 | python-dotenv >=1.0 | [requirements.txt](../../requirements.txt) | V0.2 已验证 |
-| 开发 | pytest >=7.4、mypy >=1.10 | [requirements-dev.txt](../../requirements-dev.txt) | V0.2 已验证 |
-| 截图 | mss >=10.0,<11 | [requirements-screenshot.txt](../../requirements-screenshot.txt) | V0.2 实测 10.2.0 |
-| CPU embedding | fastembed ==0.9.0 | [requirements-embedding.txt](../../requirements-embedding.txt) | V0.3 候选；本机安装/推理待验证 |
-
-基础依赖会随每个可选组一起安装。FastEmbed 的 numpy/onnxruntime 等传递依赖由 pip 按包元数据解析；模型权重属于独立资源，缓存路径和验证方法见 [Embedding 指南](embedding-setup.md)。
+| 基础 | python-dotenv >=1.0 | [requirements.txt](../../requirements.txt) | 本地配置与离线后端 |
+| 开发 | pytest >=7.4、mypy >=1.10 | [requirements-dev.txt](../../requirements-dev.txt) | Python 3.11/3.12 回归与类型检查，最终计数见版本报告 |
+| 截图 | mss >=10.0,<11 | [requirements-screenshot.txt](../../requirements-screenshot.txt) | 可选；V0.2 已有，当前回归覆盖 |
+| CPU embedding | fastembed ==0.9.0 | [requirements-embedding.txt](../../requirements-embedding.txt) | V0.3 已接入，真实模型仅在 Python 3.12 验证 |
 
 ## 安装
 
 ```powershell
 conda activate deskpal_env
-# 开发环境：基础 + 测试/类型工具
-python -m pip install -r requirements-dev.txt
-# 按需要添加功能
-python -m pip install -r requirements-screenshot.txt
-python -m pip install -r requirements-embedding.txt
+python -m pip install -r requirements-dev.txt -c constraints/windows-py312.txt
+python -m pip install -r requirements-screenshot.txt -c constraints/windows-py312.txt
+python -m pip install -r requirements-embedding.txt -c constraints/windows-py312.txt
 python -m pip check
 ```
 
-也可用等价 extras 命令，例如 `python -m pip install -e ".[dev,screenshot,embedding]"`。只运行基础后端时使用 `requirements.txt`；上面的三组命令不要求每个使用者都执行。
+只需基础后端时用 requirements.txt；不要求所有用户安装截图/embedding。extras 等价入口为 `python -m pip install -e ".[dev,screenshot,embedding]" -c constraints/windows-py312.txt`。约束用于经过核验的 Windows CPython 3.12，不能直接保证其他系统或 3.11 安装。
 
-## 维护规则与可复现性
+## 约束的范围
 
-1. 新增/调整直接依赖时修改 pyproject.toml 中对应组，并更新本页说明。requirements 入口保持引用该组，避免两个文件各自定义同一套版本范围。
-2. 基础组只放全部用户必须安装的库；截图、embedding、未来 UI/Live2D 等能力分为可选组，具体 SDK 留在 adapter。
-3. 当前清单是安装声明，**不是完整的传递依赖锁文件**。FastEmbed 的直接版本已固定，但所有传递包与模型快照尚未整体锁定。
-4. 在干净的 Python 3.11/3.12 验证环境完成安装、pip check、回归与真实功能验证后，再保存各目标环境的完整解析约束/哈希记录；记录 Python、平台和模型 revision/校验值。不能把整个个人 Conda 环境的 pip freeze 直接当作项目依赖清单。
-5. 版本升级先在隔离环境验证依赖解析与行为，再更新声明及已验证约束。模型变化还需重建索引，与 Python 包升级分别记录。
+[constraints/windows-py312.txt](../../constraints/windows-py312.txt)记录 Windows x64 / CPython 3.12 的 **43 项**观察版本，覆盖 dev、screenshot、CPU embedding 及本地构建工具闭包。它约束可安装版本，不会凭空安装未选择的 extra。
 
-本次增加安装入口与可选声明，没有执行安装或生成未经验证的全量锁文件；当前业务版本仍为 V0.2，embedding extra 不代表 V0.3 功能已经接入。
+这是精确版本约束，**不是哈希锁文件**、平台无关 lock 或干净环境安装成功证明。最终 pip check、约束一致性与测试结果见 [V0.3 测试报告](../versions/v0.3/test-report.md)。不能把整个个人 Conda 环境 pip freeze 当作项目依赖；未来更换目标环境时应从项目闭包重新解析和验证。
+
+模型权重不属于 Python 依赖锁。FastEmbed adapter 记录资产文件 SHA-256 与预处理版本，运行只加载已有缓存，不自动下载。首次准备、cache-only 使用和索引重建见 [Embedding 指南](embedding-setup.md)。
+
+## V0.4 依赖准备（尚未实施）
+
+[本机评估](../planning/v0.4/environment-assessment.md)确认现有环境可开发持久目标/提议/任务恢复；无需队列框架、ORM、Qt 或 Live2D。Windows 应补 `tzdata` 条件依赖：本机 Conda 提供 IANA 数据，但当前 pyproject 没有保证普通 Windows Python 可用。实施时在 pyproject 增加声明、安装验证后更新约束；本轮尚未改安装清单或环境，现有 43 项约束仍是 V0.3 快照。
+
+## 更新规则
+
+1. 先修改 pyproject 对应直接依赖，再更新已验证目标的约束；requirements 保持引用 extra，避免两套手写版本范围。
+2. 基础组只放所有后端用户必须安装的库；截图、embedding、未来 UI SDK 继续留在 adapter 可选组。
+3. 升级后核验依赖解析、pip check、双 Python 离线回归和实际功能；真实模型/网络验收单独报告，不以 mock 替代。
+4. 模型资产或前处理升级需新 manifest 和索引重建；Python 包固定不代表模型快照固定。
+5. 不提交凭据、个人配置、缓存、运行库或私人数据库。用户自行处理 Git 提交。

@@ -1,6 +1,6 @@
-# Personal AI Agent Desktop Companion — V0.2
+# Personal AI Agent Desktop Companion — V0.3
 
-Windows 个人智能 Agent 桌宠项目的本地后端。V0.2 在 Agent Core、Planner、模型适配、任务、记忆与日志基础上，增加本地日历提醒、非阻塞计时器、文件搜索/分类/复制/移动/删除、需授权的截图，以及确认原计划的接口。Python 3.11+，后端以标准库为主，`.env` 读取使用 `python-dotenv`。
+Windows 个人智能 Agent 桌宠项目的本地后端。当前代码版本为 **0.3.0**：在 V0.2 工具与调度基础上接入来源/修订记忆、候选审核、最小用户画像和可选本地 CPU 语义检索。Python 3.11+；验证结果见 [V0.3 测试报告](docs/versions/v0.3/test-report.md)。
 
 当前入口是命令行；Live2D、Qt UI、人格、情绪和高级自主行为属于后续版本。
 
@@ -17,7 +17,7 @@ deskpal --request "echo 你好" --json
 deskpal --list-tools
 ```
 
-依赖统一在 pyproject.toml 声明；requirements.txt 为基础入口，开发、截图、embedding 各有独立安装清单，详见 [依赖维护](docs/guides/dependencies.md)。Embedding 候选可通过 `python -m pip install -r requirements-embedding.txt` 安装；完整传递依赖锁定与模型验证尚未完成。
+依赖统一在 pyproject.toml 声明；requirements.txt 为基础入口，开发、截图、embedding 各有独立安装清单，详见 [依赖维护](docs/guides/dependencies.md)。可选 CPU embedding 通过 `python -m pip install -r requirements-embedding.txt -c constraints/windows-py312.txt` 安装；该约束是 Windows CPython 3.12 的 43 项观察版本，不是跨平台哈希锁。真实模型已在 Python 3.12 验证，运行时只加载已有缓存，见 [Embedding 指南](docs/guides/embedding-setup.md)。
 
 也可使用 `python -m deskpal`。不安装项目时，在当前 PowerShell 中设置 `$env:PYTHONPATH = "src"`，再运行 `python -m deskpal --request "帮我执行一个任务"`。
 
@@ -79,6 +79,22 @@ confirmed = agent.confirm_task(first.task_id, authorized_tools=("write_text",))
 
 文件只操作工作区内普通文件，不跟随符号链接/Junction，不递归删除。分类按扩展名，不读取内容或自动整理。复制/移动默认不覆盖；跨模块失败不承诺回滚。截图支持 1-based 物理屏幕和相对该屏幕的区域坐标，PNG 受文件字节与像素上限约束；只返回路径和尺寸，不自动上传图像。完整参数与时区规则见 [V0.2 接口](docs/versions/v0.2/interfaces.md)。
 
+## V0.3 记忆管理
+
+默认 `memory.mode = "explicit_only"`，普通聊天不自动入长期库。“记住：内容”在调用 LLM 之前保存；自动抽取须显式选择 `candidate_review`，结果仅为候选，需要 revision 审核。画像只支持 preferred_name、reply_language 和 verbosity。
+
+```powershell
+python -m deskpal --memory remember --content "叫我小明" --local-only
+python -m deskpal --memory list --history
+python -m deskpal --memory profile
+# 将 ID/REV 换成 list 输出的当前值；更正会返回新 ID
+python -m deskpal --memory correct --memory-id ID --revision 1 --content "叫我小林"
+python -m deskpal --memory forget --memory-id ID --revision 1
+python -m deskpal --memory export
+```
+
+独立管理命令不调用模型、不需要云 key。`local_only` 不进入云检索；其他显式记忆默认可用于配置的云模型。忘记会清除共享来源关联的正文/历史/索引/画像和进程内关联 Task，已有日志、迁移备份、导出和外部副本仍可能保留。`paused` 只暂停自动记忆，不是完整隐身模式。依赖旧事实的 Waiting 计划在改动后失效，必须重新提交确认。详见 [V0.3 接口](docs/versions/v0.3/interfaces.md)。
+
 ## 配置与 API 模式
 
 `config.example.toml` 给出所有配置项。可复制为本地 `config.toml` 后通过 `--config config.toml` 加载。优先级是进程环境变量 > 配置目录的 `.env` > TOML > 默认值；相对路径以配置文件所在目录为准，未指定文件时以当前目录为准。读取 `.env` 不改变全局环境，也不对值进行变量插值。
@@ -122,7 +138,7 @@ src/deskpal/
   planner/        单轮有界工具计划
   llm/            模型协议与 Provider
   tasks/          七状态任务及隔离快照
-  memory/         SQLite 基础记忆
+  memory/         来源/修订/候选/画像及本地检索
   scheduling/     日程、计时与持久化到期事件
   tools/          工具注册、校验与派发
   sandbox/        可信工具权限和路径策略
@@ -134,20 +150,22 @@ docs/             当前开发与验收文档
 doc/              原始设计和交接文档
 ```
 
-默认文件工具根目录为 `workspace/`，数据目录为 `data/`。记忆持久化到 SQLite，日志使用 JSONL；任务状态只保存在当前进程内，重启不会恢复运行中的任务。文字查询提供基础检索，向量检索及自动遗忘留待扩展。
+默认文件工具根目录为 `workspace/`，数据目录为 `data/`。记忆持久化到 SQLite，日志使用 JSONL；任务状态只保存在当前进程内，重启不会恢复运行中的任务。默认词法检索，可显式启用 cache-only FastEmbed；候选默认七天到期，accepted 事实不自动硬删。旧 v1 数据库先创建 `.v1.bak` 再迁移到 v2，legacy 不进入默认画像/检索。
 
 ## 验证与开发文档
 
-全部文档入口见 [文档导航](docs/README.md)。版本资料已按 `docs/versions/v0.1`、`v0.2` 归档；下一阶段的 [V0.3 环境评估](docs/planning/v0.3/environment-assessment.md)、[开发计划](docs/planning/v0.3/development-plan.md) 与 [验收边界](docs/planning/v0.3/acceptance-boundaries.md) 为规划草案。
+全部文档入口见 [文档导航](docs/README.md)。当前交付见 [V0.3 接口](docs/versions/v0.3/interfaces.md)、[交付说明](docs/versions/v0.3/delivery.md)和[测试报告](docs/versions/v0.3/test-report.md)。`planning/v0.3` 保留实施前目标与实际范围映射，不能代替测试证据。
+
+下一阶段见 [V0.4 环境评估](docs/planning/v0.4/environment-assessment.md)、[开发计划](docs/planning/v0.4/development-plan.md)与[验收边界](docs/planning/v0.4/acceptance-boundaries.md)：目标、本地提议、持久任务及审查恢复，尚未实现。
 
 ```powershell
 python -m pytest -q -rs
-python -m mypy src --ignore-missing-imports --disallow-untyped-defs
+python -m mypy src --strict
 ```
 
-默认测试使用临时数据、离线 Provider 和模拟 HTTP，不访问真实密钥或网络。当前验收见 [V0.2 测试报告](docs/versions/v0.2/test-report.md) 和 [V0.2 交付说明](docs/versions/v0.2/delivery.md)；V0.1 历史证据见 [原始测试报告](docs/versions/v0.1/test-report.md) 和 [补测报告](docs/versions/v0.1/followup-test-report.md)。
+默认测试使用临时数据、离线 Provider 和模拟 HTTP，不访问真实密钥或网络。V0.3 在 Python 3.11/3.12 各815 passed/4 skipped，strict 56 sources通过；真实CPU模型、中文效果、5,000条warm p95=1.7971秒及有限预算DeepSeek流程另行验收，详见 [V0.3 测试报告](docs/versions/v0.3/test-report.md)。V0.2 历史验收见 [V0.2 测试报告](docs/versions/v0.2/test-report.md) 和 [V0.2 交付说明](docs/versions/v0.2/delivery.md)；V0.1 历史证据见 [原始测试报告](docs/versions/v0.1/test-report.md) 和 [补测报告](docs/versions/v0.1/followup-test-report.md)。
 
-真实 API 测试须显式启用，最多 3 次请求，每次限制 128 个输出 token 并关闭推理。仅用于测试进程加载 `.env`：
+以下旧协议真实 API 测试须显式启用，最多 3 次请求，每次限制 128 个输出 token 并关闭推理。仅用于测试进程加载 `.env`：
 
 ```powershell
 $env:DESKPAL_RUN_LIVE_API_TESTS = "1"
@@ -157,7 +175,7 @@ python -c "from dotenv import load_dotenv; load_dotenv(override=False, interpola
 Remove-Item Env:DESKPAL_RUN_LIVE_API_TESTS
 ```
 
-强制 echo 的真实用例验证协议与本地执行，不宣称完整自主规划或所有模型能力已获认证。
+强制 echo 的真实用例验证协议与本地执行，不宣称完整自主规划或所有模型能力已获认证。V0.3 专用记忆验收使用 `scripts/check_memory_api.py --live --max-calls 3`，每次最多1024输出tokens，需要独立授权；本轮实际结果见版本报告，不由默认 pytest 隐式发起。
 
 - [总体架构](ARCHITECTURE.md)
 - [V0.1 开发计划与角色分工](docs/versions/v0.1/development-plan.md)

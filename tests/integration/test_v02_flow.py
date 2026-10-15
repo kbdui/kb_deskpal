@@ -68,7 +68,7 @@ def composition(tmp_path, monkeypatch):
                                  "DESKPAL_SCHEDULING_POLL_INTERVAL_SECONDS": "60"})
     clock, services, memories, agents = Clock(), [], [], []
     close_order, state = [], {"raise_on_service_close": False}
-    real_service, real_memory = factory.SchedulingService, factory.SQLiteMemoryManager
+    real_service, real_memory = factory.SchedulingService, factory.SQLiteMemoryRepository
 
     class TrackedService(real_service):
         def __init__(self, *args, **kwargs):
@@ -91,7 +91,7 @@ def composition(tmp_path, monkeypatch):
             super().close()
 
     monkeypatch.setattr(factory, "SchedulingService", TrackedService)
-    monkeypatch.setattr(factory, "SQLiteMemoryManager", TrackedMemory)
+    monkeypatch.setattr(factory, "SQLiteMemoryRepository", TrackedMemory)
 
     def create(planner=None, backend=None):
         agent = factory.create_agent(config, planner=planner, screenshot_backend=backend or FakeScreen())
@@ -116,7 +116,7 @@ def test_factory_registers_all_tools_and_closes_scheduling_before_memory(composi
     with pytest.raises(RuntimeError):
         services[0].list_timers()
     with pytest.raises(RuntimeError):
-        memories[0].search("")
+        memories[0].list_items()
 
 
 def test_factory_failure_during_registration_releases_both_resources(composition, monkeypatch):
@@ -135,7 +135,7 @@ def test_factory_failure_during_registration_releases_both_resources(composition
     with pytest.raises(RuntimeError):
         services[0].list_timers()
     with pytest.raises(RuntimeError):
-        memories[0].search("")
+        memories[0].list_items()
 
 
 def test_factory_failure_after_scheduler_start_releases_running_service(composition, monkeypatch):
@@ -151,7 +151,7 @@ def test_factory_failure_after_scheduler_start_releases_running_service(composit
     with pytest.raises(RuntimeError):
         services[0].poll_due()
     with pytest.raises(RuntimeError):
-        memories[0].search("")
+        memories[0].list_items()
 
 
 def test_resource_close_error_still_closes_memory_and_permanently_seals_core(composition):
@@ -162,7 +162,7 @@ def test_resource_close_error_still_closes_memory_and_permanently_seals_core(com
         core.close()
     assert close_order == ["scheduling", "memory"]
     with pytest.raises(RuntimeError):
-        memories[0].search("")
+        memories[0].list_items()
     with pytest.raises(RuntimeError):
         services[0].list_timers()
     with pytest.raises(RuntimeError):
@@ -216,7 +216,7 @@ def test_screenshot_waits_before_backend_and_returns_only_metadata(composition):
         assert backend.enumerated == 1 and len(backend.captured) == 1
         assert set(completed.tool_results[0].output) == {"path", "bytes_written", "width", "height", "monitor"}
         assert (config.sandbox.workspace_dir / "fake.png").read_bytes() == backend.png
-        persisted = "\n".join(record.content for record in core.memory.search(""))
+        persisted = "\n".join(item.draft.content for item in core.memory_command("list_items"))
     log = (config.storage.data_dir / "execution.jsonl").read_text(encoding="utf-8")
     assert base64.b64encode(backend.png).decode("ascii") not in persisted + log
 
@@ -264,4 +264,4 @@ def test_real_document_classification_exposes_metadata_without_reading_or_moving
         assert files["unknown.bin"]["category"] == "other"
         assert set(files["report.PDF"]) == {"path", "bytes", "category"}
         assert document.exists() and unknown.exists()
-        assert "fake-private-content-marker" not in "\n".join(record.content for record in core.memory.search(""))
+        assert "fake-private-content-marker" not in "\n".join(item.draft.content for item in core.memory_command("list_items"))

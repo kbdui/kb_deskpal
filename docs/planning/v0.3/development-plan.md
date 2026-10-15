@@ -1,5 +1,26 @@
 # V0.3 开发计划
 
+状态更新：**0.3.0 已实现并通过约定范围验收**（2026-10-15）。实际接口见 [V0.3 契约](../../versions/v0.3/interfaces.md)，交付范围见[交付说明](../../versions/v0.3/delivery.md)，证据见[测试报告](../../versions/v0.3/test-report.md)。本文后续章节保留实施前计划，不再表示当前源码仍未实现。
+
+## 计划到 V0.3 的实际映射
+
+| 计划项 | 当前实际范围 |
+| --- | --- |
+| 接口/来源/状态冻结 | contracts.py 已实现来源、断言、revision、claim type、use policy、bundle/receipt；最终签名以版本契约为准 |
+| 持久化 | schema v1 验证备份后迁移 v2；legacy 隔离；CAS、默认七天候选 TTL、共享来源闭包删除与 tombstone |
+| 评估 | explicit_only 默认；candidate_review 单根 task 一次独立无工具评估、严格 JSON/quote/分数校验；失败只降级，不自动接受 |
+| 用户模型 | 仅 preferred_name、reply_language、verbosity；global/local owner 明确已确认事实投影，不是完整关系/人格画像 |
+| 更正/时间 | 普通更正 superseded，temporal 更正保留旧有效区间，新 ID 替代；历史 as_of 检索与索引资格过滤 |
+| 检索 | 词法+真实 FastEmbed CPU 语义、完整证据预算、无 recent fallback、local_only 云过滤、revision/epoch 与 Waiting 授权失效 |
+| 运维/入口 | CLI 离线无 key 管理、export/rebuild-index、关联 Task 擦除、资源所有权和辅助失败 warning |
+| 模型/效果 | Python 3.12 真实模型、独立校准阈值 0.55、held-out Recall@5=0.8375/无关误召回=0.10；5,000条warm p95=1.7971s、增量峰值297.4MiB，详见报告 |
+| 真实 API | 本轮三次有限预算调用，最终两次完整候选审核/更正/遗忘与 echo/Reflect 流程通过；脱敏证据见报告 |
+| 未交付 | 多轮 WorkingContext、跨事件派生总结/依赖 DAG、完整隐身、importer、Goal/Proposal、人格/情绪/UI |
+
+后续原计划中的 MemoryCandidate/UserProfile 等拟议名称不是额外可调用类型；实际使用 MemoryDraft/MemoryItem/ProfileEntry。旧 SQLiteMemoryManager 仅作 schema v1 兼容类与迁移 fixture，应用由新 Coordinator 提供旧 save/search/delete 适配，禁止覆盖已有记录。
+
+## 原始规划快照（2026-10-14）
+
 状态：**建议范围与顺序，尚未实施或冻结 API**。更新日期：2026-10-14。根据 [分阶段路线](../roadmap.md)，本版收窄为长期记忆、用户模型与真实语义检索；2026-10-13 草案中的目标系统和主动提议移至 V0.4，原始能力目标保留。环境准备见 [环境评估](environment-assessment.md)，验收规则见 [验收边界](acceptance-boundaries.md)。
 
 ## 现状与目标

@@ -6,7 +6,8 @@ import pytest
 
 from deskpal.application import create_agent
 from deskpal.config import load_config
-from deskpal.memory import MemoryKind, SQLiteMemoryManager
+from deskpal.memory import MemoryKind
+from deskpal.memory.repository import SQLiteMemoryRepository
 from deskpal.tasks import TaskStatus
 
 
@@ -25,7 +26,7 @@ def test_acceptance_request_creates_plans_executes_reflects_and_audits(config):
         assert result.tool_results[0].output == "离线演示任务已执行"
         assert "离线演示" in result.response
         assert core.tasks.get(result.task_id).status == TaskStatus.COMPLETED
-        assert core.memory.search("", kind=MemoryKind.EPISODIC)
+        assert any(item.draft.kind == MemoryKind.EPISODIC for item in core.memory_command("list_items"))
     entries = [json.loads(line) for line in (config.storage.data_dir / "execution.jsonl").read_text(encoding="utf-8").splitlines()]
     events = [entry for entry in entries if entry["task_id"] == result.task_id]
     states = [entry["data"]["status"] for entry in events if entry["event"] == "task_status_changed"]
@@ -57,14 +58,17 @@ def test_waiting_then_authorized_write_read_and_authorization_expiry(config):
 def test_plain_chat_not_saved_and_explicit_fact_survives_factory_close(config):
     with create_agent(config) as core:
         assert core.run("你好").status == TaskStatus.COMPLETED
-        assert not core.memory.search("")
+        assert not core.memory_command("list_items")
         remembered = core.run("记住：我喜欢中文")
         assert remembered.status == TaskStatus.COMPLETED
         assert core.memory.search("我喜欢中文", kind=MemoryKind.SEMANTIC)
-    with SQLiteMemoryManager(config.storage.data_dir / "memory.sqlite3") as reopened:
-        assert reopened.search("我喜欢中文", kind=MemoryKind.SEMANTIC)[0].task_id == remembered.task_id
+    with SQLiteMemoryRepository(config.storage.data_dir / "memory.sqlite3") as reopened:
+        items = reopened.list_items()
+        assert len(items) == 1
+        assert items[0].draft.content == "我喜欢中文"
+        assert items[0].source.task_id == remembered.task_id
     with pytest.raises(RuntimeError):
-        core.memory.search("")
+        core.memory.list_items()
 
 
 def test_file_errors_surface_failed_with_actual_tool_results_and_no_escape(config):

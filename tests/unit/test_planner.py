@@ -1,5 +1,7 @@
 """Bounded planning through LLMProvider, without execution or memory evaluation."""
 
+import json
+
 import pytest
 
 from deskpal.llm.errors import LLMError
@@ -33,7 +35,11 @@ def test_planner_uses_request_memories_and_supplied_tools_in_one_chat_call():
     assert len(llm.calls) == 1
     messages, tools = llm.calls[0]
     assert messages[-1].role == "user" and messages[-1].content == "原始目标"
-    assert any(message.role == "system" and "用户喜欢中文" in message.content for message in messages)
+    assert all("用户喜欢中文" not in message.content for message in messages if message.role == "system")
+    memory_data = messages[-2]
+    assert memory_data.role == "user"
+    assert memory_data.content.startswith("[UNTRUSTED MEMORY DATA]\n")
+    assert json.loads(memory_data.content.split("\n", 1)[1]) == ["用户喜欢中文"]
     assert tools == (spec,)
 
 

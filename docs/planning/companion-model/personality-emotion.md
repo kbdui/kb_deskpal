@@ -1,5 +1,7 @@
 # 人格、关系与情绪机制
 
+范围更新（2026-10-15）：人格、关系、情绪与表现运行系统仍为未来设计，未随 0.3.0 交付。V0.3 仅投影用户明确的 preferred_name/reply_language/verbosity，不能据此称 Persona、RelationshipProfile 或 AffectState 已存在。实际范围见 [V0.3 交付](../../versions/v0.3/delivery.md)。
+
 状态：2026-10-14 设计提案。人格/情绪运行实现按现有路线放在 V0.8；本轮只确定机制与跨版本边界。参见[总览](README.md)、[记忆](memory.md)、[集成验收](integration-and-acceptance.md)。
 
 ## 1. 模型选择

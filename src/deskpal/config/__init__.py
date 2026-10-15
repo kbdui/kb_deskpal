@@ -52,6 +52,18 @@ class ScreenshotConfig:
 
 
 @dataclass(frozen=True)
+class MemoryConfig:
+    mode: str = "explicit_only"
+    embedding_provider: str = "disabled"
+    model_cache_dir: Path = Path("data/models/fastembed")
+    max_context_bytes: int = 8000
+    max_candidates: int = 5
+    semantic_threshold: float = 0.55
+    evaluation_timeout_seconds: float = 15.0
+    evaluation_max_output_tokens: int = 2048
+
+
+@dataclass(frozen=True)
 class AppConfig:
     llm: LLMConfig = field(default_factory=LLMConfig)
     sandbox: SandboxConfig = field(default_factory=SandboxConfig)
@@ -59,13 +71,17 @@ class AppConfig:
     agent: AgentConfig = field(default_factory=AgentConfig)
     scheduling: SchedulingConfig = field(default_factory=SchedulingConfig)
     screenshot: ScreenshotConfig = field(default_factory=ScreenshotConfig)
+    memory: MemoryConfig = field(default_factory=MemoryConfig)
 
 
-def load_config(path: str | Path | None = None, *, environ: Mapping[str, str] | None = None) -> AppConfig:
+def load_config(path: str | Path | None = None, *, environ: Mapping[str, str] | None = None,
+                provider_override: str | None = None) -> AppConfig:
     """Priority: process environment > sibling .env > TOML > defaults.
 
     An explicit environ mapping is hermetic: no .env file is read. Environment
     files are parsed literally and never mutate the process environment.
+    Explicit local management can override only provider selection, preserving
+    storage/env settings while requiring no API credential or network.
     """
     raw: dict[str, Any] = {}
     root = Path.cwd()
@@ -96,7 +112,7 @@ def load_config(path: str | Path | None = None, *, environ: Mapping[str, str] | 
         env = {**file_values, **os.environ}
 
     sections: dict[str, dict[str, Any]] = {}
-    for name in ("llm", "sandbox", "storage", "agent", "scheduling", "screenshot"):
+    for name in ("llm", "sandbox", "storage", "agent", "scheduling", "screenshot", "memory"):
         section = raw.get(name, {})
         if not isinstance(section, dict):
             raise ConfigError(f"Configuration section {name} must be a table")
@@ -139,6 +155,10 @@ def load_config(path: str | Path | None = None, *, environ: Mapping[str, str] | 
         return (candidate if candidate.is_absolute() else root / candidate).resolve()
 
     provider = string("llm", "provider", "offline", "DESKPAL_LLM_PROVIDER")
+    if provider_override is not None:
+        if not isinstance(provider_override, str) or provider_override not in {"offline", "openai"}:
+            raise ConfigError("Provider override must be offline or openai")
+        provider = provider_override
     model = string("llm", "model", "", "DESKPAL_LLM_MODEL")
     base_url = string("llm", "base_url", "https://api.openai.com/v1", "DESKPAL_LLM_BASE_URL").rstrip("/")
     api_key_env = string("llm", "api_key_env", "OPENAI_API_KEY", "DESKPAL_LLM_API_KEY_ENV")
@@ -157,6 +177,24 @@ def load_config(path: str | Path | None = None, *, environ: Mapping[str, str] | 
         "scheduling", "poll_interval_seconds", 1.0, "DESKPAL_SCHEDULING_POLL_INTERVAL_SECONDS")
     if poll_interval > 60:
         raise ConfigError("scheduling.poll_interval_seconds must not exceed 60")
+    memory_mode = string("memory", "mode", "explicit_only", "DESKPAL_MEMORY_MODE")
+    embedding_provider = string("memory", "embedding_provider", "disabled", "DESKPAL_EMBEDDING_PROVIDER")
+    if memory_mode not in {"explicit_only", "candidate_review", "paused"}:
+        raise ConfigError("memory.mode must be explicit_only, candidate_review, or paused")
+    if embedding_provider not in {"disabled", "fastembed"}:
+        raise ConfigError("memory.embedding_provider must be disabled or fastembed")
+    max_context_bytes = positive_number(
+        "memory", "max_context_bytes", 8000, "DESKPAL_MEMORY_MAX_CONTEXT_BYTES", True)
+    max_candidates = positive_number("memory", "max_candidates", 5, "DESKPAL_MEMORY_MAX_CANDIDATES", True)
+    threshold = positive_number("memory", "semantic_threshold", 0.55, "DESKPAL_MEMORY_SEMANTIC_THRESHOLD")
+    evaluation_timeout = positive_number("memory", "evaluation_timeout_seconds", 15.0,
+                                         "DESKPAL_MEMORY_EVALUATION_TIMEOUT_SECONDS")
+    evaluation_tokens = positive_number("memory", "evaluation_max_output_tokens", 2048,
+                                        "DESKPAL_MEMORY_EVALUATION_MAX_OUTPUT_TOKENS", True)
+    if max_context_bytes > 65536 or max_candidates > 20 or threshold > 1:
+        raise ConfigError("Memory limits must be <=65536 bytes, <=20 candidates, and threshold <=1")
+    if evaluation_timeout > 60 or evaluation_tokens > 8192:
+        raise ConfigError("Memory evaluation must use <=60 seconds and <=8192 output tokens")
     return AppConfig(
         llm=LLMConfig(provider, model, base_url, api_key_env,
                       positive_number("llm", "timeout_seconds", 30.0, "DESKPAL_LLM_TIMEOUT_SECONDS"), api_key),
@@ -167,9 +205,12 @@ def load_config(path: str | Path | None = None, *, environ: Mapping[str, str] | 
         scheduling=SchedulingConfig(poll_interval),
         screenshot=ScreenshotConfig(positive_number(
             "screenshot", "max_pixels", 16_000_000, "DESKPAL_SCREENSHOT_MAX_PIXELS", True)),
+        memory=MemoryConfig(memory_mode, embedding_provider,
+                            directory("memory", "model_cache_dir", "data/models/fastembed", "DESKPAL_MODEL_CACHE_DIR"),
+                            max_context_bytes, max_candidates, threshold, evaluation_timeout, evaluation_tokens),
     )
 
 
 __all__ = ["AppConfig", "LLMConfig", "SandboxConfig", "StorageConfig", "AgentConfig",
-           "SchedulingConfig", "ScreenshotConfig", "ConfigError", "load_config"]
+           "SchedulingConfig", "ScreenshotConfig", "MemoryConfig", "ConfigError", "load_config"]
 

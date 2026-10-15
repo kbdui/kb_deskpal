@@ -162,9 +162,12 @@ def validate_arguments(value: Any, schema: Mapping[str, Any], location: str = "a
             for index, item in enumerate(value):
                 validate_arguments(item, schema["items"], f"{location}[{index}]")
     if kind in {"number", "integer"}:
-        for key, valid in (("minimum", lambda bound: value >= bound),
-                           ("maximum", lambda bound: value <= bound),
-                           ("exclusiveMinimum", lambda bound: value > bound),
-                           ("exclusiveMaximum", lambda bound: value < bound)):
-            if key in schema and not valid(schema[key]):
+        for key in ("minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum"):
+            if key not in schema:
+                continue
+            bound = schema[key]
+            valid = ((key == "minimum" and value >= bound) or (key == "maximum" and value <= bound)
+                     or (key == "exclusiveMinimum" and value > bound)
+                     or (key == "exclusiveMaximum" and value < bound))
+            if not valid:
                 raise ArgumentError(f"{location} is outside the allowed numeric range")

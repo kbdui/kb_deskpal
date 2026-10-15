@@ -40,7 +40,8 @@ def test_module_cli_acceptance_and_utf8_json_result(run_cli):
     assert completed.returncode == 0, completed.stderr
     result = json.loads(completed.stdout)
     assert set(result) == {"task_id", "status", "response", "tool_results", "required_authorizations", "error",
-                           "required_high_risk_authorizations", "authorization_requests", "planned_calls"}
+                           "required_high_risk_authorizations", "authorization_requests", "planned_calls",
+                           "warnings", "memory_effects"}
     assert result["status"] == "Completed"
     assert result["tool_results"][0]["output"] == "离线演示任务已执行"
     assert "离线演示" in result["response"]
@@ -250,3 +251,92 @@ def test_interactive_cancel_removes_pending_plan_without_write(tmp_path, monkeyp
     assert not (tmp_path / "workspace" / "cancelled.txt").exists()
     assert "Task cancelled" in "".join(errors)
     assert "Unknown pending task" in "".join(errors)
+
+
+def test_memory_cli_local_remember_profile_cas_correct_export_and_forget(run_cli):
+    remembered = run_cli("--memory", "remember", "--content", "请用中文回答", "--local-only", "--json")
+    assert remembered.returncode == 0, remembered.stderr
+    item = json.loads(remembered.stdout)
+    assert item["status"] == "accepted" and item["source"]["use_policy"] == "local_only"
+    listed = run_cli("--memory", "list", "--status", "accepted", "--json")
+    assert listed.returncode == 0, listed.stderr
+    assert [record["id"] for record in json.loads(listed.stdout)] == [item["id"]]
+    profile = run_cli("--memory", "profile", "--json")
+    assert profile.returncode == 0 and json.loads(profile.stdout)[0]["value"] == "zh"
+    corrected = run_cli("--memory", "correct", "--memory-id", item["id"], "--revision", str(item["revision"]),
+                        "--content", "请用英文回答", "--json")
+    assert corrected.returncode == 0, corrected.stderr
+    current = json.loads(corrected.stdout)
+    assert current["id"] != item["id"] and current["supersedes"] == item["id"]
+    assert current["status"] == "accepted" and current["source"]["use_policy"] == "local_only"
+    stale = run_cli("--memory", "forget", "--memory-id", item["id"], "--revision", str(item["revision"]))
+    assert stale.returncode == 1
+    exported = run_cli("--memory", "export", "--json")
+    assert exported.returncode == 0
+    assert any(record["id"] == current["id"] and record["draft"]["value"] == "en"
+               for record in json.loads(exported.stdout)["items"])
+    forgotten = run_cli("--memory", "forget", "--memory-id", current["id"], "--revision", str(current["revision"]))
+    assert forgotten.returncode == 0, forgotten.stderr
+    assert "historical execution logs" in json.loads(forgotten.stdout)["retained"]
+    final = run_cli("--memory", "export", "--history", "--json")
+    assert final.returncode == 0
+    assert "请用英文回答" not in final.stdout
+    old_records = [record for record in json.loads(final.stdout)["items"] if record["id"] == item["id"]]
+    assert old_records and all(record["status"] in {"accepted", "superseded"} for record in old_records)
+    assert json.loads(run_cli("--memory", "profile", "--json").stdout) == []
+
+
+@pytest.mark.parametrize("arguments", [
+    ("--memory", "remember"), ("--memory", "forget", "--memory-id", "fake", "--revision", "0"),
+    ("--content", "orphan"), ("--memory", "list", "--request", "echo forbidden"),
+    ("--memory", "list", "--local-only"),
+])
+def test_memory_cli_invalid_arguments_fail_before_storage_io(run_cli, tmp_path, arguments):
+    result = run_cli(*arguments)
+    assert result.returncode == 2
+    assert not (tmp_path / "workspace").exists()
+    assert not (tmp_path / "data").exists()
+
+
+@pytest.mark.parametrize("action", ["correct", "forget"])
+def test_interactive_memory_change_rejects_stale_confirmation_and_keeps_loop_usable(tmp_path, monkeypatch, capsys, action):
+    _interactive_environment(tmp_path, monkeypatch)
+    outputs, errors = [], []
+    step = 0
+    memory_item = None
+    waiting_id = None
+
+    def command(prompt):
+        nonlocal step, memory_item, waiting_id
+        captured = capsys.readouterr()
+        errors.append(captured.err)
+        if captured.out.strip():
+            outputs.append(json.loads(captured.out))
+        step += 1
+        if step == 1:
+            return "/remember 我喜欢茶"
+        if step == 2:
+            memory_item = outputs[-1]
+            return "write note.txt 茶"
+        if step == 3:
+            waiting = outputs[-1]
+            assert waiting["status"] == "Waiting" and not waiting["tool_results"]
+            assert not (tmp_path / "workspace" / "note.txt").exists()
+            waiting_id = waiting["task_id"]
+            suffix = " 我喜欢咖啡" if action == "correct" else ""
+            return f"/{action} {memory_item['id']} {memory_item['revision']}{suffix}"
+        if step == 4:
+            return f"/confirm {waiting_id}"
+        if step == 5:
+            assert not (tmp_path / "workspace" / "note.txt").exists()
+            return "echo 新请求继续可用"
+        return "/quit"
+
+    monkeypatch.setattr("builtins.input", command)
+    assert main(["--json"]) == 0
+    assert "Unknown pending task" in "".join(errors)
+    assert outputs[-1]["status"] == "Completed"
+    assert outputs[-1]["tool_results"][0]["output"] == "新请求继续可用"
+    assert not (tmp_path / "workspace" / "note.txt").exists()
+    entries = [json.loads(line) for line in (tmp_path / "data" / "execution.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert all(entry["data"].get("tool_name") != "write_text" for entry in entries if entry["event"] == "tool_started")

@@ -1,5 +1,7 @@
 # 集成、实施顺序与验收
 
+实现映射更新（2026-10-15）：下文为长期集成与验收建议，M/P/E 编号不是当前测试完成清单。0.3.0 的真实入口为 AgentCore.memory_command、MemoryCoordinator、MemoryDraft/Item/ProfileEntry/RetrievalBundle；实际 [接口](../../versions/v0.3/interfaces.md)、[范围](../../versions/v0.3/delivery.md)、[证据](../../versions/v0.3/test-report.md)覆盖有限记忆阶段。WorkingContext、跨事件派生总结、完整隐身、导入、Persona/Affect/Presentation、Goal/UI 不在交付范围，不能由提案图或伪代码推断实现。
+
 状态：2026-10-14 设计提案；以下为拟议契约与通过条件，**不是测试结果**。本轮未修改 Python 代码、未安装依赖、未运行真实模型或迁移用户库。
 
 ## 1. 模块边界与接口方向

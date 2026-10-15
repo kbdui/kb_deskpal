@@ -112,3 +112,11 @@ class InMemoryTaskManager:
     def list_tasks(self) -> tuple[Task, ...]:
         with self._lock:
             return tuple(_snapshot(task) for task in self._tasks.values())
+
+    def scrub(self, task_id: str) -> Task:
+        """Erase local copied content without pretending to erase historical logs."""
+        with self._lock:
+            current = self._tasks[task_id]
+            cleared = replace(current, request="[forgotten]", result=None, error=None)
+            self._tasks[task_id] = cleared
+            return _snapshot(cleared)

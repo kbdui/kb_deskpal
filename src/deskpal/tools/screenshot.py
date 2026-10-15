@@ -48,7 +48,10 @@ class MSSScreenshotBackend:
             result = []
             for screen in session.monitors[1:]:
                 def value(name: str) -> int:
-                    return screen[name] if isinstance(screen, Mapping) else getattr(screen, name)
+                    result: object = screen[name] if isinstance(screen, Mapping) else getattr(screen, name)
+                    if type(result) is not int:
+                        raise ScreenshotUnavailable("Screenshot monitor metadata must contain integers")
+                    return result
                 result.append(Monitor(value("left"), value("top"), value("width"), value("height")))
             return tuple(result)
 
@@ -58,7 +61,10 @@ class MSSScreenshotBackend:
             image = session.grab({"left": region.left, "top": region.top,
                                   "width": region.width, "height": region.height})
             # With output omitted, MSS returns PNG bytes without creating a file.
-            return encoding.to_png(image.rgb, image.size)
+            png: object = encoding.to_png(image.rgb, image.size)
+            if not isinstance(png, bytes):
+                raise ScreenshotUnavailable("Screenshot encoder did not return PNG bytes")
+            return png
 
 
 class ScreenshotCaptureTool:

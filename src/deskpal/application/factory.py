@@ -7,7 +7,12 @@ from deskpal.config import AppConfig, ConfigError, load_config
 from deskpal.execution_log import JsonlExecutionLog
 from deskpal.llm.ports import LLMProvider
 from deskpal.llm.providers import OfflineLLMProvider, OpenAILLMProvider
-from deskpal.memory.manager import SQLiteMemoryManager
+from deskpal.memory.contracts import EmbeddingProvider, MemoryEvaluator
+from deskpal.memory.repository import SQLiteMemoryRepository
+from deskpal.memory.coordinator import MemoryCoordinator
+from deskpal.memory.retrieval import MemoryRetriever
+from deskpal.memory.embedding import FastEmbedProvider
+from deskpal.memory.evaluation import LLMMemoryEvaluator
 from deskpal.planner.llm_planner import LLMPlanner
 from deskpal.planner.ports import Planner
 from deskpal.scheduling import SchedulingService
@@ -22,7 +27,9 @@ from deskpal.tools.screenshot import ScreenshotBackend, ScreenshotCaptureTool
 
 
 def create_agent(config: AppConfig | None = None, *, planner: Planner | None = None,
-                 screenshot_backend: ScreenshotBackend | None = None) -> AgentCore:
+                 screenshot_backend: ScreenshotBackend | None = None,
+                 embedding: EmbeddingProvider | None = None,
+                 memory_evaluator: MemoryEvaluator | None = None) -> AgentCore:
     settings = load_config() if config is None else config
     if not isinstance(settings, AppConfig):
         raise ConfigError("config must be an AppConfig")
@@ -40,8 +47,31 @@ def create_agent(config: AppConfig | None = None, *, planner: Planner | None = N
     sandbox.workspace_dir.mkdir(parents=True, exist_ok=True)
     execution_log = JsonlExecutionLog(settings.storage.data_dir / "execution.jsonl")
     with ExitStack() as resources:
-        memory = SQLiteMemoryManager(settings.storage.data_dir / "memory.sqlite3")
-        resources.callback(memory.close)
+        repository = SQLiteMemoryRepository(settings.storage.data_dir / "memory.sqlite3")
+        resources.callback(repository.close)
+        startup_warnings: tuple[str, ...] = ()
+        selected_embedding = embedding
+        if selected_embedding is None and settings.memory.embedding_provider == "fastembed":
+            try:
+                selected_embedding = FastEmbedProvider(cache_dir=settings.memory.model_cache_dir)
+                resources.callback(selected_embedding.close)
+            except Exception:
+                startup_warnings = ("Semantic model unavailable; using lexical retrieval (no automatic download)",)
+        retriever = MemoryRetriever(repository, embedding=selected_embedding,
+                                   cloud=settings.llm.provider != "offline",
+                                   max_bytes=settings.memory.max_context_bytes,
+                                   semantic_threshold=settings.memory.semantic_threshold,
+                                   startup_warnings=startup_warnings)
+        evaluator = memory_evaluator
+        if evaluator is None and settings.memory.mode == "candidate_review":
+            evaluation_llm: LLMProvider = llm
+            if settings.llm.provider == "openai":
+                evaluation_llm = OpenAILLMProvider(settings.llm,
+                    timeout_seconds=settings.memory.evaluation_timeout_seconds,
+                    max_output_tokens=settings.memory.evaluation_max_output_tokens)
+            evaluator = LLMMemoryEvaluator(evaluation_llm, max_candidates=settings.memory.max_candidates)
+        memory = MemoryCoordinator(repository, retriever=retriever, evaluator=evaluator,
+                                   mode=settings.memory.mode, cloud=settings.llm.provider != "offline")
         scheduling = SchedulingService(settings.storage.data_dir / "scheduling.sqlite3",
                                        execution_log=execution_log,
                                        poll_interval=settings.scheduling.poll_interval_seconds)
@@ -60,7 +90,7 @@ def create_agent(config: AppConfig | None = None, *, planner: Planner | None = N
         agent = AgentCore(llm=llm, planner=selected_planner, tasks=InMemoryTaskManager(), memory=memory,
                          tools=tools, workspace_dir=sandbox.workspace_dir,
                          max_tool_steps=settings.agent.max_tool_steps, execution_log=execution_log,
-                         on_close=lambda: owned.close())
+                         on_close=lambda: owned.close(), memory_runtime=memory)
         # Transfer ownership only after every constructor/start has succeeded.
         owned = resources.pop_all()
         return agent

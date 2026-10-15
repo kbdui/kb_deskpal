@@ -1,5 +1,18 @@
 # 记忆、人格与情绪机制设计
 
+状态更新（2026-10-15）：**本文是基于 V0.2 的长期设计提案；部分记忆机制已在 0.3.0 实现，其他机制仍未实现**。实际契约见 [V0.3 接口](../../versions/v0.3/interfaces.md)、[交付](../../versions/v0.3/delivery.md)与[验证](../../versions/v0.3/test-report.md)。下文“基于当前实现”的表格是 2026-10-14 V0.2 快照，不描述当前源码。
+
+| 提案机制 | V0.3 实际对应 | 仍属未来设计 |
+| --- | --- | --- |
+| 来源化记忆 | MemorySource/Draft/Item、schema v2、legacy 隔离、CAS 审核与更正 | 完整来源 span/派生依赖 DAG、跨事件总结 |
+| 检索/时效/遗忘 | global/local owner 资格过滤、词法+真实 CPU 语义、as_of、衰减排序、七天候选 TTL、共享来源闭包删除 | 长文分块、多语言/大规模索引、accepted 自动遗忘策略 |
+| UserProfile | preferred_name/reply_language/verbosity 三项明确偏好投影 | 完整关系画像、自动推断个性、RelationshipProfile |
+| 请求上下文 | 单次请求有界证据 bundle 与 revision/epoch、Waiting 依赖失效 | 多轮 WorkingContext |
+| 隐私/管理 | local_only 出云过滤、CLI 导出/审核/更正/删除、关联 Task 擦除 | 全链路 incognito、importer、历史日志/备份擦除 |
+| 人格/关系/情绪/表现 | 权限隔离作为约束保留 | Persona/Affect/Relationship Engine、Presentation DTO、UI/Live2D |
+
+accepted 不等于客观真实；语义分数不等于真实性。下文总体设计图包含未来节点，不能据此推断都已实例化。
+
 状态：**架构提案，未实现、未冻结 API、未完成效果验证**。日期：2026-10-14。适用基线：V0.2。本文只规划后续机制，不改变当前运行行为。
 
 ## 设计结论

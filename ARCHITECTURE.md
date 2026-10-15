@@ -1,6 +1,6 @@
-# Deskpal V0.2 后端架构
+# Deskpal V0.3 后端架构
 
-两份 `doc/` 交接文档描述长期愿景。当前交付 Python 3.11+ 本地后端：聊天、受控工具调用、任务、记忆、日志，以及 Calendar/Timer 持久化调度、Document 操作与授权截图。Qt/Live2D、人格、情绪、连续环境监控、第三方插件、向量数据库、本地模型和完整 OS 沙箱不在当前实现范围。具体变更契约见 [V0.2 接口](docs/versions/v0.2/interfaces.md)。
+两份 `doc/` 交接文档描述长期愿景。当前交付 Python 3.11+ 本地后端：聊天、受控工具调用、任务、记忆、日志，以及 Calendar/Timer 持久化调度、Document 操作与授权截图。Qt/Live2D、人格、情绪、连续环境监控、第三方插件、独立向量数据库、聊天本地模型和完整 OS 沙箱不在当前实现范围。V0.3 已接入可选本地 embedding、来源化记忆和三字段用户画像，当前版本 0.3.0，最终发布门槛见 [V0.3 测试报告](docs/versions/v0.3/test-report.md)。记忆契约见 [V0.3 接口](docs/versions/v0.3/interfaces.md)，工具与调度契约见 [V0.2 接口](docs/versions/v0.2/interfaces.md)。
 
 ## 依赖与调用方向
 
@@ -9,7 +9,13 @@ flowchart TD
   Application[Application 组装与命令行] --> Agent[Agent Core]
   Agent --> Planner
   Agent --> Tasks[Task Manager]
-  Agent --> Memory[Memory Manager]
+  Agent --> Memory[Memory Coordinator]
+  Memory --> Repository[SQLiteMemoryRepository schema v2]
+  Memory --> Retriever[MemoryRetriever]
+  Memory --> Evaluator[MemoryEvaluator 候选]
+  Retriever --> Repository
+  Retriever --> Embedding[EmbeddingProvider 可选 CPU cache-only]
+  Evaluator --> LLM
   Agent --> LLM[LLM Provider]
   Planner --> LLM
   Agent --> Manager[Tool Manager]
@@ -26,7 +32,7 @@ flowchart TD
 
 `models.py` 保存跨模块数据，`ports.py` 保存同步 Protocol；具体业务实现放在单独的 `providers.py`、`manager.py`、`core.py` 等文件。DTO 和接口仅依赖标准库及其他模块的 DTO，业务模块不能反向引用 Core/Application。Protocol 与具体类名称不同，避免导入歧义。当前契约见 [V0.2 接口](docs/versions/v0.2/interfaces.md)，未改变的基础接口可追溯到 [V0.1 契约](docs/versions/v0.1/interfaces.md)。
 
-Application 的 `create_agent(config=None, *, planner=None, screenshot_backend=None)` 是实际组装入口：选择 Provider，组装 Planner、WorkspaceSandbox、19 个工具、任务、记忆、调度服务与 JSONL 日志。默认 LLMPlanner 负责模型规划；CLI 明确 `--tool` 时注入 DirectToolPlanner，仍经过 Core 和全部安全入口。数据为 `memory.sqlite3`、`scheduling.sqlite3`、`execution.jsonl` 与配置工作区；Agent Task 与 Waiting 缓存在进程内，日程、计时器、事件、记忆和审计持久化。ExitStack 在组装失败和 Core.close 时尝试释放所有拥有的资源，先关闭调度再关闭记忆；close 即使抛出清理错误，Core 也不再接受请求。
+Application 的 `create_agent(config=None, *, planner=None, screenshot_backend=None, embedding=None, memory_evaluator=None)` 是实际组装入口：选择 Provider，组装 Planner、WorkspaceSandbox、19 个工具、任务、记忆、调度服务与 JSONL 日志。默认 LLMPlanner 负责模型规划；CLI 明确 `--tool` 时注入 DirectToolPlanner，仍经过 Core 和全部安全入口。数据为 `memory.sqlite3`、`scheduling.sqlite3`、`execution.jsonl` 与配置工作区；Agent Task 与 Waiting 缓存在进程内，日程、计时器、事件、记忆和审计持久化。ExitStack 在组装失败和 Core.close 时尝试释放所有拥有的资源，先关闭调度再关闭记忆；close 即使抛出清理错误，Core 也不再接受请求。
 
 工厂返回的 AgentCore 可作为 context manager；`close()` 通过明确注入的回调关闭工厂拥有的 SQLite 连接。直接构造 AgentCore 不自动关闭外部传入依赖，资源所有权由调用方决定。一个 Core 同时只允许一个同步请求，拒绝并发或重入；close 拒绝运行中调用，关闭后不能继续 run。
 
@@ -40,7 +46,7 @@ Application 的 `create_agent(config=None, *, planner=None, screenshot_backend=N
 | `src/deskpal/tools` | ToolSpec、ToolCall、ToolContext、ToolResult、Tool/ToolManager；注册、校验、派发内置工具 |
 | `src/deskpal/sandbox` | Sandbox 接口和权限/路径异常；可信工具的权限与工作区路径边界 |
 | `src/deskpal/tasks` | Task、TaskStatus、TaskManager；任务创建、状态转换、读取与取消 |
-| `src/deskpal/memory` | MemoryRecord、MemoryKind、MemoryManager；SQLite 基础记忆存取、文字搜索与删除 |
+| `src/deskpal/memory` | 来源/断言/修订 DTO、MemoryCoordinator、schema v2 Repository、候选 Evaluator、Profile 投影、词法/语义 Retriever 和可选 FastEmbed adapter |
 | `src/deskpal/scheduling` | SchedulingManager、Clock、Calendar/Timer/Event DTO；独立 SQLite 服务、可唤醒调度线程及轮询事件 |
 | `src/deskpal/config` | TOML/env 配置、启动校验；配置读取不创建目录，不发送网络请求 |
 | `src/deskpal/execution_log` | ExecutionLog、NullExecutionLog、JsonlExecutionLog；UTC JSONL 审计与凭据键脱敏 |
@@ -50,16 +56,20 @@ Python 使用 `src` 布局，包名 `deskpal`。HTTP、TOML、SQLite、日志使
 
 ## 单次请求流程
 
-1. Observe：创建 Created 任务并记录请求，读取相关基础记忆。
+1. Observe：创建 Created 任务；显式“记住”先保存并返回，不调用 LLM。其他请求检索合资格完整证据及 revision/epoch，允许空结果，云模式过滤 local_only。
 2. Think / Plan：进入 Planning；Planner 调用 LLM，生成回复和有序工具计划。
 3. Preflight：检查计划数量、已注册工具及每个步骤所需权限。任何步骤缺授权则进入 Waiting，返回所需工具名、逐项参数与风险，以及全计划快照；此请求未执行任何工具。路径/schema 验证在授权执行入口进行，权限预检不承诺提前验证全部参数。
 4. Act：进入 Running，按顺序通过 Tool Manager → Sandbox → Tool.execute 执行。一个步骤失败立即结束，不继续执行后续步骤，不承诺事务回滚。
 5. Reflect：汇总工具结果，必要时发起独立的新 LLM 请求，把原始目标与显式工具结果作为普通文本生成用户反馈；不重放首轮 function_call/function_call_output 历史。V0.1 不执行总结阶段新提出的工具调用；计划只执行一轮并受 `max_tool_steps` 限制。
-6. Memory：保存经过选择的请求/结果摘要或显式用户事实；无需复制全部对话，不保存模型内部推理。成功进入 Completed，错误进入 Failed。
+6. Memory：工具完成后可选保存有界 observed_event；candidate_review 模式独立提取候选。辅助模型/保存失败返回 warning，保留已完成工具结果；显式保存失败仍明确失败。普通聊天默认不保存，不保存模型内部推理。
 
-实际 V0.1 记忆选择规则：`记住：内容`、`记住:内容` 或 `记住 内容` 的内容保存为 semantic（最多 2000 字符）；成功工具任务保存 bounded episodic 请求/结果文本摘要（最多 2000 字符），普通聊天不自动入库。Observe 先文字搜索当前请求，未匹配时取最近五条作背景。这里是确定规则，不是已实现 LLM Memory Evaluator、向量检索或自动用户画像。
+V0.3 工厂使用 MemoryCoordinator，不再运行旧 V0.1 的最近五条 fallback。显式事实/工具事件保留来源原文、用途策略与时间；candidate_review 才发起独立无工具评估，主机严格校验 quote/schema/分数后保存候选。审核/更正使用 expected_revision，默认候选七天 TTL。当前画像仅 preferred_name、reply_language、verbosity，必须来自明确已确认用户偏好。
 
-V0.2 的 `confirm_task(task_id, authorized_tools=(), high_risk_authorized_tools=())` 确认同一 Core 内保存的 Waiting 原计划，不重新规划、不创建任务。原授权与新增授权只在此任务内累积，不足授权仍 Waiting；足够授权进入 Running。返回 DTO/Task 快照不共享私有参数，取消/终态/关闭清理缓存。重启无法确认内存旧计划。兼容的重新 run 仍创建新任务并重新规划。Agent 不执行任意后台工具；调度服务只生成可查询的本地到期事件。
+SQLite v1 先备份为 `.v1.bak` 再事务迁移 v2，旧数据 legacy 隔离。更正/删除更新 epoch 并失效旧向量与画像；忘记保守删除共享来源闭包及历史，Core 清理关联 Task。历史日志、迁移备份、导出和云端副本不保证擦除。检索只使用 local owner/global scope、当前有效 accepted，并在外发/执行边界验证依赖；变动或过期撤销 Waiting 私有计划与授权。
+
+检索融合词法/语义名次，重要度和时间衰减用于相关性平分；完整证据最多五条/默认 8000 UTF-8 bytes。FastEmbed 仅在显式配置且缓存存在时加载，manifest 记录资产/维度/预处理。缺模型/坏索引退化词法并警告，不联网补模型；超 512 tokens 完整断言拒绝语义编码，不静默截断。as_of 历史查询仍受来源、用途、时效和删除过滤。详见 [V0.3 接口](docs/versions/v0.3/interfaces.md)。
+
+V0.2 的 `confirm_task(task_id, authorized_tools=(), high_risk_authorized_tools=())` 确认同一 Core 内保存的 Waiting 原计划，不重新规划、不创建任务。原授权与新增授权只在此任务内累积，不足授权仍 Waiting；足够授权进入 Running。返回 DTO/Task 快照不共享私有参数，取消/终态/关闭清理缓存。记忆依赖被更正、删除或过期时旧计划也不可确认；重启无法确认内存旧计划。兼容的重新 run 仍创建新任务并重新规划。Agent 不执行任意后台工具；调度服务只生成可查询的本地到期事件。
 
 ## 工具与安全边界
 
@@ -89,7 +99,7 @@ V0.1 支持首轮规划提出工具调用，并通过独立 Reflect 请求总结
 
 ## 实现顺序与验证
 
-V0.1 基础实现顺序为 LLM → Tools/Sandbox → Tasks → Memory → Planner/Core/Application；V0.2 使用架构、服务、文件/截图与测试子 Agent 分工，由主 Agent 统一权限、接口、Application 装配和交付。计划见 [V0.2 开发计划](docs/versions/v0.2/development-plan.md)，实测结果见 [V0.2 测试报告](docs/versions/v0.2/test-report.md)。
+V0.1 基础实现顺序为 LLM → Tools/Sandbox → Tasks → Memory → Planner/Core/Application；V0.2 使用架构、服务、文件/截图与测试子 Agent 分工，由主 Agent 统一权限、接口、Application 装配和交付。计划见 [V0.2 开发计划](docs/versions/v0.2/development-plan.md)，V0.2 实测见 [历史报告](docs/versions/v0.2/test-report.md)；V0.3 采用来源/仓储、候选/画像、检索/模型、Core/验收分工，实际交付与最终证据见 [交付说明](docs/versions/v0.3/delivery.md)和[测试报告](docs/versions/v0.3/test-report.md)。
 
 模块测试关注故障与边界：API 请求/响应与网络失败、工具权限与文件逃逸、任务非法状态、SQLite 重开持久化、Core Waiting 无副作用、工具失败停止、日志脱敏。最终离线端到端演示应覆盖基础聊天、工具运行、授权写文件、查询任务与记忆，并明确 API 模式的配置方法。UI 未来替换命令行入口时不更改上述模块契约。
 

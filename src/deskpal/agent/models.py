@@ -26,4 +26,6 @@ class AgentResult:
     required_high_risk_authorizations: tuple[str, ...] = ()
     authorization_requests: tuple[AuthorizationRequest, ...] = ()
     planned_calls: tuple[ToolCall, ...] = ()
+    warnings: tuple[str, ...] = ()
+    memory_effects: tuple[str, ...] = ()
 

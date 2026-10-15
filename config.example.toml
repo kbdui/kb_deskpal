@@ -23,3 +23,15 @@ poll_interval_seconds = 1.0
 [screenshot]
 max_pixels = 16000000
 
+[memory]
+# Ordinary chat is not persisted by default. candidate_review opts into extraction.
+mode = "explicit_only"
+# Optional CPU model: install requirements-embedding.txt and download/cache explicitly.
+embedding_provider = "disabled"
+model_cache_dir = "data/models/fastembed"
+max_context_bytes = 8000
+max_candidates = 5
+semantic_threshold = 0.55
+evaluation_timeout_seconds = 15.0
+evaluation_max_output_tokens = 2048
+
