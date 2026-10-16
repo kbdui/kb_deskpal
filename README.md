@@ -1,193 +1,107 @@
-# Personal AI Agent Desktop Companion — V0.3
+# Personal AI Agent Desktop Companion — V0.4
 
-Windows 个人智能 Agent 桌宠项目的本地后端。当前代码版本为 **0.3.0**：在 V0.2 工具与调度基础上接入来源/修订记忆、候选审核、最小用户画像和可选本地 CPU 语义检索。Python 3.11+；验证结果见 [V0.3 测试报告](docs/versions/v0.3/test-report.md)。
+Windows 个人智能 Agent 桌宠项目的本地后端。当前版本 **0.4.0**：持久目标、本地提议、任务队列、步骤账本和重启审查；保留 V0.3 来源化记忆、候选审核、三字段画像与可选 CPU 语义检索。Python 3.11+。
 
-当前入口是命令行；Live2D、Qt UI、人格、情绪和高级自主行为属于后续版本。
+当前入口为命令行；Qt/Live2D、人格情绪、后台云规划、完整多轮上下文属于后续版本。架构见 [ARCHITECTURE.md](ARCHITECTURE.md)，实际用法见 [V0.4 操作指南](docs/versions/v0.4/operations.md)和[接口](docs/versions/v0.4/interfaces.md)。
+
+V0.5 已完成开工前[环境与依赖评估](docs/planning/v0.5/environment-assessment.md)、[开发计划](docs/planning/v0.5/development-plan.md)及[验收边界](docs/planning/v0.5/acceptance-boundaries.md)：计划加入 Windows GUI、托盘和任务/记忆/目标交互，当前仍为 0.4.0，尚未安装 Qt 或实现界面。
 
 ## 安装与运行
 
-在仓库根目录执行：
-
 ```powershell
-python -m pip install -r requirements-dev.txt
-# 截图可选依赖；不影响其他工具：
-python -m pip install -r requirements-screenshot.txt
-deskpal --request "帮我执行一个任务"
-deskpal --request "echo 你好" --json
-deskpal --list-tools
+conda activate deskpal_env
+python -m pip install -r requirements-dev.txt -c constraints/windows-py312.txt
+python -m deskpal --request "帮我执行一个任务" --json
+python -m deskpal --list-tools
 ```
 
-依赖统一在 pyproject.toml 声明；requirements.txt 为基础入口，开发、截图、embedding 各有独立安装清单，详见 [依赖维护](docs/guides/dependencies.md)。可选 CPU embedding 通过 `python -m pip install -r requirements-embedding.txt -c constraints/windows-py312.txt` 安装；该约束是 Windows CPython 3.12 的 43 项观察版本，不是跨平台哈希锁。真实模型已在 Python 3.12 验证，运行时只加载已有缓存，见 [Embedding 指南](docs/guides/embedding-setup.md)。
+基础安装用 requirements.txt；截图和本地 embedding 分别用 requirements-screenshot.txt、requirements-embedding.txt。直接声明统一在 pyproject.toml，requirements 只引用分组；Windows 还会安装 tzdata。约束包含 Windows CPython 3.12 的 44 项观察版本，不是跨平台哈希锁。见 [依赖维护](docs/guides/dependencies.md)与 [Embedding 安装](docs/guides/embedding-setup.md)。
 
-也可使用 `python -m deskpal`。不安装项目时，在当前 PowerShell 中设置 `$env:PYTHONPATH = "src"`，再运行 `python -m deskpal --request "帮我执行一个任务"`。
+默认 Provider 是明确标识的离线演示，无需 key/网络；它用固定规则生成回复与工具计划，不具备真实模型的自然语言理解能力。也可用安装后的 deskpal 命令。
 
-默认 Provider 是明确标识的 `[离线演示]`，不需要密钥或网络。它采用固定规则演示普通回复和工具计划，不具有真实模型的自然语言理解能力。验收请求会创建任务、规划并实际执行 `echo` 工具，再返回结果。
+## 工具与确认
 
-## 基础工具与授权
-
-| 工具 | 离线演示输入 | 权限 |
-| --- | --- | --- |
-| echo | `echo 文本` | 自动 |
-| time | `time` | 自动 |
-| read_text | `read note.txt` | 自动，仅工作区 |
-| write_text | `write note.txt 文本` | 本次请求显式授权 |
+工厂注册 19 个工具：基础 echo/time/read_text/write_text、Calendar、Timer、Document 及授权截图。完整参数用 `--list-tools --json` 查看。路径仅限配置工作区，拒绝符号链接/Junction，不递归删除。截图依赖可选，PNG 不自动上传。
 
 ```powershell
-deskpal --request "write note.txt 你好"
-# Waiting，未执行工具；同意后重新提交为新任务：
-deskpal --request "write note.txt 你好" --authorize write_text
-deskpal --request "read note.txt"
+python -m deskpal --request "write note.txt 你好" --json
+# Waiting，零工具调用；退出后查看持久计划：
+python -m deskpal --workflow task --id TASK_ID
+# 用上一步真实 hash 确认原 Task：
+python -m deskpal --workflow confirm --id TASK_ID --plan-hash HASH --authorize write_text
+python -m deskpal --request "read note.txt" --json
 ```
 
-路径含空格时，离线命令中的路径使用双引号，例如 PowerShell 参数 `'read "my note.txt"'`。写入默认不覆盖；直接工具 API 可显式传入 `overwrite=True`。整个计划先检查授权，缺少任何授权时不会部分执行。
-
-一次请求的 CLI 退出码：Completed 为 0，Failed 为 1，Waiting 为 2。授权不跨请求保存，模型不能自行提升权限。
-
-## V0.2 工具与原计划确认
-
-工厂默认注册 19 个工具：4 个基础工具、5 个 Calendar 工具、4 个 Timer 工具、5 个 Document 工具及截图工具。全量 schema 可用 `--list-tools --json` 查看。
-
-| 功能 | 工具 | 权限 |
-| --- | --- | --- |
-| 日程 | calendar_create / calendar_update / calendar_delete | Level 1 |
-| 日程查询与提醒记录 | calendar_list / calendar_events | Level 0 |
-| 计时 | timer_create / timer_cancel | Level 1 |
-| 计时查询与到期记录 | timer_list / timer_events | Level 0 |
-| 文件检索与扩展名分类 | document_search / document_classify | Level 0 |
-| 单文件复制 | document_copy | Level 1 |
-| 单文件移动、删除 | document_move / document_delete | Level 2 |
-| 本地 PNG 截图 | screenshot_capture | Level 1 |
-
-`--tool` 使用确定的工具计划，也经过 Core、参数校验、权限、Sandbox 和日志。以下为 PowerShell 7 示例，不需要模型规划或真实 API：
+交互模式支持 /confirm TASK_ID、/confirm-high-risk TASK_ID、/cancel TASK_ID。Level 1 使用普通授权；移动/删除等 Level 2 需要独立高危授权，普通 --authorize 不能放行。单次请求也可明确预授权工具：
 
 ```powershell
-python -m deskpal --tool document_classify --json
+python -m deskpal --request "write another.txt 内容" --authorize write_text
 python -m deskpal --tool timer_create --arguments '{"duration_seconds":60,"label":"休息"}' --authorize timer_create --json
-python -m deskpal --tool timer_events --json
 ```
 
-单次命令退出会停止调度线程；运行中的计时器和日程保存在 `data/scheduling.sqlite3`。重开后的首次轮询补记漏到期事件，退出期间没有系统通知。events 工具仅查询持久化事件，不消费；Calendar 和 Timer 各保存自己的 `after_id` 游标。创建任务 Completed 只表示登记成功，不表示倒计时已结束。定时器到期不自动执行任意工具或 shell。
+同一进程同一 Plan 的授权可累积；重启清空普通/高危授权。恢复不会重放工具或自动补云。单次请求退出码 Completed=0、Failed/Uncertain=1、Waiting/NeedsReview=2（管理命令返回自身回执）。部分执行与未知步骤需人工复核，不能直接重跑原完整 Plan。
 
-交互模式可直接输入 `tool 工具名 JSON`。例如先运行 `python -m deskpal`，输入 `tool timer_create {"duration_seconds":60,"label":"休息"}`；系统展示具体 Waiting 计划与任务 ID，再输入 `/confirm 实际任务ID` 执行同一原计划。高风险操作使用 `/confirm-high-risk 实际任务ID`，取消使用 `/cancel 实际任务ID`。API 同样可用：
+## 目标、本地建议与恢复
 
-```python
-first = agent.run("写入 note.txt")
-confirmed = agent.confirm_task(first.task_id, authorized_tools=("write_text",))
+```powershell
+python -m deskpal --workflow goal-create --title "整理项目" --criteria "用户检查目录并明确确认"
+python -m deskpal --workflow goals
+python -m deskpal --workflow tasks --limit 100
+python -m deskpal --workflow proposals --state all
+python -m deskpal --workflow diagnostics
 ```
 
-确认不调用 Planner、不创建新任务，返回预览数据被修改也不能改变私有计划。移动/删除只接受 `high_risk_authorized_tools` 或单次 CLI 的 `--authorize-high-risk`；普通 `--authorize` 不能放行 Level 2。授权只在该任务内累积，不跨请求保存。关闭或重启后不能恢复内存 Waiting 计划；重新提交请求仍会创建新任务并重新规划。
+Goal/Milestone 由用户显式创建、关联日程或 Task，并用 revision 修改/完成。Task 成功只形成进展证据，不自动完成目标。新 Goal/来源绑定默认 local_only；配置云 key、接受建议均不扩大来源用途。
 
-文件只操作工作区内普通文件，不跟随符号链接/Junction，不递归删除。分类按扩展名，不读取内容或自动整理。复制/移动默认不覆盖；跨模块失败不承诺回滚。截图支持 1-based 物理屏幕和相对该屏幕的区域坐标，PNG 受文件字节与像素上限约束；只返回路径和尺寸，不自动上传图像。完整参数与时区规则见 [V0.2 接口](docs/versions/v0.2/interfaces.md)。
+主动默认关闭；显式启用 [proactive] enabled 后，仅按本地规则生成待查看 Proposal，不后台调用云、采屏或执行工具。首次开启从事件尾部开始，历史补读与来源库重建必须显式复核。每流每批最多 100 条、每轮最多 10 个新提议；TTL 从到期时间起算，静默只影响命令边界展示。
 
-## V0.3 记忆管理
+接受提议原子创建唯一 Task/Submission，随后仍检查来源用途和工具权限。在云模式中 local_only 意图会 NeedsReview；明确选择离线模式可本地处理。详细 Goal→绑定→提议→接受→用户完成证据示例见 [操作指南](docs/versions/v0.4/operations.md)。
 
-默认 `memory.mode = "explicit_only"`，普通聊天不自动入长期库。“记住：内容”在调用 LLM 之前保存；自动抽取须显式选择 `candidate_review`，结果仅为候选，需要 revision 审核。画像只支持 preferred_name、reply_language 和 verbosity。
+任务/计划/步骤持久化到 workflow.sqlite3。Queued、Planning、Waiting 重启后先 NeedsReview；没有 attempt 的任务可 resume/重新确认。部分完成只复核，剩余意图另建任务；Started 无可靠结果则 Uncertain，人工复核不授予重试资格。
+
+## 记忆与隐私
 
 ```powershell
 python -m deskpal --memory remember --content "叫我小明" --local-only
 python -m deskpal --memory list --history
 python -m deskpal --memory profile
-# 将 ID/REV 换成 list 输出的当前值；更正会返回新 ID
 python -m deskpal --memory correct --memory-id ID --revision 1 --content "叫我小林"
-python -m deskpal --memory forget --memory-id ID --revision 1
-python -m deskpal --memory export
+python -m deskpal --memory forget --memory-id ID --revision REV
 ```
 
-独立管理命令不调用模型、不需要云 key。`local_only` 不进入云检索；其他显式记忆默认可用于配置的云模型。忘记会清除共享来源关联的正文/历史/索引/画像和进程内关联 Task，已有日志、迁移备份、导出和外部副本仍可能保留。`paused` 只暂停自动记忆，不是完整隐身模式。依赖旧事实的 Waiting 计划在改动后失效，必须重新提交确认。详见 [V0.3 接口](docs/versions/v0.3/interfaces.md)。
+默认 explicit_only，普通聊天不自动入长期库；“记住：内容”在 LLM 前保存。candidate_review 须显式启用，候选仍须用户审核。画像仅 preferred_name、reply_language、verbosity。可选 cache-only FastEmbed 不自动下载模型；真实模型/检索历史证据见 [V0.3 报告](docs/versions/v0.3/test-report.md)。
 
-## 配置与 API 模式
+遗忘先持久阻断，再删除 Memory 与明确派生工作副本；失败保持 Pending，启动先续办，完成前不展示/派发相关内容。独立 Goal/Calendar 不按相似文字删除；已写历史日志、备份、导出与外部/云端副本有独立保留范围。生产 JSONL 仅元数据，outbox 失败可重投同 event ID，绝不重放工具。
 
-`config.example.toml` 给出所有配置项。可复制为本地 `config.toml` 后通过 `--config config.toml` 加载。优先级是进程环境变量 > 配置目录的 `.env` > TOML > 默认值；相对路径以配置文件所在目录为准，未指定文件时以当前目录为准。读取 `.env` 不改变全局环境，也不对值进行变量插值。
+## 配置与数据
 
-真实模型模式须明确指定可访问的模型，密钥可从进程环境变量或本地 `.env` 提供。`api_key_env` 是变量名称，不是密钥值。DeepSeek 示例 `config.toml`：
+`--config config.toml` 显式选择配置；优先级：进程环境变量 > 配置目录 .env > TOML > 默认值。相对路径以配置文件目录为准，未指定配置时以当前目录为准。.env 按字面解析且不修改全局环境；密钥禁止写 TOML 或 Git。
 
-```toml
-[llm]
-provider = "openai"
-model = "deepseek-flash"
-base_url = "https://api.deepseek.com"
-api_key_env = "DEEPSEEK_API_KEY"
-```
-
-将 `.env.example` 复制为 `.env`，仅在本地填写 `DEEPSEEK_API_KEY=` 后的值，然后运行：
-
-```powershell
-python -m deskpal --config config.toml --request "调用 time 工具查询当前 UTC 时间"
-```
-
-这里的 `openai` 表示兼容的 Responses 协议适配器，服务商由 `base_url` 决定。[DeepSeek 官方 Responses 支持](https://api-docs.deepseek.com/guides/responses_api/)
-
-OpenAI 服务也可直接使用进程环境变量：
-
-```powershell
-$env:DESKPAL_LLM_PROVIDER = "openai"
-$env:DESKPAL_LLM_MODEL = "<你账户可访问的模型名称>"
-$env:OPENAI_API_KEY = "<你的 API 密钥>"
-deskpal --request "查询当前时间"
-```
-
-适配器使用 [OpenAI Responses API 的工具调用协议](https://developers.openai.com/api/docs/guides/function-calling)，请求设置 `store: false`；Core 通过统一 `LLMProvider` 接口工作。默认 HTTP 传输拒绝重定向，服务地址须为 HTTPS，HTTP 仅允许本机回环。真实 API 模式会把请求、选中的记忆和必要结果发送给配置的服务。
-
-CLI 不会自动切换或授权工具。模型端点、超时、工作区、数据目录和计划步数见 [基础接口](docs/versions/v0.1/interfaces.md)，新增调度/截图配置见 [V0.2 接口](docs/versions/v0.2/interfaces.md)。密钥禁止写入 TOML，真实配置、环境文件、数据库和日志默认不进入 Git。
-
-## 结构与数据
+API 模式使用兼容 Responses 协议的 adapter，provider=openai，model/base_url/api_key_env 按实际服务配置，密钥填写本地 .env。请求、合资格记忆与必要工具结果会发给所配置服务；本地存储不等于本地模型推理。配置项见 [config.example.toml](config.example.toml)，历史协议范围见 [V0.3 接口](docs/versions/v0.3/interfaces.md)。
 
 ```text
 src/deskpal/
-  agent/          请求编排与生命周期
-  planner/        单轮有界工具计划
-  llm/            模型协议与 Provider
-  tasks/          七状态任务及隔离快照
-  memory/         来源/修订/候选/画像及本地检索
-  scheduling/     日程、计时与持久化到期事件
-  tools/          工具注册、校验与派发
-  sandbox/        可信工具权限和路径策略
-  config/         TOML 与环境配置
-  execution_log/  本地 JSONL 审计
-  application/    依赖装配和 CLI
-tests/            单元、接口与集成测试
-docs/             当前开发与验收文档
-doc/              原始设计和交接文档
+  application/   装配、实例锁、队列、恢复与 CLI
+  agent/         Core 请求编排
+  planner/ llm/  计划与模型接口
+  workflow/      持久任务/计划/步骤、依赖、outbox、删除工作单
+  goals/         Goal/Milestone/SourceBinding
+  proactive/     本地提议与可靠事件消费
+  tasks/ memory/ scheduling/ tools/ sandbox/ config/ execution_log/
+tests/
+docs/
+doc/             原始设计资料
 ```
 
-默认文件工具根目录为 `workspace/`，数据目录为 `data/`。记忆持久化到 SQLite，日志使用 JSONL；任务状态只保存在当前进程内，重启不会恢复运行中的任务。默认词法检索，可显式启用 cache-only FastEmbed；候选默认七天到期，accepted 事实不自动硬删。旧 v1 数据库先创建 `.v1.bak` 再迁移到 v2，legacy 不进入默认画像/检索。
+默认 data/ 内含 workflow.sqlite3、memory.sqlite3、scheduling.sqlite3、execution.jsonl；文件工具根为 workspace/。一个规范 data_dir 只允许一个生产实例。关闭超时会保留在用资源/锁，不强杀同步工具；程序退出期间无系统通知。
 
-## 验证与开发文档
+生产集成使用 `create_application`；`create_agent` 保留 V0.3 同步进程内任务契约，用于低层嵌入与兼容测试，不提供 V0.4 持久恢复保证。Git 提交由用户处理。
 
-全部文档入口见 [文档导航](docs/README.md)。当前交付见 [V0.3 接口](docs/versions/v0.3/interfaces.md)、[交付说明](docs/versions/v0.3/delivery.md)和[测试报告](docs/versions/v0.3/test-report.md)。`planning/v0.3` 保留实施前目标与实际范围映射，不能代替测试证据。
-
-下一阶段见 [V0.4 环境评估](docs/planning/v0.4/environment-assessment.md)、[开发计划](docs/planning/v0.4/development-plan.md)与[验收边界](docs/planning/v0.4/acceptance-boundaries.md)：目标、本地提议、持久任务及审查恢复，尚未实现。
+## 开发与验证
 
 ```powershell
-python -m pytest -q -rs
-python -m mypy src --strict
+python -m pytest -q
+python -m mypy --strict src scripts/check_memory_api.py scripts/benchmark_memory.py scripts/benchmark_workflow.py
 ```
 
-默认测试使用临时数据、离线 Provider 和模拟 HTTP，不访问真实密钥或网络。V0.3 在 Python 3.11/3.12 各815 passed/4 skipped，strict 56 sources通过；真实CPU模型、中文效果、5,000条warm p95=1.7971秒及有限预算DeepSeek流程另行验收，详见 [V0.3 测试报告](docs/versions/v0.3/test-report.md)。V0.2 历史验收见 [V0.2 测试报告](docs/versions/v0.2/test-report.md) 和 [V0.2 交付说明](docs/versions/v0.2/delivery.md)；V0.1 历史证据见 [原始测试报告](docs/versions/v0.1/test-report.md) 和 [补测报告](docs/versions/v0.1/followup-test-report.md)。
-
-以下旧协议真实 API 测试须显式启用，最多 3 次请求，每次限制 128 个输出 token 并关闭推理。仅用于测试进程加载 `.env`：
-
-```powershell
-$env:DESKPAL_RUN_LIVE_API_TESTS = "1"
-$env:DESKPAL_LLM_MODEL = "deepseek-flash"
-$env:DESKPAL_LLM_BASE_URL = "https://api.deepseek.com"
-python -c "from dotenv import load_dotenv; load_dotenv(override=False, interpolate=False); import pytest; raise SystemExit(pytest.main(['tests/integration/test_live_api.py', '-q', '--tb=no']))"
-Remove-Item Env:DESKPAL_RUN_LIVE_API_TESTS
-```
-
-强制 echo 的真实用例验证协议与本地执行，不宣称完整自主规划或所有模型能力已获认证。V0.3 专用记忆验收使用 `scripts/check_memory_api.py --live --max-calls 3`，每次最多1024输出tokens，需要独立授权；本轮实际结果见版本报告，不由默认 pytest 隐式发起。
-
-- [总体架构](ARCHITECTURE.md)
-- [V0.1 开发计划与角色分工](docs/versions/v0.1/development-plan.md)
-- [V0.1 基础接口契约](docs/versions/v0.1/interfaces.md)
-- [扩展与开发约定](docs/guides/development.md)
-- [V0.1 测试计划](docs/versions/v0.1/test-plan.md)
-- [V0.2 环境准备评估](docs/versions/v0.2/environment-assessment.md)
-- [V0.2 开发计划](docs/versions/v0.2/development-plan.md)
-- [V0.2 接口契约](docs/versions/v0.2/interfaces.md)
-
-## 当前边界
-
-Sandbox 是可信内置工具的权限与路径策略，未提供操作系统进程隔离、强制超时或不可信插件防护。工具执行失败不会回滚已经完成的其他步骤。
-
-Reflect 使用独立请求总结显式工具结果，不继续执行总结阶段提出的新工具。推理模型完整的原生多轮工具续接尚未实现。真实 API 服务验证与离线测试分别报告。日志按凭据键脱敏，不记录内部推理；普通文本中的秘密仍应由调用方避免写入。
+离线测试使用合成数据，不调用真实 API；真实 API 需新的单独授权。V0.4 实际证据见 [测试报告](docs/versions/v0.4/test-report.md)，交付范围见 [交付说明](docs/versions/v0.4/delivery.md)。[文档导航](docs/README.md)、[分阶段路线](docs/planning/roadmap.md)、[长期记忆/人格/情绪设计](docs/planning/companion-model/README.md)区分已实现与未来规划。

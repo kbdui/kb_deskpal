@@ -3,6 +3,7 @@
 import argparse
 import json
 import sys
+from collections import deque
 from collections.abc import Sequence
 from dataclasses import asdict
 from dataclasses import is_dataclass
@@ -19,7 +20,9 @@ from deskpal.tasks.models import TaskStatus
 from deskpal.tools.models import ToolCall
 from deskpal.memory.contracts import MemoryStatus, UsePolicy, MemoryError
 
-from .factory import create_agent
+from .factory import create_application
+from .service import ApplicationService
+from . import workflow_cli
 
 
 def _utf8_streams() -> None:
@@ -54,10 +57,10 @@ def _display(result: AgentResult, *, json_output: bool) -> int:
             if result.required_high_risk_authorizations:
                 print("High-risk confirmation required for: " + ", ".join(result.required_high_risk_authorizations))
             print("Interactive confirmation: /confirm TASK_ID or /confirm-high-risk TASK_ID. "
-                  "Single-request mode ends this process; resubmitting creates a new plan.")
+                  "After restart use --workflow task --id TASK_ID to review the persisted plan hash.")
     if result.status == TaskStatus.COMPLETED:
         return 0
-    if result.status == TaskStatus.WAITING:
+    if result.status in {TaskStatus.WAITING, TaskStatus.NEEDS_REVIEW}:
         return 2
     return 1
 
@@ -77,9 +80,18 @@ def _show_memory(value: Any) -> None:
         value, default=_memory_default, ensure_ascii=False, allow_nan=False, indent=2))
 
 
+def _proposal_notice(agent: ApplicationService, shown: deque[str]) -> None:
+    """Display only at an input boundary, with a bounded session history."""
+    for item in agent.proposal_summary():
+        if item.id not in shown:
+            print(f"Proposal {item.id} (revision {item.revision}, {item.kind}); "
+                  "use --workflow proposals to review and accept explicitly.", file=sys.stderr)
+            shown.append(item.id)
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     _utf8_streams()
-    parser = argparse.ArgumentParser(description="Deskpal V0.3 local agent backend")
+    parser = argparse.ArgumentParser(description="Deskpal V0.4 persistent local agent backend")
     parser.add_argument("--config", metavar="PATH", help="TOML configuration file")
     request_mode = parser.add_mutually_exclusive_group()
     request_mode.add_argument("--request", metavar="TEXT", help="Run one request")
@@ -91,6 +103,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                         help="Explicitly authorize a Level 2 tool for this single request; repeatable")
     parser.add_argument("--json", action="store_true", help="Print complete results as JSON")
     request_mode.add_argument("--list-tools", action="store_true", help="List registered tools and exit")
+    request_mode.add_argument("--workflow", choices=workflow_cli.ACTIONS, help="Persistent work and explicit goal management")
+    workflow_cli.add_arguments(parser)
     request_mode.add_argument("--memory", choices=("remember", "list", "profile", "accept", "reject", "correct", "forget", "export", "rebuild-index"),
                               help="Explicit local memory management; never invokes the planner")
     parser.add_argument("--content", help="Content for memory remember/correct")
@@ -104,7 +118,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--history", action="store_true", help="Include retained revisions in memory list/export")
     parser.add_argument("--temporal", action="store_true", help="Correction is a time change, retaining the prior valid period")
     args = parser.parse_args(argv)
-    if (args.authorize or args.authorize_high_risk) and args.request is None and args.tool is None:
+    workflow_cli.validate(parser, args)
+    if (args.authorize or args.authorize_high_risk) and args.request is None and args.tool is None and args.workflow not in {"submit", "confirm"}:
         parser.error("Authorization flags require a single --request or --tool")
     if args.arguments is not None and args.tool is None:
         parser.error("--arguments requires --tool")
@@ -137,8 +152,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         except (ValueError, TypeError, RecursionError):
             parser.error("--arguments must be a finite JSON object with unique keys")
     try:
-        settings = load_config(args.config, provider_override="offline" if args.memory is not None else None)
-        with create_agent(settings, planner=direct_planner) as agent:
+        local_management = args.memory is not None or (args.workflow is not None and args.workflow not in workflow_cli.EXECUTION_ACTIONS)
+        settings = load_config(args.config, provider_override="offline" if local_management else None)
+        with create_application(settings, planner=direct_planner) as agent:
+            if args.workflow is not None:
+                result_value = workflow_cli.execute(agent, args)
+                _show_memory(result_value)
+                return workflow_cli.exit_code(result_value)
             if args.memory is not None:
                 parameters: dict[str, Any] = {}
                 action = "list_items" if args.memory == "list" else args.memory.replace("-", "_")
@@ -176,7 +196,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                 print("Deskpal interactive mode. Enter /quit to exit.", file=sys.stderr)
             code = 0
             pending: dict[str, AgentResult] = {}
+            shown_proposals: deque[str] = deque(maxlen=1000)
             while True:
+                if settings.proactive.enabled:
+                    _proposal_notice(agent, shown_proposals)
                 try:
                     request = input("deskpal> " if sys.stdin.isatty() else "")
                 except EOFError:
@@ -261,6 +284,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 1
     except MemoryError as exc:
         print(f"Deskpal memory error: {exc}", file=sys.stderr)
+        return 1
+    except FileExistsError:
+        print("Deskpal error: backup destination already exists; choose a new path.", file=sys.stderr)
         return 1
     except ValueError:
         print("Deskpal error: invalid request, configuration, or result data.", file=sys.stderr)

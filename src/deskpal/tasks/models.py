@@ -16,6 +16,8 @@ class TaskStatus(str, Enum):
     COMPLETED = "Completed"
     FAILED = "Failed"
     CANCELLED = "Cancelled"
+    NEEDS_REVIEW = "NeedsReview"
+    UNCERTAIN = "Uncertain"
 
 
 @dataclass(frozen=True)
@@ -27,4 +29,6 @@ class Task:
     updated_at: datetime = field(default_factory=utc_now)
     result: Any = None
     error: str | None = None
+    revision: int = 1
+    cancel_requested: bool = False
 

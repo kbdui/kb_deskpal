@@ -9,10 +9,12 @@ from deskpal.tasks import InMemoryTaskManager, TaskStatus
 
 
 ALLOWED = {
-    TaskStatus.CREATED: {TaskStatus.PLANNING, TaskStatus.CANCELLED, TaskStatus.FAILED},
-    TaskStatus.PLANNING: {TaskStatus.RUNNING, TaskStatus.WAITING, TaskStatus.FAILED, TaskStatus.CANCELLED},
-    TaskStatus.RUNNING: {TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED},
-    TaskStatus.WAITING: {TaskStatus.RUNNING, TaskStatus.FAILED, TaskStatus.CANCELLED},
+    TaskStatus.CREATED: {TaskStatus.PLANNING, TaskStatus.CANCELLED, TaskStatus.FAILED, TaskStatus.NEEDS_REVIEW},
+    TaskStatus.PLANNING: {TaskStatus.RUNNING, TaskStatus.WAITING, TaskStatus.FAILED, TaskStatus.CANCELLED, TaskStatus.NEEDS_REVIEW, TaskStatus.UNCERTAIN},
+    TaskStatus.RUNNING: {TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED, TaskStatus.NEEDS_REVIEW, TaskStatus.UNCERTAIN},
+    TaskStatus.WAITING: {TaskStatus.RUNNING, TaskStatus.FAILED, TaskStatus.CANCELLED, TaskStatus.NEEDS_REVIEW},
+    TaskStatus.NEEDS_REVIEW: {TaskStatus.CREATED, TaskStatus.PLANNING, TaskStatus.WAITING, TaskStatus.CANCELLED, TaskStatus.FAILED, TaskStatus.UNCERTAIN},
+    TaskStatus.UNCERTAIN: set(),
     TaskStatus.COMPLETED: set(), TaskStatus.FAILED: set(), TaskStatus.CANCELLED: set(),
 }
 PATHS = {
@@ -21,6 +23,8 @@ PATHS = {
     TaskStatus.WAITING: (TaskStatus.PLANNING, TaskStatus.WAITING),
     TaskStatus.COMPLETED: (TaskStatus.PLANNING, TaskStatus.RUNNING, TaskStatus.COMPLETED),
     TaskStatus.FAILED: (TaskStatus.FAILED,), TaskStatus.CANCELLED: (TaskStatus.CANCELLED,),
+    TaskStatus.NEEDS_REVIEW: (TaskStatus.NEEDS_REVIEW,),
+    TaskStatus.UNCERTAIN: (TaskStatus.PLANNING, TaskStatus.UNCERTAIN),
 }
 
 

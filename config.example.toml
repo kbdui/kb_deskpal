@@ -35,3 +35,23 @@ semantic_threshold = 0.55
 evaluation_timeout_seconds = 15.0
 evaluation_max_output_tokens = 2048
 
+[workflow]
+# Positive limits: queue <=10000; payloads <=16 MiB; shutdown <=60 seconds.
+queue_capacity = 100
+request_max_bytes = 65536
+plan_max_bytes = 262144
+result_max_bytes = 262144
+shutdown_timeout_seconds = 5.0
+
+[proactive]
+# Local deterministic proposals only; enabling this grants no execution or cloud permission.
+enabled = false
+# Positive limits: polling <=60s; batch <=100; new proposals <=10; TTL <=30 days.
+poll_interval_seconds = 1.0
+event_batch_size = 100
+max_proposals_per_poll = 10
+proposal_ttl_seconds = 86400
+quiet_start = "22:00"
+quiet_end = "08:00"
+timezone = "Asia/Shanghai"
+

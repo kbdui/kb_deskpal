@@ -7,6 +7,8 @@ consumer-owned; repeatedly peeking a record does not acknowledge it.
 """
 
 import math
+import hashlib
+import json
 import re
 import sqlite3
 import time
@@ -20,7 +22,8 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from deskpal.execution_log import ExecutionLog, NullExecutionLog
 
-from .models import CalendarEntry, ScheduleEvent, TimerEntry
+from .models import (CalendarEntry, ScheduleEvent, TimerEntry, ScheduleStoreIdentity,
+                     SourceSnapshot, EventCursorState)
 from .ports import Clock
 
 _UNSET = object()
@@ -141,7 +144,54 @@ class SchedulingService:
                 overdue INTEGER NOT NULL CHECK(overdue IN (0,1)), UNIQUE(source,source_id,revision))""")
             self._db.execute("CREATE INDEX IF NOT EXISTS calendar_due ON calendar(reminder_fired,reminder_at)")
             self._db.execute("CREATE INDEX IF NOT EXISTS events_source_id ON events(source,id)")
+            # Additive metadata preserves V0.3 records and schema compatibility.
+            self._db.execute("CREATE TABLE IF NOT EXISTS scheduling_identity (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+            for key in ("store_id", "generation"):
+                self._db.execute("INSERT OR IGNORE INTO scheduling_identity VALUES (?,?)", (key, str(uuid4())))
             self._db.execute("PRAGMA user_version = 1")
+
+    @property
+    def store_identity(self) -> ScheduleStoreIdentity:
+        with self._lock:
+            self._ensure_open()
+            values = dict(self._db.execute("SELECT key,value FROM scheduling_identity"))
+            return ScheduleStoreIdentity(values["store_id"], values["generation"])
+
+    def source_snapshot(self, source: str, source_id: str) -> SourceSnapshot | None:
+        if source not in ("timer", "calendar"):
+            raise ValueError("source must be timer or calendar")
+        with self._lock:
+            self._ensure_open()
+            table = "timers" if source == "timer" else "calendar"
+            row = self._db.execute(f"SELECT * FROM {table} WHERE id=?", (source_id,)).fetchone()
+            if row is None:
+                return None
+            payload = json.dumps(dict(row), sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+            identity = self.store_identity
+            return SourceSnapshot(source, source_id, identity.store_id, identity.generation,
+                                  int(row["revision"]) if source == "calendar" else 1,
+                                  hashlib.sha256(payload.encode("utf-8")).hexdigest(), payload)
+
+    def event_anchor(self, source: str, event_id: int) -> str | None:
+        if source not in ("timer", "calendar"):
+            raise ValueError("source must be timer or calendar")
+        if event_id == 0:
+            return "empty"
+        with self._lock:
+            self._ensure_open()
+            row = self._db.execute("SELECT * FROM events WHERE source=? AND id=?", (source, event_id)).fetchone()
+            if row is None:
+                return None
+            payload = json.dumps(dict(row), sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+            return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+    def event_cursor_state(self, source: str) -> EventCursorState:
+        if source not in ("timer", "calendar"):
+            raise ValueError("source must be timer or calendar")
+        with self._lock:
+            self._ensure_open()
+            tail = int(self._db.execute("SELECT COALESCE(MAX(id),0) FROM events WHERE source=?", (source,)).fetchone()[0])
+            return EventCursorState(source, tail, self.event_anchor(source, tail) or "empty")
 
     def _now(self) -> datetime:
         now = self._clock.now()
@@ -311,8 +361,10 @@ class SchedulingService:
             self._ensure_open()
             rows = self._db.execute("SELECT * FROM events WHERE source=? AND id>? ORDER BY id LIMIT ?",
                                     (source, after_id, limit))
+            identity = self.store_identity
             return tuple(ScheduleEvent(row["id"], row["source"], row["source_id"], row["label"],
-                                       row["due_at"], row["recorded_at"], bool(row["overdue"])) for row in rows)
+                                       row["due_at"], row["recorded_at"], bool(row["overdue"]),
+                                       row["revision"], identity.store_id, identity.generation) for row in rows)
 
     def poll_due(self) -> int:
         """Persist due events; manually callable without starting a thread."""
@@ -361,6 +413,8 @@ class SchedulingService:
                     if self._stopping:
                         return
                     self._poll_due_locked()
+                    if self._stopping:
+                        return
                     delay = self._interval
                     monotonic = self._monotonic()
                     if self._deadlines:
@@ -373,24 +427,35 @@ class SchedulingService:
                 self._wake.set()
 
     def close(self) -> None:
-        with self._lock:
-            if self._closed:
-                return
-            self._stopping = True
-            self._wake.set()
-            worker = self._worker
+        if not self.shutdown(5):
+            raise RuntimeError("Scheduling worker did not stop; connection remains open")
+
+    def shutdown(self, timeout: float = 5.0) -> bool:
+        """Stop cooperatively without closing a connection still used by a worker.
+
+        Signal before acquiring the database lock: a blocked poll may hold that
+        lock, and must not prevent the owner from observing a shutdown timeout.
+        """
+        if isinstance(timeout, bool) or not math.isfinite(timeout) or timeout < 0:
+            raise ValueError("Shutdown timeout must be finite and non-negative")
+        self._stopping = True
+        self._wake.set()
+        worker = self._worker
         if worker is current_thread():
             raise RuntimeError("Scheduling service cannot close from its own worker")
         if worker is not None:
-            worker.join(timeout=5)
+            worker.join(timeout=timeout)
             if worker.is_alive():
-                raise RuntimeError("Scheduling worker did not stop; connection remains open")
+                return False
         with self._lock:
+            if self._closed:
+                return True
             self._db.close()
             self._closed = True
             error = self._worker_error
         if error is not None:
             raise RuntimeError("Scheduling worker failed before shutdown") from error
+        return True
 
     def __enter__(self) -> "SchedulingService":
         self.start()

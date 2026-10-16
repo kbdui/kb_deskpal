@@ -20,7 +20,8 @@ class _Registered:
 
 
 def _copy_spec(spec: ToolSpec) -> ToolSpec:
-    return ToolSpec(spec.name, spec.description, thaw_json(spec.parameters), spec.permission_level)
+    return ToolSpec(spec.name, spec.description, thaw_json(spec.parameters), spec.permission_level,
+                    spec.contract_version)
 
 
 def _execution_error(exc: Exception) -> str:
@@ -58,6 +59,8 @@ class BuiltinToolManager:
             raise ValueError(f"Tool {source.name} is already registered")
         if not isinstance(source.description, str):
             raise ValueError("Tool description must be a string")
+        if not isinstance(source.contract_version, str) or not source.contract_version.strip():
+            raise ValueError("Tool contract version must be a non-empty string")
         if type(source.permission_level) not in (int, PermissionLevel):
             raise ValueError("Tool permission level must be 0, 1 or 2")
         try:
@@ -68,7 +71,8 @@ class BuiltinToolManager:
         if not isinstance(parameters, Mapping):
             raise ValueError("Tool parameter schema must be an object")
         validate_schema(parameters)
-        spec = ToolSpec(source.name, source.description, freeze_json(parameters), permission)
+        spec = ToolSpec(source.name, source.description, freeze_json(parameters), permission,
+                        source.contract_version)
         self._log.record("tool_registered", data={"tool_name": spec.name, "permission_level": int(permission)})
         self._tools[spec.name] = _Registered(tool, spec)
 

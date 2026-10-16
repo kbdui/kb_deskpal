@@ -42,6 +42,35 @@ class ScheduleEvent:
     due_at: str
     recorded_at: str
     overdue: bool
+    occurrence_revision: int = 1
+    source_store_id: str = ""
+    source_generation: str = ""
 
     def as_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+
+@dataclass(frozen=True)
+class ScheduleStoreIdentity:
+    store_id: str
+    generation: str
+
+
+@dataclass(frozen=True)
+class SourceSnapshot:
+    """Current full source record; fingerprint includes every persisted field."""
+
+    source: str
+    source_id: str
+    store_id: str
+    generation: str
+    occurrence_revision: int
+    fingerprint: str
+    payload_json: str
+
+
+@dataclass(frozen=True)
+class EventCursorState:
+    source: str
+    tail_id: int
+    anchor: str

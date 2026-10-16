@@ -13,10 +13,12 @@ from .models import Task, TaskStatus, utc_now
 
 
 _TRANSITIONS: dict[TaskStatus, frozenset[TaskStatus]] = {
-    TaskStatus.CREATED: frozenset((TaskStatus.PLANNING, TaskStatus.CANCELLED, TaskStatus.FAILED)),
-    TaskStatus.PLANNING: frozenset((TaskStatus.RUNNING, TaskStatus.WAITING, TaskStatus.FAILED, TaskStatus.CANCELLED)),
-    TaskStatus.RUNNING: frozenset((TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED)),
-    TaskStatus.WAITING: frozenset((TaskStatus.RUNNING, TaskStatus.FAILED, TaskStatus.CANCELLED)),
+    TaskStatus.CREATED: frozenset((TaskStatus.PLANNING, TaskStatus.CANCELLED, TaskStatus.FAILED, TaskStatus.NEEDS_REVIEW)),
+    TaskStatus.PLANNING: frozenset((TaskStatus.RUNNING, TaskStatus.WAITING, TaskStatus.FAILED, TaskStatus.CANCELLED, TaskStatus.NEEDS_REVIEW, TaskStatus.UNCERTAIN)),
+    TaskStatus.RUNNING: frozenset((TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED, TaskStatus.NEEDS_REVIEW, TaskStatus.UNCERTAIN)),
+    TaskStatus.WAITING: frozenset((TaskStatus.RUNNING, TaskStatus.FAILED, TaskStatus.CANCELLED, TaskStatus.NEEDS_REVIEW)),
+    TaskStatus.NEEDS_REVIEW: frozenset((TaskStatus.CREATED, TaskStatus.PLANNING, TaskStatus.WAITING, TaskStatus.CANCELLED, TaskStatus.FAILED, TaskStatus.UNCERTAIN)),
+    TaskStatus.UNCERTAIN: frozenset(),
     TaskStatus.COMPLETED: frozenset(),
     TaskStatus.FAILED: frozenset(),
     TaskStatus.CANCELLED: frozenset(),

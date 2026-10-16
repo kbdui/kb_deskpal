@@ -23,6 +23,8 @@ from deskpal.tasks.models import Task, TaskStatus
 from deskpal.tasks.ports import TaskManager
 from deskpal.tools.models import PermissionLevel, ToolCall, ToolContext, ToolResult
 from deskpal.tools.ports import ToolManager
+from deskpal.workflow.models import TaskCancellationRequested, WorkflowBlocked
+from deskpal.workflow.ports import ExecutionJournalPort
 
 from .models import AgentResult, AuthorizationRequest
 
@@ -51,7 +53,9 @@ class AgentCore:
                  memory: MemoryManager, tools: ToolManager, workspace_dir: str | Path,
                  max_tool_steps: int = 8, execution_log: ExecutionLog | None = None,
                  on_close: Callable[[], None] | None = None,
-                 memory_runtime: MemoryRuntime | None = None) -> None:
+                 memory_runtime: MemoryRuntime | None = None,
+                 journal: ExecutionJournalPort | None = None,
+                 execution_guard: Callable[[str], None] | None = None) -> None:
         if type(max_tool_steps) is not int or max_tool_steps <= 0:
             raise ValueError("max_tool_steps must be a positive integer")
         if not isinstance(workspace_dir, (str, Path)) or not str(workspace_dir).strip():
@@ -61,6 +65,8 @@ class AgentCore:
         self.llm, self.planner, self.tasks = llm, planner, tasks
         self.memory, self.tools = memory, tools
         self._memory_runtime = memory_runtime
+        self._journal = journal
+        self._execution_guard = execution_guard
         self.workspace_dir = Path(workspace_dir).resolve()
         self.max_tool_steps = max_tool_steps
         self._log = execution_log if execution_log is not None else NullExecutionLog()
@@ -72,6 +78,10 @@ class AgentCore:
         self._pending: dict[str, tuple[str, Plan, frozenset[str], frozenset[str]]] = {}
         self._pending_dependencies: dict[str, tuple[tuple[str, int], ...]] = {}
         self._task_dependencies: dict[str, tuple[tuple[str, int], ...]] = {}
+
+    @property
+    def memory_runtime(self) -> MemoryRuntime | None:
+        return self._memory_runtime
 
     def close(self) -> None:
         with self._lock:
@@ -149,6 +159,7 @@ class AgentCore:
         finally:
             with self._lock:
                 self._running = False
+                self._release_durable_context(task_id)
 
     def cancel_task(self, task_id: str) -> Task:
         """Audit cancellation before storage; repeated cancellation is idempotent."""
@@ -187,6 +198,63 @@ class AgentCore:
         finally:
             with self._lock:
                 self._running = False
+
+    def execute_task(self, task_id: str, *, authorized_tools: Iterable[str] = (),
+                     high_risk_authorized_tools: Iterable[str] = (),
+                     confirmed_plan: Plan | None = None) -> AgentResult:
+        """Execute an existing queued task without submitting or creating another.
+
+        Application owns the single worker and supplies grants only from this
+        process. A recovered plan must first pass Application's snapshot review.
+        """
+        authorization = self._authorization(authorized_tools)
+        high_risk = self._authorization(high_risk_authorized_tools)
+        with self._lock:
+            if self._closed or self._running:
+                raise RuntimeError("AgentCore is closed or already running")
+            task = self.tasks.get(task_id)
+            if task is None:
+                raise KeyError(task_id)
+            self._running = True
+        try:
+            return self._run(task.request, authorization, high_risk,
+                             task_id=task_id, confirmed_plan=confirmed_plan)
+        finally:
+            with self._lock:
+                self._running = False
+                self._release_durable_context(task_id)
+
+    def _release_durable_context(self, task_id: str) -> None:
+        if self._journal is None:
+            return
+        try:
+            task = self.tasks.get(task_id)
+        except Exception:
+            task = None
+        if task is None or task.status != TaskStatus.WAITING:
+            self._pending.pop(task_id, None)
+            self._pending_dependencies.pop(task_id, None)
+            self._task_dependencies.pop(task_id, None)
+
+    def restore_pending(self, task_id: str, plan: Plan,
+                        memory_refs: tuple[tuple[str, int], ...] = ()) -> None:
+        """Restore a reviewed, never-started snapshot with empty grants."""
+        with self._lock:
+            if self._closed or self._running:
+                raise RuntimeError("AgentCore is closed or already running")
+            task = self.tasks.get(task_id)
+            if task is None or task.status != TaskStatus.WAITING:
+                raise ValueError("Only a waiting, reviewed plan can be restored")
+            self._pending[task_id] = (task.request, self._plan_copy(plan), frozenset(), frozenset())
+            self._pending_dependencies[task_id] = memory_refs
+            self._task_dependencies[task_id] = memory_refs
+
+    def revoke_pending(self, task_ids: Iterable[str]) -> None:
+        """Drop in-memory grants after a durable invalidation or deletion."""
+        with self._lock:
+            for task_id in task_ids:
+                self._pending.pop(task_id, None)
+                self._pending_dependencies.pop(task_id, None)
 
     def memory_command(self, action: str, **parameters: Any) -> Any:
         """Run explicit local memory management through the serialized facade.
@@ -247,8 +315,15 @@ class AgentCore:
         task = self.tasks.get(task_id)
         if task is None:
             raise RuntimeError("Task storage lost the current task")
-        if task.status == TaskStatus.CANCELLED:
+        if task.status == TaskStatus.CANCELLED or task.cancel_requested:
             raise _Cancelled
+        if self._execution_guard is not None:
+            self._execution_guard(task_id)
+        if self._journal is not None:
+            try:
+                self._journal.check_task(task_id)
+            except TaskCancellationRequested:
+                raise _Cancelled from None
         refs = self._task_dependencies.get(task_id, ())
         if refs and self._memory_runtime is not None and not self._memory_runtime.valid(refs):
             raise ValueError("Memory dependencies changed or expired")
@@ -322,6 +397,8 @@ class AgentCore:
                     self._transition(task_id, TaskStatus.RUNNING)
                     saved_item = self._memory_runtime.remember(fact[1].strip(), task_id=task_id)
                     self._task_dependencies[task_id] = ((saved_item.id, saved_item.revision),)
+                    if self._journal is not None:
+                        self._journal.set_dependencies(task_id, self._task_dependencies[task_id])
                     response = "已保存用户陈述：" + saved_item.draft.content
                     self._event("memory_saved", task_id, {"memory_id": saved_item.id, "kind": saved_item.draft.kind.value})
                     self._transition(task_id, TaskStatus.COMPLETED, result={"memory_id": saved_item.id}, completed=True)
@@ -332,6 +409,8 @@ class AgentCore:
                     warnings.extend(bundle.warnings)
                     memories = bundle.records
                     self._task_dependencies[task_id] = bundle.revisions
+                    if self._journal is not None:
+                        self._journal.set_dependencies(task_id, bundle.revisions)
                 else:
                     memories = tuple(self.memory.search(request, limit=5))
                 phase = "planning"
@@ -344,6 +423,10 @@ class AgentCore:
                 if self._memory_runtime is not None and not self._memory_runtime.valid(bundle.revisions):
                     raise ValueError("Memory context changed while planning")
                 self._boundary(task_id)
+                if self._journal is not None:
+                    snapshot = self._journal.save_plan(task_id, plan, tuple(self.tools.list_tools()),
+                        str(self.workspace_dir), self._task_dependencies.get(task_id, ()))
+                    plan = snapshot.plan
                 self._event("plan_created", task_id, {"reply": plan.reply, "steps": [
                     {"name": call.name, "arguments": _json_copy(call.arguments), "call_id": call.call_id}
                     for call in plan.steps]})
@@ -389,8 +472,9 @@ class AgentCore:
             phase = "tool execution"
             self._transition(task_id, TaskStatus.RUNNING)
             self._stage(task_id, "Act")
-            for call in plan.steps:
+            for index, call in enumerate(plan.steps):
                 self._boundary(task_id)
+                attempt = self._journal.start_step(task_id, index) if self._journal is not None else None
                 raw = self.tools.execute(_call_copy(call), context)
                 if (not isinstance(raw, ToolResult) or type(raw.success) is not bool
                         or (raw.error is not None and not isinstance(raw.error, str))
@@ -398,6 +482,8 @@ class AgentCore:
                         or (raw.success and raw.error is not None)):
                     raise ValueError("Invalid tool result")
                 result = ToolResult(raw.success, _json_copy(raw.output), raw.error, raw.tool_name, raw.call_id)
+                if self._journal is not None and attempt is not None:
+                    self._journal.finish_step(attempt.id, result)
                 results.append(result)
                 self._boundary(task_id)
                 if not result.success:
@@ -462,10 +548,26 @@ class AgentCore:
             payload = {"response": response, "tool_results": [_result_data(item) for item in results],
                        "warnings": list(warnings), "memory_effects": memory_effects}
             self._transition(task_id, TaskStatus.COMPLETED, result=payload, completed=True)
+            if self._journal is not None:
+                latest = self.tasks.get(task_id)
+                if latest is not None and latest.status == TaskStatus.CANCELLED:
+                    return self._cancelled_result(task_id, results)
             return AgentResult(task_id, TaskStatus.COMPLETED, response, tuple(results),
                                warnings=tuple(warnings), memory_effects=tuple(memory_effects))
         except _Cancelled:
             return self._cancelled_result(task_id, results)
+        except TaskCancellationRequested:
+            return self._cancelled_result(task_id, results)
+        except WorkflowBlocked:
+            if self._journal is None:
+                raise
+            if any(item.status in {"Started", "Uncertain"} for item in self._journal.attempts(task_id)):
+                return self._fail(task_id, "Execution dependencies changed; outcome requires review", results)
+            self.tasks.update_status(task_id, TaskStatus.NEEDS_REVIEW,
+                result={"tool_results": [_result_data(item) for item in results]},
+                error="Execution dependencies changed; review the source and create a new intent")
+            return AgentResult(task_id, TaskStatus.NEEDS_REVIEW,
+                "执行依赖或用途已变化，需要人工复核。", tuple(results))
         except Exception as exc:
             if isinstance(exc, ToolNotFound):
                 error = "Unknown tool in plan"
@@ -483,6 +585,16 @@ class AgentCore:
 
     def _fail(self, task_id: str, error: str, results: list[ToolResult]) -> AgentResult:
         self._pending.pop(task_id, None)
+        if self._journal is not None:
+            try:
+                if any(item.status in {"Started", "Uncertain"} for item in self._journal.attempts(task_id)):
+                    self._journal.mark_uncertain(task_id, error)
+                    return AgentResult(task_id, TaskStatus.UNCERTAIN,
+                        "工具调用结果未能可靠记录，请人工核对；系统不会自动重试。", tuple(results), error=error)
+            except Exception:
+                # A broken ledger is never permission to execute the effect again.
+                return AgentResult(task_id, TaskStatus.UNCERTAIN,
+                    "执行账本不可用，请人工核对；系统不会自动重试。", tuple(results), error=error)
         # A second audit/storage failure must not hide the primary failure. Failure
         # persistence uses a single attempt, without recursively retrying transitions.
         try:
@@ -510,6 +622,9 @@ class AgentCore:
 
     def _cancelled_result(self, task_id: str, results: list[ToolResult]) -> AgentResult:
         self._pending.pop(task_id, None)
+        if self._journal is not None:
+            self.tasks.update_status(task_id, TaskStatus.CANCELLED,
+                result={"tool_results": [_result_data(item) for item in results]})
         error = None
         response = "Task cancelled."
         try:

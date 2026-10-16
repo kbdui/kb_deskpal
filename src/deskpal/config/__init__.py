@@ -7,6 +7,7 @@ import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from dotenv import dotenv_values
 
@@ -64,6 +65,27 @@ class MemoryConfig:
 
 
 @dataclass(frozen=True)
+class WorkflowConfig:
+    queue_capacity: int = 100
+    request_max_bytes: int = 65536
+    plan_max_bytes: int = 262144
+    result_max_bytes: int = 262144
+    shutdown_timeout_seconds: float = 5.0
+
+
+@dataclass(frozen=True)
+class ProactiveConfig:
+    enabled: bool = False
+    poll_interval_seconds: float = 1.0
+    event_batch_size: int = 100
+    max_proposals_per_poll: int = 10
+    proposal_ttl_seconds: int = 86400
+    quiet_start: str = "22:00"
+    quiet_end: str = "08:00"
+    timezone: str = "Asia/Shanghai"
+
+
+@dataclass(frozen=True)
 class AppConfig:
     llm: LLMConfig = field(default_factory=LLMConfig)
     sandbox: SandboxConfig = field(default_factory=SandboxConfig)
@@ -72,6 +94,8 @@ class AppConfig:
     scheduling: SchedulingConfig = field(default_factory=SchedulingConfig)
     screenshot: ScreenshotConfig = field(default_factory=ScreenshotConfig)
     memory: MemoryConfig = field(default_factory=MemoryConfig)
+    workflow: WorkflowConfig = field(default_factory=WorkflowConfig)
+    proactive: ProactiveConfig = field(default_factory=ProactiveConfig)
 
 
 def load_config(path: str | Path | None = None, *, environ: Mapping[str, str] | None = None,
@@ -112,11 +136,18 @@ def load_config(path: str | Path | None = None, *, environ: Mapping[str, str] | 
         env = {**file_values, **os.environ}
 
     sections: dict[str, dict[str, Any]] = {}
-    for name in ("llm", "sandbox", "storage", "agent", "scheduling", "screenshot", "memory"):
+    for name in ("llm", "sandbox", "storage", "agent", "scheduling", "screenshot", "memory",
+                 "workflow", "proactive"):
         section = raw.get(name, {})
         if not isinstance(section, dict):
             raise ConfigError(f"Configuration section {name} must be a table")
         sections[name] = section
+    for name, allowed in (
+        ("workflow", WorkflowConfig.__dataclass_fields__),
+        ("proactive", ProactiveConfig.__dataclass_fields__),
+    ):
+        if set(sections[name]) - set(allowed):
+            raise ConfigError(f"Configuration section {name} contains unsupported settings")
     if any(key.lower() in {"api_key", "token", "secret", "authorization"} for key in sections["llm"]):
         raise ConfigError("API credentials are allowed only in environment variables")
 
@@ -153,6 +184,54 @@ def load_config(path: str | Path | None = None, *, environ: Mapping[str, str] | 
             raise ConfigError(f"{section}.{key} must not be empty")
         candidate = Path(text).expanduser()
         return (candidate if candidate.is_absolute() else root / candidate).resolve()
+
+    def bounded_number(section: str, key: str, default: int | float,
+                       maximum: int | float, *, integer: bool = False) -> Any:
+        env_key = f"DESKPAL_{section.upper()}_{key.upper()}"
+        candidate = value(section, key, default, env_key)
+        # TOML values are typed; only environment variables may contain numbers as text.
+        if env_key not in env and (isinstance(candidate, bool) or not isinstance(candidate, (int, float))):
+            raise ConfigError(f"{section}.{key} must be a {'integer' if integer else 'number'}")
+        result = positive_number(section, key, default, env_key, integer)
+        if result > maximum:
+            raise ConfigError(f"{section}.{key} must not exceed {maximum}")
+        return result
+
+    def proactive_boolean() -> bool:
+        env_key = "DESKPAL_PROACTIVE_ENABLED"
+        candidate = value("proactive", "enabled", False, env_key)
+        if env_key in env:
+            if isinstance(candidate, str) and candidate.strip().lower() in {"true", "false"}:
+                return candidate.strip().lower() == "true"
+        elif isinstance(candidate, bool):
+            return candidate
+        raise ConfigError("proactive.enabled must be a boolean (true or false)")
+
+    workflow = WorkflowConfig(
+        queue_capacity=bounded_number("workflow", "queue_capacity", 100, 10000, integer=True),
+        request_max_bytes=bounded_number("workflow", "request_max_bytes", 65536, 16777216, integer=True),
+        plan_max_bytes=bounded_number("workflow", "plan_max_bytes", 262144, 16777216, integer=True),
+        result_max_bytes=bounded_number("workflow", "result_max_bytes", 262144, 16777216, integer=True),
+        shutdown_timeout_seconds=bounded_number("workflow", "shutdown_timeout_seconds", 5.0, 60),
+    )
+    quiet_start = string("proactive", "quiet_start", "22:00", "DESKPAL_PROACTIVE_QUIET_START")
+    quiet_end = string("proactive", "quiet_end", "08:00", "DESKPAL_PROACTIVE_QUIET_END")
+    for key, clock in (("quiet_start", quiet_start), ("quiet_end", quiet_end)):
+        if re.fullmatch(r"(?:[01][0-9]|2[0-3]):[0-5][0-9]", clock) is None:
+            raise ConfigError(f"proactive.{key} must use HH:MM in 24-hour time")
+    timezone = string("proactive", "timezone", "Asia/Shanghai", "DESKPAL_PROACTIVE_TIMEZONE")
+    try:
+        ZoneInfo(timezone)
+    except (ZoneInfoNotFoundError, ValueError):
+        raise ConfigError("proactive.timezone must name an available IANA timezone") from None
+    proactive = ProactiveConfig(
+        enabled=proactive_boolean(),
+        poll_interval_seconds=bounded_number("proactive", "poll_interval_seconds", 1.0, 60),
+        event_batch_size=bounded_number("proactive", "event_batch_size", 100, 100, integer=True),
+        max_proposals_per_poll=bounded_number("proactive", "max_proposals_per_poll", 10, 10, integer=True),
+        proposal_ttl_seconds=bounded_number("proactive", "proposal_ttl_seconds", 86400, 2592000, integer=True),
+        quiet_start=quiet_start, quiet_end=quiet_end, timezone=timezone,
+    )
 
     provider = string("llm", "provider", "offline", "DESKPAL_LLM_PROVIDER")
     if provider_override is not None:
@@ -208,9 +287,12 @@ def load_config(path: str | Path | None = None, *, environ: Mapping[str, str] | 
         memory=MemoryConfig(memory_mode, embedding_provider,
                             directory("memory", "model_cache_dir", "data/models/fastembed", "DESKPAL_MODEL_CACHE_DIR"),
                             max_context_bytes, max_candidates, threshold, evaluation_timeout, evaluation_tokens),
+        workflow=workflow,
+        proactive=proactive,
     )
 
 
 __all__ = ["AppConfig", "LLMConfig", "SandboxConfig", "StorageConfig", "AgentConfig",
-           "SchedulingConfig", "ScreenshotConfig", "MemoryConfig", "ConfigError", "load_config"]
+           "SchedulingConfig", "ScreenshotConfig", "MemoryConfig", "WorkflowConfig", "ProactiveConfig",
+           "ConfigError", "load_config"]
 

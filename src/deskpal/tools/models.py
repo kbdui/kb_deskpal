@@ -18,6 +18,7 @@ class ToolSpec:
     description: str
     parameters: Mapping[str, Any]
     permission_level: PermissionLevel = PermissionLevel.AUTOMATIC
+    contract_version: str = "1"
 
 
 @dataclass(frozen=True)

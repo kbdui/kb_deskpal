@@ -1,5 +1,7 @@
 # V0.4 环境、工具与依赖评估
 
+> 实施前评估快照。V0.4 已补 Windows tzdata 并验证双 Python；实际依赖与证据见 [交付说明](../../versions/v0.4/delivery.md)，下文待准备项记录原评估时点。
+
 日期：2026-10-15。状态：**本机准备评估与开发建议，尚未实现 V0.4**。基线为当前工作区的 0.3.0；V0.3 的功能证据见[交付说明](../../versions/v0.3/delivery.md)和[测试报告](../../versions/v0.3/test-report.md)。开发内容见[开发计划](development-plan.md)，通过规则见[验收边界](acceptance-boundaries.md)。
 
 ## 结论
