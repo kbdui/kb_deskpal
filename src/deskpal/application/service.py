@@ -5,7 +5,7 @@ from dataclasses import asdict, replace
 from hashlib import sha256
 import math
 from pathlib import Path
-from threading import Event, Lock, Thread
+from threading import Event, Lock, RLock, Thread
 from time import monotonic
 from types import TracebackType
 from typing import Any
@@ -45,6 +45,9 @@ class ApplicationService:
         self._memory_runtime: MemoryRuntime = runtime
         self._audit_sink, self._release_resources = audit_sink, release_resources
         self._close_lock = Lock()
+        self._shutdown_lock = Lock()
+        self._shutdown_started = False
+        self._confirmation_lock = RLock()
         self._audit_lock = Lock()
         self._closed = False
         self._closing = False
@@ -158,11 +161,7 @@ class ApplicationService:
 
     def review_task(self, task_id: str) -> dict[str, Any]:
         self._ready()
-        task = self.tasks.get(task_id)
-        if task is None:
-            raise KeyError(task_id)
-        return {"task": task, "plan": self.journal.get_plan(task_id),
-                "attempts": self.journal.attempts(task_id)}
+        return self.journal.review(task_id)
 
     def resume(self, task_id: str) -> PlanSnapshot | Task:
         self._ready()
@@ -182,15 +181,41 @@ class ApplicationService:
     def confirm_task(self, task_id: str, *, authorized_tools: Iterable[str] = (),
                      high_risk_authorized_tools: Iterable[str] = (),
                      plan_hash: str | None = None) -> AgentResult:
+        self.enqueue_confirmation(task_id, authorized_tools=authorized_tools,
+            high_risk_authorized_tools=high_risk_authorized_tools, plan_hash=plan_hash)
+        return self.wait(task_id)
+
+    def enqueue_confirmation(self, task_id: str, *, authorized_tools: Iterable[str] = (),
+                             high_risk_authorized_tools: Iterable[str] = (),
+                             plan_hash: str | None = None, command_id: str | None = None) -> Task:
+        """Validate and queue grants; return without waiting for the unique worker."""
         self._ready()
         authorization = AgentCore._authorization(authorized_tools)
         high_risk = AgentCore._authorization(high_risk_authorized_tools)
+        if command_id is not None and (not isinstance(command_id, str) or not command_id.strip()):
+            raise ValueError("Confirmation command_id must be non-empty")
+        with self._confirmation_lock:
+            expected = plan_hash if plan_hash is not None else self._reviewed.get(task_id)
+            fingerprint = sha256(canonical({"operation": "confirm", "task_id": task_id,
+                "plan_hash": expected, "ordinary": sorted(authorization), "high_risk": sorted(high_risk)}).encode()).hexdigest()
+            if command_id is not None:
+                with self.store.transaction() as conn:
+                    previous = conn.execute("SELECT payload_hash,task_id FROM command WHERE id=?", (command_id,)).fetchone()
+                    if previous is not None:
+                        if previous["payload_hash"] != fingerprint or previous["task_id"] != task_id:
+                            raise ValueError("Command ID already used with a different payload")
+                        task = self.tasks.get(task_id)
+                        assert task is not None
+                        return task
+            return self._enqueue_confirmation(task_id, authorization, high_risk, expected, command_id, fingerprint)
+
+    def _enqueue_confirmation(self, task_id: str, authorization: frozenset[str], high_risk: frozenset[str],
+                              expected: str | None, command_id: str | None, fingerprint: str) -> Task:
         with self._dispatcher.management():
             snapshot = self.journal.get_plan(task_id)
             if snapshot is None:
                 raise WorkflowBlocked("No intact persisted plan")
             self._verify_snapshot(snapshot)
-            expected = plan_hash if plan_hash is not None else self._reviewed.get(task_id)
             if expected != snapshot.hash:
                 raise WorkflowBlocked("Review the exact persisted plan and provide its plan hash")
             task = self.tasks.get(task_id)
@@ -206,9 +231,13 @@ class ApplicationService:
             if task_id not in self._live_pending:
                 self.core.restore_pending(task_id, snapshot.plan, snapshot.memory_refs)
                 self._live_pending.add(task_id)
-            self.store.record_event("plan_confirmation", task_id, {"plan_hash": snapshot.hash})
-            self._dispatcher.confirm(task_id, authorization, high_risk)
-        return self.wait(task_id)
+            # Match submit/worker lock order: dispatcher control, then SQLite.
+            with self._dispatcher._condition, self.store.transaction() as conn:
+                self.store.record_event("plan_confirmation", task_id, {"plan_hash": snapshot.hash})
+                if command_id is not None:
+                    conn.execute("INSERT INTO command VALUES(?,?,?)", (command_id, fingerprint, task_id))
+                self._dispatcher.confirm(task_id, authorization, high_risk)
+            return task
 
     def cancel_task(self, task_id: str) -> Task:
         if self._closed:
@@ -342,6 +371,20 @@ class ApplicationService:
                 "pending_audit_page": len(self.store.pending_audit()), "proposal_error": self._rule_error,
                 "dispatcher": self._dispatcher.diagnostics()}
 
+    def begin_shutdown(self) -> None:
+        """Stop new claims and request cooperation without closing owned resources.
+
+        Safe to call while a facade query is still returning. A retry never
+        writes another cancellation revision for the same shutdown request.
+        """
+        with self._shutdown_lock:
+            if self._closed or self._shutdown_started:
+                return
+            self._shutdown_started = True
+            self._closing = True
+            self._rule_stop.set()
+            self._dispatcher.stop_accepting()
+
     def close(self, timeout: float | None = None) -> bool:
         with self._close_lock:
             if self._closed:
@@ -349,10 +392,8 @@ class ApplicationService:
             seconds = self.config.workflow.shutdown_timeout_seconds if timeout is None else timeout
             if isinstance(seconds, bool) or not math.isfinite(seconds) or seconds < 0:
                 raise ValueError("Shutdown timeout must be finite and non-negative")
-            self._closing = True
             deadline = monotonic() + seconds
-            self._rule_stop.set()
-            self._dispatcher.stop_accepting()
+            self.begin_shutdown()
             if self._rule_thread is not None:
                 self._rule_thread.join(max(0.0, deadline - monotonic()))
                 if self._rule_thread.is_alive():

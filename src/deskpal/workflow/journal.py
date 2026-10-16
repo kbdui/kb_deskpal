@@ -108,6 +108,14 @@ class ExecutionJournal:
             return PlanSnapshot(row["id"], task_id, row["hash"], row["canonical_json"], plan, specs,
                                 data["workspace_dir"], tuple((ref[0], ref[1]) for ref in data["memory_refs"]))
 
+    def review(self, task_id: str) -> dict[str, Any]:
+        """Read the task, immutable plan and attempts in one workflow transaction."""
+        with self.store.transaction():
+            task = self.tasks.get(task_id)
+            if task is None:
+                raise KeyError(task_id)
+            return {"task": task, "plan": self.get_plan(task_id), "attempts": self.attempts(task_id)}
+
     def start_step(self, task_id: str, index: int) -> StepAttempt:
         self.check_task(task_id)
         with self.store.transaction() as conn:

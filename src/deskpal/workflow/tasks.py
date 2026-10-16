@@ -128,6 +128,17 @@ class PersistentTaskManager:
             self.store.record_event("submission_queued", task.id)
             return task
 
+    def page_summaries(self, *, limit: int = 50, offset: int = 0) -> dict[str, Any]:
+        """Bounded metadata query never reads request or result body columns."""
+        if type(limit) is not int or not 1 <= limit <= 100 or type(offset) is not int or offset < 0:
+            raise ValueError("Task page limit must be 1..100 and offset non-negative")
+        with self.store.transaction() as conn:
+            rows = conn.execute("SELECT id,status,revision,cancel_requested,created_at,updated_at "
+                "FROM task ORDER BY created_at,id LIMIT ? OFFSET ?", (limit + 1, offset)).fetchall()
+            items = [{**dict(row), "cancel_requested": bool(row["cancel_requested"])} for row in rows[:limit]]
+            version = int(conn.execute("SELECT COALESCE(MAX(sequence),0) FROM audit_outbox").fetchone()[0])
+            return {"items": items, "offset": offset, "has_more": len(rows) > limit, "version": version}
+
     def claim_next(self) -> Task | None:
         while True:
             with self.store.transaction() as conn:

@@ -11,7 +11,7 @@ from uuid import NAMESPACE_URL, uuid5
 
 from .contracts import (
     ClaimType, Clock, DeletionReceipt, MemoryDraft, MemoryError, MemoryEvaluator,
-    MemoryItem, MemoryNotFound, MemoryRepository, MemorySource, MemoryStatus,
+    MemoryItem, MemoryNotFound, MemoryPage, MemoryRepository, MemorySource, MemoryStatus,
     ProfileEntry, RetrievalBundle, UsePolicy, utc_now,
 )
 from .evaluation import PROFILE_KEYS, profile_hint, validate_draft
@@ -201,6 +201,10 @@ class MemoryCoordinator:
     def list_items(self, *, status: MemoryStatus | None = None,
                    include_history: bool = False) -> tuple[MemoryItem, ...]:
         return self.repository.list_items(status=status, include_history=include_history)
+
+    def page_items(self, *, status: MemoryStatus | None = None, limit: int = 100,
+                   offset: int = 0) -> MemoryPage:
+        return self.repository.page_items(status=status, limit=limit, offset=offset)
 
     def accept(self, memory_id: str, expected_revision: int) -> MemoryItem:
         item = self.repository.get(memory_id)

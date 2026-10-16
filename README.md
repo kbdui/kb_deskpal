@@ -1,12 +1,22 @@
-# Personal AI Agent Desktop Companion — V0.4
+# Personal AI Agent Desktop Companion — V0.5 候选版
 
-Windows 个人智能 Agent 桌宠项目的本地后端。当前版本 **0.4.0**：持久目标、本地提议、任务队列、步骤账本和重启审查；保留 V0.3 来源化记忆、候选审核、三字段画像与可选 CPU 语义检索。Python 3.11+。
+Windows 个人智能 Agent 桌宠项目。当前版本 **0.5.0rc1**：在既有持久任务、来源化记忆、目标与本地提议后端上，加入 Qt Widgets 主窗口、后台交互、准确授权、托盘与通知。Python 3.11+。实机验收缺项见 [V0.5 状态](docs/versions/v0.5/delivery.md)，不宣称全部版本门槛已通过。
 
-当前入口为命令行；Qt/Live2D、人格情绪、后台云规划、完整多轮上下文属于后续版本。架构见 [ARCHITECTURE.md](ARCHITECTURE.md)，实际用法见 [V0.4 操作指南](docs/versions/v0.4/operations.md)和[接口](docs/versions/v0.4/interfaces.md)。
+提供 GUI 与命令行入口；Live2D、人格情绪、后台云规划、完整多轮上下文仍属后续版本。架构见 [ARCHITECTURE.md](ARCHITECTURE.md)，GUI 用法见 [V0.5 操作指南](docs/versions/v0.5/operations.md)和[接口](docs/versions/v0.5/interfaces.md)，CLI 继续参考 [V0.4 操作指南](docs/versions/v0.4/operations.md)。
 
-V0.5 已完成开工前[环境与依赖评估](docs/planning/v0.5/environment-assessment.md)、[开发计划](docs/planning/v0.5/development-plan.md)及[验收边界](docs/planning/v0.5/acceptance-boundaries.md)：计划加入 Windows GUI、托盘和任务/记忆/目标交互，当前仍为 0.4.0，尚未安装 Qt 或实现界面。
+V0.5 [开工前评估](docs/planning/v0.5/environment-assessment.md)与[计划](docs/planning/v0.5/development-plan.md)保留为规划快照；实际证据见 [测试报告](docs/versions/v0.5/test-report.md)。
 
 ## 安装与运行
+
+GUI（可选依赖，与 CLI 同数据目录互斥）：
+
+```powershell
+conda activate deskpal_env
+python -m pip install -r requirements-gui.txt -c constraints/windows-py312-gui.txt
+python -m deskpal.gui --config config.toml
+```
+
+加 --offline 可进行本次离线运行。GUI 默认 local_only，阻止整次云规划；使用 DeepSeek 时需主动选择 cloud_allowed。连续消息目前按独立请求处理。无 GUI 依赖仍可运行后端：
 
 ```powershell
 conda activate deskpal_env
@@ -104,4 +114,4 @@ python -m pytest -q
 python -m mypy --strict src scripts/check_memory_api.py scripts/benchmark_memory.py scripts/benchmark_workflow.py
 ```
 
-离线测试使用合成数据，不调用真实 API；真实 API 需新的单独授权。V0.4 实际证据见 [测试报告](docs/versions/v0.4/test-report.md)，交付范围见 [交付说明](docs/versions/v0.4/delivery.md)。[文档导航](docs/README.md)、[分阶段路线](docs/planning/roadmap.md)、[长期记忆/人格/情绪设计](docs/planning/companion-model/README.md)区分已实现与未来规划。
+离线测试使用合成数据，不调用真实 API；真实 API 需新的单独授权。当前证据见 [V0.5 测试报告](docs/versions/v0.5/test-report.md)与[候选版交付说明](docs/versions/v0.5/delivery.md)；[V0.4 报告](docs/versions/v0.4/test-report.md)保留为历史后端证据。[文档导航](docs/README.md)、[分阶段路线](docs/planning/roadmap.md)、[长期记忆/人格/情绪设计](docs/planning/companion-model/README.md)区分已实现与未来规划。

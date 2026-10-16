@@ -1,5 +1,7 @@
 # V0.5 开发计划
 
+实施状态：已进入 **0.5.0rc1**；下文保留原计划，实际范围和缺项见 [V0.5 状态](../../versions/v0.5/delivery.md)。
+
 日期：2026-10-16。基线：0.4.0；本文件为待开发方案，不表示已开始编码或已交付 GUI。环境见[评估](environment-assessment.md)，版本门槛见[验收边界](acceptance-boundaries.md)。
 
 目标：把现有后端变为可日常操作的 Windows 应用，完成输入、排队、查看原计划、准确确认、执行结果、记忆/目标管理和托盘生命周期。保留 CLI；不改变 Agent Core→Planner→Tool Manager→Sandbox→Tools 与 Memory/LLM 的依赖方向。

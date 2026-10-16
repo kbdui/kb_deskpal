@@ -107,6 +107,14 @@ class DeletionReceipt:
 
 
 @dataclass(frozen=True)
+class MemoryPage:
+    items: tuple[MemoryItem, ...]
+    offset: int
+    has_more: bool
+    epoch: int
+
+
+@dataclass(frozen=True)
 class ProfileEntry:
     key: str
     value: str
@@ -145,6 +153,9 @@ class MemoryRepository(Protocol):
     @property
     def epoch(self) -> int: ...
 
+    def page_items(self, *, status: MemoryStatus | None = None, limit: int = 100,
+                   offset: int = 0) -> MemoryPage: ...
+
     def ingest(self, source: MemorySource, draft: MemoryDraft, *,
                accepted: bool = False, idempotency_key: str = "") -> MemoryItem: ...
 
@@ -181,6 +192,9 @@ class MemoryEvaluator(Protocol):
 class MemoryRuntime(Protocol):
     @property
     def epoch(self) -> int: ...
+
+    def page_items(self, *, status: MemoryStatus | None = None, limit: int = 100,
+                   offset: int = 0) -> MemoryPage: ...
 
     def retrieve(self, query: str) -> RetrievalBundle: ...
 

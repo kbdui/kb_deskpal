@@ -13,7 +13,7 @@ python -m pip install -r requirements-embedding.txt -c constraints/windows-py312
 python -m pip check
 ```
 
-[Windows CPython 3.12 约束](../../constraints/windows-py312.txt)记录 43 项观察版本，涵盖项目开发/截图/embedding 和构建工具；不是带哈希锁，也不保证跨平台或 Python 3.11 相同解析。其他目标环境需重新核验，见[依赖指南](dependencies.md)。模型权重独立于 pip 安装。
+[Windows CPython 3.12 约束](../../constraints/windows-py312.txt)记录 44 项观察版本，涵盖项目开发/截图/embedding、tzdata 和构建工具；不是带哈希锁，也不保证跨平台或 Python 3.11 相同解析。其他目标环境需重新核验，见[依赖指南](dependencies.md)。模型权重独立于 pip 安装。
 
 首次准备模型需要操作者明确允许联网运行下载脚本：
 

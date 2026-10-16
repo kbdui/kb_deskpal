@@ -4,9 +4,14 @@ V0.4 以“显式目标 → 本地提议 → 持久任务 → 计划确认 → �
 
 ## 调用方向
 
+V0.5 候选版新增 gui（Widgets、bridge、host、preferences、tray、notifications）和 application.desktop 的 Qt-free 查询/命令边界。界面不调用 Core/SQL，命令/查询/控制在后台分通道，仍复用唯一 Core worker。具体接口、隐私 epoch 与最终关闭所有权见 [V0.5 接口](docs/versions/v0.5/interfaces.md)；实机与长测状态以 [测试报告](docs/versions/v0.5/test-report.md)为准。
+
 ```mermaid
 flowchart TD
-  CLI[CLI / 后续 GUI] --> App[ApplicationService / OS 实例锁]
+  CLI[CLI] --> App[ApplicationService / OS 实例锁]
+  GUI[Qt Widgets 主线程] --> Bridge[有界后台命令 / 查询 / 控制]
+  Bridge --> Desktop[DesktopFacade / 深复制 DTO]
+  Desktop --> App
   App --> Commands[Goal / Proposal / Memory 管理]
   App --> Queue[持久提交队列 / 单 worker]
   Queue --> Core[Agent Core]
@@ -35,6 +40,7 @@ Core 依赖 DTO/Protocol，不访问 SQL、Goal 实现、调度私有连接或�
 | 模块 | 职责 |
 | --- | --- |
 | application | 生产工厂、实例锁、单 worker、CLI、管理/恢复/删除/关闭协调 |
+| gui | 可选 Qt Widgets、后台桥/宿主、版本化视图、遗忘清屏、偏好/托盘/本地通知；不反向成为领域依赖 |
 | agent / planner / llm | Observe/Think/Plan/Act/Reflect、有界静态 Plan、厂商无关 Provider |
 | workflow / tasks | 单工作库、持久 Task/Submission/Plan/attempt、依赖索引、outbox、删除 job；兼容内存 TaskManager |
 | goals | 显式 Goal/Milestone/SourceBinding、CAS、执行条件版本、完成证据 |
@@ -98,5 +104,5 @@ TTL 从 due_at 起算。静默窗口只约束命令边界展示，结束后重�
 
 ## 验证边界
 
-以 [V0.4 验收矩阵](docs/planning/v0.4/acceptance-boundaries.md)和实际报告为准。双 Python/strict、旧权限/记忆/调度回归、真实进程崩溃、Windows 锁、安装与资源测量均须有证据。Qt/Live2D、人格情绪、自动 Goal DAG、后台云规划、系统通知、完整 WorkingContext/OS 隔离、多实例及外部效果 exactly-once 属于后续范围。
+当前以 [V0.5 验收矩阵](docs/planning/v0.5/acceptance-boundaries.md)和[实际报告](docs/versions/v0.5/test-report.md)为准；V0.4 是持久后端的历史证据。双 Python/strict、权限/记忆/调度回归、真实进程竞争与崩溃、Windows 锁、安装与资源测量均须有证据。Qt 主窗口及通用状态通知已在候选版实现，实机缺项独立记录。Live2D、人格情绪、自动 Goal DAG、后台云规划、完整 WorkingContext/OS 隔离、多实例及外部效果 exactly-once 属于后续范围。
 

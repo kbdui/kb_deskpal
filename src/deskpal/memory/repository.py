@@ -16,7 +16,7 @@ from uuid import uuid4
 
 from .contracts import (
     ClaimType, Clock, DeletionReceipt, EmbeddingManifest, MemoryDraft, MemoryError,
-    MemoryItem, MemoryNotFound, MemorySource, MemoryStatus, RevisionConflict,
+    MemoryItem, MemoryNotFound, MemoryPage, MemorySource, MemoryStatus, RevisionConflict,
     UsePolicy, utc_now,
 )
 from .models import MemoryKind
@@ -428,6 +428,34 @@ class SQLiteMemoryRepository:
                 items.extend(self._deleted(row) for row in self._db.execute("SELECT * FROM memory_tombstones ORDER BY id"))
             return tuple(item for item in items if status is None or item.status == status)
 
+    def page_items(self, *, status: MemoryStatus | None = None, limit: int = 100,
+                   offset: int = 0) -> MemoryPage:
+        """Page current heads and erased tombstones in SQL under one epoch."""
+        if type(limit) is not int or not 1 <= limit <= 100 or type(offset) is not int or offset < 0:
+            raise MemoryError("limit must be 1..100 and offset non-negative")
+        if status is not None and not isinstance(status, MemoryStatus):
+            raise MemoryError("status must be a MemoryStatus")
+        with self._lock:
+            self._open()
+            self._expire_candidates(self._now())
+            query = ("SELECT r.id,r.revision,r.recorded_at AS ordering,0 AS erased FROM memory_revisions r "
+                     "JOIN memory_heads h ON r.id=h.id AND r.revision=h.revision")
+            parameters: tuple[object, ...] = ()
+            if status is not None:
+                query += " WHERE r.status=?"
+                parameters = (status.value,)
+            if status in (None, MemoryStatus.DELETED):
+                query += " UNION ALL SELECT id,revision,deleted_at AS ordering,1 AS erased FROM memory_tombstones"
+            rows = self._db.execute("SELECT * FROM (" + query +
+                ") ORDER BY ordering DESC,id ASC,revision DESC LIMIT ? OFFSET ?",
+                (*parameters, limit + 1, offset)).fetchall()
+            items: list[MemoryItem] = []
+            for row in rows[:limit]:
+                item = self._get(str(row["id"]), int(row["revision"]))
+                assert item is not None
+                items.append(item)
+            return MemoryPage(tuple(items), offset, len(rows) > limit, self._epoch())
+
     def _current(self, memory_id: str, expected_revision: int) -> MemoryItem:
         _text(memory_id, "Memory id", 256)
         _revision(expected_revision)
@@ -641,10 +669,14 @@ class SQLiteMemoryRepository:
         return epoch, tuple(sorted(tasks))
 
     def _expire_candidates(self, now: datetime) -> None:
-        rows = self._db.execute("SELECT r.* FROM memory_revisions r JOIN memory_heads h "
-                                "ON r.id=h.id AND r.revision=h.revision WHERE r.status='candidate'").fetchall()
-        expired = {item.id for row in rows if (item := self._decode(row)).draft.expires_at is not None
-                   and item.draft.expires_at <= now}
+        # Stored timestamps are normalized to UTC by ingestion. Filter expiry
+        # in SQLite and materialize identifiers only; querying an epoch/page
+        # must not decode every live candidate before returning its bounded page.
+        rows = self._db.execute("SELECT r.id FROM memory_revisions r JOIN memory_heads h "
+            "ON r.id=h.id AND r.revision=h.revision WHERE r.status='candidate' "
+            "AND json_extract(r.draft,'$.expires_at') IS NOT NULL "
+            "AND json_extract(r.draft,'$.expires_at')<=?", (_stamp(now),)).fetchall()
+        expired = {str(row["id"]) for row in rows}
         if expired:
             with self._transaction():
                 self._delete_ids(expired, now)

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "deskpal"
-version = "0.4.0"
+version = "0.5.0rc1"
 description = "Local-first personal agent backend"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -13,11 +13,16 @@ dependencies = ["python-dotenv>=1.0", "tzdata; sys_platform == 'win32'"]
 [project.scripts]
 deskpal = "deskpal.application.cli:main"
 
+[project.gui-scripts]
+deskpal-gui = "deskpal.gui.main:main"
+
 [project.optional-dependencies]
 dev = ["pytest>=7.4", "mypy>=1.10"]
 screenshot = ["mss>=10.0,<11"]
 # Optional local CPU retrieval; prepare the model cache explicitly.
 embedding = ["fastembed==0.9.0"]
+gui = ["PySide6-Essentials>=6.12,<6.13"]
+gui-dev = ["pytest-qt>=4.5,<4.6"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

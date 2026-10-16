@@ -2,7 +2,7 @@
 
 ## 开始修改前
 
-阅读根目录 `ARCHITECTURE.md`、[V0.3 记忆接口](../versions/v0.3/interfaces.md)与[V0.2 工具接口](../versions/v0.2/interfaces.md)。当前实现范围和证据以 [V0.3 交付](../versions/v0.3/delivery.md)及[测试报告](../versions/v0.3/test-report.md)为准；`doc/` 与 planning 用于长期设计。
+阅读根目录 `ARCHITECTURE.md`、[V0.5 接口](../versions/v0.5/interfaces.md)、[V0.4 持久后端接口](../versions/v0.4/interfaces.md)、[V0.3 记忆接口](../versions/v0.3/interfaces.md)与[V0.2 工具接口](../versions/v0.2/interfaces.md)。当前候选版范围和证据以 [V0.5 状态](../versions/v0.5/delivery.md)及[测试报告](../versions/v0.5/test-report.md)为准；`doc/` 与 planning 用于长期设计。
 
 Calendar/Timer 工具依赖 `SchedulingManager` Protocol，SQLite/线程实现由 Application 装配和关闭；截图通过可注入 `ScreenshotBackend`，mss 惰性加载。Core 不导入这些具体服务，UI 和直接工具请求仍需经过同一个 Tool Manager/Sandbox 入口。
 
@@ -26,15 +26,22 @@ Calendar/Timer 工具依赖 `SchedulingManager` Protocol，SQLite/线程实现�
 
 ## 接入桌面界面
 
-UI 通过 Application 创建 Agent，调用 `handle_request()` 并显示 `AgentResult`。界面可根据任务 ID 查询状态。同步请求应由界面的工作线程执行，避免阻塞主线程。SchedulingService 已有独立调度线程，UI 从 events 工具读取持久化到期事件；系统通知与抢占取消仍需专门设计，不能仅改变提示就声称支持。
+V0.5 UI 通过 `ApplicationBridge → DesktopFacade → ApplicationService` 进入既有后端；初始化、查询、命令、关闭留在后台通道，Qt 主线程只处理有界 DTO 和展示。只有既有 dispatcher 执行 Core；工具继续经过 Tool Manager/Sandbox。同 data_dir 的 CLI 与 GUI 互斥，不另建执行者。
 
-当结果为 Waiting 时，展示全计划与逐项缺授权参数/风险，用户同意后调用同一 Core 的 `confirm_task`，分别传普通和高风险授权，执行原计划。记忆依赖更正/删除/过期后私有计划与授权失效；关闭/重启后无法恢复私有计划；重新 `run` 是新任务且会重新规划。
+Waiting/NeedsReview 展示持久原计划、参数、风险、workspace 和 hash；普通与高风险授权默认都为空，明确同意后使用 `enqueue_confirmation` 返回非阻塞回执。现有授权按整份计划中的工具名，不宣称逐调用或逐路径授权。重启可以恢复审查所需快照，但会话授权清空、有 attempt 的计划不自动重放；记忆依赖和来源变化仍失效旧计划。通知只提醒并导航复查，同步调用仍是协作取消。生命周期、隐私屏障和真实 Windows 缺项见 V0.5 接口与测试报告。
+
+## 测试任务委派
+
+按用户于 2026-10-16 的要求，主 Agent 先判断测试任务性质：简单、机械、低风险且预期结果明确的执行（例如固定命令的回归、strict、证据和链接核对），委派使用 **6 Luna** 的子 Agent；沿用高思考强度。主 Agent 负责设定命令、范围、时限和通过标准，并审查结果。
+
+故障归因、架构审查和修补方案由主 Agent 或 6.1 Sol 高思考 Agent 承担。执行 Agent 遇到失败需保留日志、退出码与失败项，不自行放宽断言或跳过检查。每项返回修改文件、设计说明、接口影响、测试结果与潜在问题；Git 提交由用户处理。
 
 ## 验证与交付纪律
 
 - 修改共享接口前审查所有调用方，更新接口文档。
 - 添加能验证实际行为、错误和边界的测试，避免只复制实现逻辑。
 - 在仓库根目录运行 `python -m pytest`；静态检查使用 `python -m mypy --strict src scripts/check_memory_api.py scripts/benchmark_memory.py`。
+- 全仓 GUI 开发使用 requirements-gui-dev.txt；Qt 脚本与容量脚本分组检查及有界诊断命令见 [V0.5 操作指南](../versions/v0.5/operations.md)。
 - 配置、日志和数据库使用测试临时目录；不读取真实密钥或修改用户工作区数据。
 - 交付记录修改文件、设计理由、接口、测试结果及限制。
 - 不提交真实配置、环境凭据、运行日志、数据库或生成缓存。

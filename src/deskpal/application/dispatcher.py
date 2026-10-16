@@ -168,8 +168,8 @@ class SubmissionDispatcher:
 
     def stop_accepting(self) -> None:
         with self._condition:
+            active = None if self._stop else self._active_id
             self._stop = True
-            active = self._active_id
             self._condition.notify_all()
         if active is not None:
             try:

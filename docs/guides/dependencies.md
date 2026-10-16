@@ -1,6 +1,6 @@
 # 依赖清单与维护
 
-更新：2026-10-16，含 V0.4 时区依赖与 V0.5 待开发 GUI 分组说明。直接依赖统一在 [pyproject.toml](../../pyproject.toml)，requirements 文件只提供分组入口；在仓库根目录运行。`-e .` 安装当前项目，extra 追加可选功能。
+更新：2026-10-16，含 V0.4 时区与 V0.5 候选版 GUI 依赖。直接依赖统一在 [pyproject.toml](../../pyproject.toml)，requirements 文件只提供分组入口；在仓库根目录运行。`-e .` 安装当前项目，extra 追加可选功能。
 
 | 分组 | 直接声明 | 安装入口 | 实际状态 |
 | --- | --- | --- | --- |
@@ -8,6 +8,8 @@
 | 开发 | pytest >=7.4、mypy >=1.10 | [requirements-dev.txt](../../requirements-dev.txt) | Python 3.11/3.12 回归与类型检查，最终计数见版本报告 |
 | 截图 | mss >=10.0,<11 | [requirements-screenshot.txt](../../requirements-screenshot.txt) | 可选；V0.2 已有，当前回归覆盖 |
 | CPU embedding | fastembed ==0.9.0 | [requirements-embedding.txt](../../requirements-embedding.txt) | V0.3 已接入，真实模型仅在 Python 3.12 验证 |
+| GUI | PySide6-Essentials >=6.12,<6.13 | [requirements-gui.txt](../../requirements-gui.txt) | 主/兼容测试环境已安装 6.12.0，shiboken6 配套 |
+| GUI 开发 | dev/gui 加 pytest-qt >=4.5,<4.6 | [requirements-gui-dev.txt](../../requirements-gui-dev.txt) | 4.5.0；真实 Qt 事件循环测试，实机项另测 |
 
 ## 安装
 
@@ -33,9 +35,15 @@ python -m pip check
 
 [本机评估](../planning/v0.4/environment-assessment.md)对应的持久目标/提议/任务恢复使用标准库 SQLite、threading、queue 控制和 OS 锁，无需队列框架、ORM、Qt 或 Live2D。pyproject 已加入 Windows 条件 `tzdata`，Python 3.11/3.12 环境均安装并验证 2026.5；constraints 增加对应 pin。requirements 仍引用 pyproject，无需再手写第二份依赖版本。模型缓存不变，V0.4 不新增下载模型或后台云 SDK。
 
+## V0.6 评估中的依赖
+
+[V0.6环境评估](../planning/v0.6/environment-assessment.md)已盘点双Python、Qt、MSVC/SDK与候选Win32适配。当前pywin32/psutil未安装；它们不是已经冻结的必须依赖，先验证标准库ctypes或薄native helper路线，再决定是否增加Windows execution extra和requirements入口。现有两个constraints继续保留；阶段0验证后才新增执行约束与runtime/helper manifest，不用空锁文件或整份Conda freeze冒充已验证闭包。
+
+本阶段不需要新embedding/Live2D/CUDA或云SDK；专用worker runtime、最小ACL、真进程测试环境仍待原型准备。运行时可用性不能由pip check或发现编译器目录代替。本次评估没有安装依赖。
+
 ## 更新规则
 
-V0.5 尚未安装 GUI 依赖，也未声明 GUI extra。拟新增可选 PySide6-Essentials 与 GUI 开发用 pytest-qt；由 pyproject 声明后再提供 requirements-gui/gui-dev 入口，验证后固定 Qt/shiboken 等闭包。现有 requirements 与 44 项约束继续描述已实现后端，不能当作 GUI 已准备好。完整包/最小包、Python 3.11 旧安装元数据、候选版本与验证步骤见 [V0.5 环境评估](../planning/v0.5/environment-assessment.md)。本阶段无需 Live2D、CUDA 或新增云 SDK。
+V0.5 已声明 gui/gui-dev 可选组与两个 requirements 入口，主/兼容环境均安装验证。新增 [Windows 3.12 GUI 约束](../../constraints/windows-py312-gui.txt)复用原44项后端约束并固定 Essentials/shiboken/pytest-qt；它仍不是哈希锁或 Python 3.11 通用保证。安装使用 `python -m pip install -r requirements-gui-dev.txt -c constraints/windows-py312-gui.txt`。本阶段无需 Live2D、CUDA 或新增云 SDK，实际验证见 [V0.5 报告](../versions/v0.5/test-report.md)。
 
 1. 先修改 pyproject 对应直接依赖，再更新已验证目标的约束；requirements 保持引用 extra，避免两套手写版本范围。
 2. 基础组只放所有后端用户必须安装的库；截图、embedding、未来 UI SDK 继续留在 adapter 可选组。
