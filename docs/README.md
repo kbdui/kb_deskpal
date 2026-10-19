@@ -2,6 +2,8 @@
 
 当前代码为 **0.5.0rc1**，加入 GUI 与后台交互；V0.4 持久后端继续保留。候选版实际范围与验收缺项见 [V0.5 状态](versions/v0.5/delivery.md)和[测试报告](versions/v0.5/test-report.md)；历史报告只说明当时证据，规划不是验收结果。
 
+**切换聊天：**先阅读[最新09:35暂停检查点](versions/v0.6/pause-checkpoint-2026-10-18-0935.md)与[新聊天交接：V0.6](handoffs/2026-10-17-v0.6.md)，再按需读[本轮恢复过程](versions/v0.6/resume-2026-10-18-after-0019.md)。用户已要求保存进度并暂停；阶段0仍未通过，尚未接入生产执行。
+
 ## 推荐阅读顺序
 
 1. [根目录总体架构](../ARCHITECTURE.md)：模块边界、调用方向和安全保证。
@@ -13,7 +15,7 @@
 7. [记忆、人格与情绪机制](planning/companion-model/README.md)：基于 V0.2 的长期设计提案；部分记忆机制已映射到 V0.3 实现，人格、情绪等仍为未来设计。
 8. [V0.4 环境评估](planning/v0.4/environment-assessment.md)、[开发计划](planning/v0.4/development-plan.md)、[验收边界](planning/v0.4/acceptance-boundaries.md)：实施前规划快照，实际证据以 versions/v0.4 为准。
 9. [V0.5 操作指南](versions/v0.5/operations.md)、[接口](versions/v0.5/interfaces.md)、[状态](versions/v0.5/delivery.md)、[测试](versions/v0.5/test-report.md)：Windows GUI 候选版；[原环境评估](planning/v0.5/environment-assessment.md)、[计划](planning/v0.5/development-plan.md)、[验收边界](planning/v0.5/acceptance-boundaries.md)保留为实施前快照。
-10. [V0.6 环境评估](planning/v0.6/environment-assessment.md)、[开发计划](planning/v0.6/development-plan.md)、[验收边界](planning/v0.6/acceptance-boundaries.md)：基于当前rc1的下一阶段提案，先隔离执行/精细授权，再开放有限本地自动规则；尚未实现。
+10. [V0.6 环境评估](planning/v0.6/environment-assessment.md)、[开发计划](planning/v0.6/development-plan.md)、[验收边界](planning/v0.6/acceptance-boundaries.md)：用户已要求[保存进度并暂停](versions/v0.6/pause-checkpoint-2026-10-18-0935.md)，阶段0仍未通过，尚未接入生产执行；[恢复过程](versions/v0.6/resume-2026-10-18-after-0019.md)与更早检查点保留历史状态。[进度](versions/v0.6/development-status.md)、[证据与剩余门槛](versions/v0.6/stage0-evidence.md)、[runtime 调查](versions/v0.6/runtime-investigation.md)、[权限静态审查](versions/v0.6/runtime-security-review.md)与[工具迁移表](versions/v0.6/tool-migration.md)记录实际范围。
 
 ## 分类与命名规则
 
@@ -56,6 +58,12 @@ docs/
       windows-checklist.md            实际屏幕与系统交互验收
       development-status.md           开发交接及暂停记录
       stability-investigation.md      低频停滞调查与测试屏障证据
+    v0.6/
+      development-status.md           阶段0实际进度与恢复点
+      runtime-investigation.md         受限启动与持久写入边界调查
+      runtime-security-review.md       文件/注册表权限盲点及实验提案
+      stage0-evidence.md               实机证据、覆盖缺口及依赖顺序
+      tool-migration.md               19个工具的目标执行类别
   planning/
     roadmap.md                      V0.3 至 V1.0 分阶段路线
     companion-model/
@@ -89,7 +97,7 @@ Markdown 链接相对于当前文档；正文中的 `src/...`、`docs/...` 等�
 
 | 版本 | 计划与接口 | 测试证据 | 交付/环境 |
 | --- | --- | --- | --- |
-| V0.6 规划 | [开发计划](planning/v0.6/development-plan.md)、[验收边界](planning/v0.6/acceptance-boundaries.md) | 尚未实现，无隔离/自动规则通过证据 | [环境与依赖评估](planning/v0.6/environment-assessment.md) |
+| V0.6 阶段0 | [开发计划](planning/v0.6/development-plan.md)、[验收边界](planning/v0.6/acceptance-boundaries.md) | 原型开发中，未通过完整隔离/自动规则验收 | [进度](versions/v0.6/development-status.md)、[工具迁移表](versions/v0.6/tool-migration.md)、[原评估](planning/v0.6/environment-assessment.md) |
 | V0.5 rc1 | [接口](versions/v0.5/interfaces.md)、[操作指南](versions/v0.5/operations.md)、[验收边界](planning/v0.5/acceptance-boundaries.md) | [实际报告](versions/v0.5/test-report.md)、[Windows 实机记录](versions/v0.5/windows-checklist.md)、[稳定性调查](versions/v0.5/stability-investigation.md) | [候选状态](versions/v0.5/delivery.md)、[进度交接](versions/v0.5/development-status.md)、[原评估](planning/v0.5/environment-assessment.md) |
 | V0.4 | [实际接口](versions/v0.4/interfaces.md)、[操作指南](versions/v0.4/operations.md)、[原计划](planning/v0.4/development-plan.md) | [测试报告](versions/v0.4/test-report.md) | [交付](versions/v0.4/delivery.md)、[环境评估](planning/v0.4/environment-assessment.md) |
 | V0.3 | [实际接口](versions/v0.3/interfaces.md)、[原计划](planning/v0.3/development-plan.md) | [测试报告](versions/v0.3/test-report.md) | [交付](versions/v0.3/delivery.md) |
