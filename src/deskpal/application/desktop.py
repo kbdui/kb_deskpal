@@ -106,6 +106,10 @@ class DesktopFacade:
 
     def _execute(self, operation: str, args: dict[str, Any]) -> Any:
         app = self.app
+        if operation == "presentation":
+            if args:
+                raise ValueError("Presentation query does not accept parameters")
+            return app.presentation_snapshot()
         if operation == "tasks":
             offset, limit = self._page(args)
             return app.tasks.page_summaries(offset=offset, limit=limit, **args)

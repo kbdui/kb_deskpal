@@ -6,6 +6,8 @@ Windows 个人智能 Agent 桌宠项目。当前版本 **0.5.0rc1**：在既有�
 
 V0.5 [开工前评估](docs/planning/v0.5/environment-assessment.md)与[计划](docs/planning/v0.5/development-plan.md)保留为规划快照；实际证据见 [测试报告](docs/versions/v0.5/test-report.md)。
 
+V0.7静态图片桌宠已实现，2026-10-21按用户要求带未决项[归档](docs/versions/v0.7/delivery.md)，未全部验收通过。主窗口设置可启用原创机器人及有限表情差分，支持拖动、显示/隐藏、置顶和鼠标穿透；原生混合DPI、安装及30分钟运行已有证据，长测预览诊断失败与内存增长归因仍保留。使用与验证范围见[V0.7运行说明](docs/versions/v0.7/operations.md)和[测试报告](docs/versions/v0.7/test-report.md)。不新增运行依赖或第二Core；产品仍0.5.0rc1，Live2D延期至正式版后更新，V0.6隔离实验仍暂停。
+
 ## 安装与运行
 
 GUI（可选依赖，与 CLI 同数据目录互斥）：

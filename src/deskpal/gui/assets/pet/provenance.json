@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "date": "2026-10-20",
+  "tool": "OpenAI built-in image_gen (Codex imagegen skill)",
+  "purpose": "V0.7 static desktop pet, offline packaged PNG resources",
+  "character": "original small ivory and teal robot; user selected",
+  "external_character_references": [],
+  "edit_reference": "neutral.png for four face-only edit requests; source images copied without postprocessing",
+  "status": "generated; five PNG structural checks passed in asset-r3; native visual acceptance pending",
+  "source_sha256": {
+    "neutral.png": "3a992221b6d678641b045b2dced9843d2d5d2a7f205cac1a4b3d4cd7c4efb861",
+    "thinking.png": "771c597c1a0570e589e23912f96e663c2359d80cec4a07d03734046baf1cfbe2",
+    "focused.png": "6e9a8430c39fdcf142ceb4c9750553b58d869c2e4cdad109cd109b92593dd444",
+    "pleased.png": "fe2139ac918edc6dd0f7da70d41126a8ccf68e942daba5a90989e292f0132ade",
+    "alert.png": "c23139b5421f8a2b45b758311a8cb272a3bed611b1788b35743e15ec28f5c054"
+  },
+  "live2d": false,
+  "prompts": {
+    "neutral": "Use case: stylized-concept. Asset type: production transparent PNG sprite for an offline desktop companion, neutral expression. Create one original cute compact small robot, full body, front facing, calm friendly two simple round eyes, subtle tiny smile, rounded ivory shell with muted teal accents, dark charcoal face screen, simple rounded arms resting by sides and two feet. Clean polished 2D illustration with readable shapes at 160 pixels, restrained soft shading. Square 1024x1024 canvas, body centered, feet baseline at y=900, outer silhouette fully inside x=220..804 and y=140..900. Genuine transparent alpha outside character, including empty margin. No floor shadow, no glow outside silhouette, no scenery, no props, no text, no logos, no watermark. Single character only, neutral symmetrical stable pose. This is the canonical body/pose/scale/anchor for later face-only expression edits; keep substantial clean transparent margin.",
+    "thinking": "Use case: precise-object-edit. This image is the edit target, canonical transparent desktop robot sprite. Create the THINKING facial-expression variant. Change ONLY eyes and mouth INSIDE the dark face screen: softly curious eyes looking slightly upward, one subtly raised brow, a small contemplative closed mouth. Keep all other pixels and composition as close to exactly unchanged as possible: identical head/body/arms/feet, unchanged symmetrical resting pose, shell material, colors, outlines, lighting, figure size, position and feet anchor. Preserve EXACT 1254x1254 canvas and original transparent alpha silhouette and all blank margin. No movement, no new object, no question mark or symbol, no text, no scenery or shadow, no glow outside the figure. Genuine transparent background. Do not crop, zoom, resize, redraw or restyle the body.",
+    "focused": "Use case: precise-object-edit. Edit target: canonical neutral transparent desktop robot. Create FOCUSED facial-expression variant. Change ONLY eyes and mouth inside the dark face screen: two attentive slightly narrowed oval teal eyes, level relaxed brows, short calm horizontal closed mouth, quietly concentrating, friendly and not angry. Preserve all other body/head/arms/feet/shell/outline/lighting pixels as closely as possible, exactly same full-body symmetrical resting pose, same scale, alignment, feet baseline and blank margins. Preserve EXACT 1254x1254 square canvas and original transparent alpha silhouette. Do not crop/resize/zoom/reframe. No movement, no props, no symbols/text, no background or floor shadow, no glow outside the character. Actual transparent PNG.",
+    "pleased": "Use case: precise-object-edit. Edit target: canonical neutral transparent desktop robot. Create PLEASED facial-expression variant for a brief completed-task acknowledgement. Change ONLY the teal eyes and mouth inside the dark face screen: two cheerful gently curved closed smiling eyes, a small happy smile, restrained warmth. Preserve everything else unchanged as closely as possible: identical whole head/body/arms/feet, same ivory/teal shell, outlines/shading, same symmetrical resting pose, same position/scale/foot anchor/margins. Exact 1254x1254 square transparent canvas, original transparent silhouette. No waving, no pose change, no celebration symbols or confetti, no props, no text, no shadow/background, no outside glow. Do not crop/resize/zoom/reframe. Genuine alpha transparency.",
+    "alert": "Use case: precise-object-edit. Edit target: canonical neutral transparent desktop robot. Create ALERT facial-expression variant for an execution failure or attention-required state. Change ONLY face-screen teal eyes/brows/mouth: gently raised worried eyebrows, attentive open eyes, small neutral slightly downturned mouth, mild concern and helpful attentiveness. Do not make character angry, distressed, hurt, crying or punitive. Preserve identical original whole head, shell, body/arms/feet, resting symmetrical pose, all colors/materials/outlines/shading, same exact size/position/feet baseline/margins. Exact 1254x1254 square PNG canvas; keep original alpha silhouette and genuine transparent empty background. Do not crop/zoom/resize/reframe, no props, no warning icons/text, no tears, no background/shadow, no outside glow."
+  },
+  "generated_output_ids": {
+    "neutral": "exec-1b882b7b-33bb-4e8b-b24a-1be06fd83489.png",
+    "thinking": "exec-60ebf757-ab32-46a3-9d70-904069ca58c4.png",
+    "focused": "exec-fcb86638-8630-42f0-b049-b1c5f22114a3.png",
+    "pleased": "exec-b1221a1f-1021-4179-8b91-aa0f1563b25f.png",
+    "alert": "exec-c8fcfee6-4d5d-4882-a756-932b1837d7f8.png"
+  },
+  "usage_note": "AI-generated provenance does not establish exclusive copyright or resolve future distribution conditions. Current scope is noncommercial local development. No third-party model or character assets were used. Recheck actual account terms and distribution obligations before publishing."
+}

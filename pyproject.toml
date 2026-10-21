@@ -27,6 +27,9 @@ gui-dev = ["pytest-qt>=4.5,<4.6"]
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+"deskpal.gui" = ["assets/pet/*.png", "assets/pet/*.json", "assets/pet/*.md"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]

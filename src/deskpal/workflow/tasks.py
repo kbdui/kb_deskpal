@@ -15,6 +15,106 @@ from .models import DependencyRef, QueueFull, WorkflowBlocked
 from .store import WorkflowStore, canonical
 
 
+# Fixed metadata candidates, with indexed seeks and lower-priority result gates.
+# The nonqueued/queued split preserves SQLite's original NULL-first secondary
+# ordering for active tasks. Only the tiny candidate sets need a temporary sort.
+# Healthy-store work relies on the existing single-claim/queue-capacity rules;
+# LIMIT alone is not a bound on scanned rows in arbitrary/corrupt databases.
+# Priority gates sit outside the indexed LIMIT subqueries: even if SQLite
+# evaluates a gated-out branch, it cannot scan all review/terminal history.
+_PRESENTATION_SQL = """
+WITH
+active_nonqueued AS (
+    SELECT id,status,revision,updated_at FROM (
+        SELECT * FROM (
+            SELECT t.id,t.status,t.revision,t.updated_at
+            FROM task AS t INDEXED BY task_presentation_status
+            WHERE t.status='Planning' AND NOT EXISTS (
+                SELECT 1 FROM submission AS s WHERE s.task_id=t.id AND s.status='Queued'
+            ) ORDER BY t.updated_at DESC,t.id DESC LIMIT 1
+        )
+        UNION ALL
+        SELECT * FROM (
+            SELECT t.id,t.status,t.revision,t.updated_at
+            FROM task AS t INDEXED BY task_presentation_status
+            WHERE t.status='Running' AND NOT EXISTS (
+                SELECT 1 FROM submission AS s WHERE s.task_id=t.id AND s.status='Queued'
+            ) ORDER BY t.updated_at DESC,t.id DESC LIMIT 1
+        )
+        UNION ALL
+        SELECT * FROM (
+            SELECT t.id,t.status,t.revision,t.updated_at
+            FROM submission AS s INDEXED BY submission_presentation_status
+            CROSS JOIN task AS t
+            WHERE t.id=s.task_id AND s.status='Claimed' AND t.status IN ('Created','Waiting')
+            ORDER BY t.updated_at DESC,t.id DESC LIMIT 1
+        )
+    ) ORDER BY updated_at DESC,id DESC LIMIT 1
+),
+active_queued AS (
+    SELECT * FROM (
+        SELECT t.id,t.status,t.revision,t.updated_at
+        FROM submission AS s INDEXED BY submission_presentation_status
+        CROSS JOIN task AS t
+        WHERE t.id=s.task_id AND s.status='Queued' AND t.status IN ('Planning','Running')
+        ORDER BY s.sequence LIMIT 1
+    ) WHERE NOT EXISTS (SELECT 1 FROM active_nonqueued)
+),
+active AS (
+    SELECT * FROM active_nonqueued UNION ALL SELECT * FROM active_queued
+),
+queued AS (
+    SELECT * FROM (
+        SELECT t.id,t.status,t.revision,t.updated_at
+        FROM submission AS s INDEXED BY submission_presentation_status
+        CROSS JOIN task AS t
+        WHERE t.id=s.task_id AND s.status='Queued'
+        ORDER BY s.sequence LIMIT 1
+    ) WHERE NOT EXISTS (SELECT 1 FROM active)
+),
+review AS (
+    SELECT id,status,revision,updated_at FROM (
+        SELECT * FROM (
+            SELECT id,status,revision,updated_at FROM task INDEXED BY task_presentation_status
+            WHERE status='Created'
+            ORDER BY updated_at DESC,id DESC LIMIT 1
+        )
+        UNION ALL
+        SELECT * FROM (
+            SELECT id,status,revision,updated_at FROM task INDEXED BY task_presentation_status
+            WHERE status='Waiting'
+            ORDER BY updated_at DESC,id DESC LIMIT 1
+        )
+        UNION ALL
+        SELECT * FROM (
+            SELECT id,status,revision,updated_at FROM task INDEXED BY task_presentation_status
+            WHERE status='NeedsReview'
+            ORDER BY updated_at DESC,id DESC LIMIT 1
+        )
+        UNION ALL
+        SELECT * FROM (
+            SELECT id,status,revision,updated_at FROM task INDEXED BY task_presentation_status
+            WHERE status='Uncertain'
+            ORDER BY updated_at DESC,id DESC LIMIT 1
+        )
+    ) WHERE NOT EXISTS (SELECT 1 FROM active) AND NOT EXISTS (SELECT 1 FROM queued)
+    ORDER BY updated_at DESC,id DESC LIMIT 1
+),
+outcome AS (
+    SELECT * FROM (
+        SELECT id,status,revision,updated_at FROM task INDEXED BY task_presentation_latest
+        ORDER BY updated_at DESC,id DESC LIMIT 1
+    )
+    WHERE NOT EXISTS (SELECT 1 FROM active) AND NOT EXISTS (SELECT 1 FROM queued)
+        AND NOT EXISTS (SELECT 1 FROM review)
+)
+SELECT id,status,revision FROM (
+    SELECT * FROM active UNION ALL SELECT * FROM queued
+    UNION ALL SELECT * FROM review UNION ALL SELECT * FROM outcome
+) LIMIT 1
+"""
+
+
 def dependency_ref(value: Any) -> DependencyRef:
     if isinstance(value, DependencyRef):
         ref = value
@@ -138,6 +238,30 @@ class PersistentTaskManager:
             items = [{**dict(row), "cancel_requested": bool(row["cancel_requested"])} for row in rows[:limit]]
             version = int(conn.execute("SELECT COALESCE(MAX(sequence),0) FROM audit_outbox").fetchone()[0])
             return {"items": items, "offset": offset, "has_more": len(rows) > limit, "version": version}
+
+    def presentation_snapshot(self) -> dict[str, Any]:
+        """Read one authoritative metadata projection, never task/plan bodies.
+
+        Running/planning or claimed work takes precedence over queued work,
+        then work awaiting a decision and finally the most recent outcome.
+        Claiming does not invent a new TaskStatus: Claimed + Created remains
+        Created. The outbox AUTOINCREMENT high-water mark survives row cleanup.
+        Indexes are initialized once by WorkflowStore, including existing schema
+        1 databases. Reads seek fixed status candidates instead of sorting all
+        history; queue scans rely on the existing bounded-pending-work invariant.
+        """
+        with self.store.transaction() as conn:
+            sequence_row = conn.execute(
+                "SELECT seq FROM sqlite_sequence WHERE name='audit_outbox' LIMIT 1").fetchone()
+            sequence = 0 if sequence_row is None else int(sequence_row[0])
+            row = conn.execute(_PRESENTATION_SQL).fetchone()
+            if row is None:
+                return {"schema_version": 1, "sequence": sequence, "status": "Idle",
+                        "task_id": None, "revision": 0}
+            # Corrupt/unsupported metadata must fail the read, never look idle.
+            status = TaskStatus(row["status"])
+            return {"schema_version": 1, "sequence": sequence, "status": status.value,
+                    "task_id": row["id"], "revision": row["revision"]}
 
     def claim_next(self) -> Task | None:
         while True:

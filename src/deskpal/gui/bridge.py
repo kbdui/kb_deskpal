@@ -33,7 +33,7 @@ class _Command:
 
 READ_OPERATIONS = frozenset({"tasks", "task", "memories", "goals", "goal", "milestones",
                              "bindings", "proposals", "proposal", "settings", "notification_feed",
-                             "notification_validate"})
+                             "notification_validate", "presentation"})
 CONTROL_OPERATIONS = frozenset({"cancel", "diagnostics"})
 PRIVACY_ACTIONS = frozenset({"forget", "correct", "accept", "reject"})
 MAX_PENDING = 32

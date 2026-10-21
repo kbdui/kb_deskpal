@@ -32,6 +32,7 @@ class MainWindow(QMainWindow):
         self.memory_snapshot: dict[str, Any] = {}
         self.proposal_snapshot: dict[str, Any] = {}
         self._allow_close = False
+        self.defer_closed = False  # DesktopHost may still own a PNG worker.
         self._ready_seen = False
         self._task_signature: tuple[Any, ...] = ()
         self._ordinary: dict[str, QCheckBox] = {}
@@ -294,6 +295,16 @@ class MainWindow(QMainWindow):
         row.addWidget(self.quiet_end)
         layout.addWidget(self.notifications_toggle)
         layout.addWidget(self.tray_toggle)
+        self.pet_toggles: dict[str, QCheckBox] = {}
+        for key, title in (("pet_enabled", "启用静态桌宠"),
+                           ("pet_visible", "显示桌宠（隐藏保留启用状态）"),
+                           ("pet_on_top", "桌宠置顶"),
+                           ("pet_click_through", "桌宠整窗鼠标穿透（可在此取消）")):
+            toggle = QCheckBox(title)
+            toggle.setChecked(bool(getattr(self.preferences, key, key in {"pet_visible", "pet_on_top"})))
+            toggle.toggled.connect(lambda value, name=key: self._set_preference(name, value))
+            self.pet_toggles[key] = toggle
+            layout.addWidget(toggle)
         layout.addLayout(row)
         layout.addWidget(QLabel("GUI 偏好即时生效。下方后端有效配置与来源只读；修改配置文件后需重启。密钥不在界面中编辑。"))
         self.settings_text = QPlainTextEdit()
@@ -331,6 +342,7 @@ class MainWindow(QMainWindow):
         controls: dict[str, Any] = {"notifications_enabled": self.notifications_toggle,
                                     "close_to_tray": self.tray_toggle,
                                     "quiet_start": self.quiet_start, "quiet_end": self.quiet_end}
+        controls.update(self.pet_toggles)
         widget = controls.get(key)
         if widget is not None:
             widget.blockSignals(True)
@@ -442,6 +454,8 @@ class MainWindow(QMainWindow):
 
     @Slot(str)
     def on_state_changed(self, state: str) -> None:
+        if state == "Closed" and self.defer_closed:
+            state = "Closing"
         if self.lifecycle == "Closed":
             return
         self.lifecycle = state
@@ -650,6 +664,8 @@ class MainWindow(QMainWindow):
                 page.next.setEnabled(False)
         for control in (self.notifications_toggle, self.tray_toggle, self.quiet_start, self.quiet_end):
             control.setEnabled(ready and self.preferences is not None)
+        for control in self.pet_toggles.values():
+            control.setEnabled(self.preferences is not None and self.lifecycle not in {"Closing", "Closed"})
         self.retry_button.setEnabled(self.lifecycle in {"Ready", "CleanupBlocked", "Closing"})
 
     def _active_page(self) -> str | None:

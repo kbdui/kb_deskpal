@@ -1,0 +1,150 @@
+V0.7 环境元数据取证
+日期：2026-10-19
+
+范围：仅检查用户明确给出的两个 python.exe 路径；先用 Test-Path 确认，再对存在者调用 --version、读取 sys/platform/importlib.metadata/find_spec 与发行包 files 元数据。未枚举 data 目录，未导入创建 Qt App 或 GL 上下文，未运行测试。
+
+以下各节中的 COMMAND、OUTPUT、EXIT 为工具刚返回内容的记录。第一次查询引号错误的 SyntaxError 也保留；后续用 PowerShell 单引号脚本查询完成修正。
+========== TOOL RESULT 1: Test-Path for the two explicitly named interpreters, followed only by metadata queries for existing paths ==========
+COMMAND:
+$paths = @('D:\anaconda\Anaconda3\envs\deskpal_env\python.exe','E:\no_game\git\kb_deskpal\kb_deskpal\data\validation\py311\python.exe'); foreach ($p in $paths) { Write-Output ("PATH " + $p); if (Test-Path -LiteralPath $p -PathType Leaf) { Write-Output 'EXISTS'; & $p --version; & $p -c 'import sys, platform, importlib.metadata as m, importlib.util as u
+print("executable:", sys.executable)
+print("python:", sys.version.replace("\n", " "))
+print("platform:", platform.platform())
+for p in ["PySide6", "PySide6-Essentials", "shiboken6", "pytest", "pytest-qt", "mypy", "live2d-py", "PyOpenGL"]:
+ try: print(p + ":", m.version(p))
+ except m.PackageNotFoundError: print(p + ": NOT INSTALLED")
+for s in ["PySide6", "PySide6.QtOpenGL", "PySide6.QtOpenGLWidgets", "pytest", "pytestqt", "mypy", "live2d", "OpenGL"]:
+ try: print(s + " spec:", u.find_spec(s))
+ except Exception as e: print(s + " spec error:", type(e).__name__, str(e))'; & $p -c 'import importlib.metadata as m
+for dname in ["PySide6-Essentials", "PySide6", "shiboken6"]:
+ try:
+  d=m.distribution(dname); print("FILES", dname)
+  for f in d.files or ():
+   s=str(f).replace("\\", "/")
+   if any(k in s for k in ["QtOpenGL", "QtWidgets", "QtGui"]): print(s)
+ except m.PackageNotFoundError: print("FILES", dname, "NOT INSTALLED")'; } else { Write-Output 'MISSING'; } }
+OUTPUT:
+PATH D:\anaconda\Anaconda3\envs\deskpal_env\python.exe
+EXISTS
+Python 3.12.4
+executable: D:\anaconda\Anaconda3\envs\deskpal_env\python.exe
+python: 3.12.4 | packaged by Anaconda, Inc. | (main, Jun 18 2024, 15:03:56) [MSC v.1929 64 bit (AMD64)]
+platform: Windows-11-10.0.26200-SP0
+PySide6: NOT INSTALLED
+PySide6-Essentials: 6.12.0
+shiboken6: 6.12.0
+pytest: 9.1.1
+pytest-qt: 4.5.0
+mypy: 2.4.0
+live2d-py: NOT INSTALLED
+PyOpenGL: NOT INSTALLED
+PySide6 spec: ModuleSpec(name='PySide6', loader=<_frozen_importlib_external.SourceFileLoader object at 0x000001F6005A7800>, origin='D:\\anaconda\\Anaconda3\\envs\\deskpal_env\\Lib\\site-packages\\PySide6\\__init__.py', submodule_search_locations=['D:\\anaconda\\Anaconda3\\envs\\deskpal_env\\Lib\\site-packages\\PySide6'])
+PySide6.QtOpenGL spec: ModuleSpec(name='PySide6.QtOpenGL', loader=<_frozen_importlib_external.ExtensionFileLoader object at 0x000001F6005D4230>, origin='D:\\anaconda\\Anaconda3\\envs\\deskpal_env\\Lib\\site-packages\\PySide6\\QtOpenGL.pyd')
+PySide6.QtOpenGLWidgets spec: ModuleSpec(name='PySide6.QtOpenGLWidgets', loader=<_frozen_importlib_external.ExtensionFileLoader object at 0x000001F6005D4140>, origin='D:\\anaconda\\Anaconda3\\envs\\deskpal_env\\Lib\\site-packages\\PySide6\\QtOpenGLWidgets.pyd')
+pytest spec: ModuleSpec(name='pytest', loader=<_frozen_importlib_external.SourceFileLoader object at 0x000001F6005D6E10>, origin='D:\\anaconda\\Anaconda3\\envs\\deskpal_env\\Lib\\site-packages\\pytest\\__init__.py', submodule_search_locations=['D:\\anaconda\\Anaconda3\\envs\\deskpal_env\\Lib\\site-packages\\pytest'])
+pytestqt spec: ModuleSpec(name='pytestqt', loader=<_frozen_importlib_external.SourceFileLoader object at 0x000001F6005F7B60>, origin='D:\\anaconda\\Anaconda3\\envs\\deskpal_env\\Lib\\site-packages\\pytestqt\\__init__.py', submodule_search_locations=['D:\\anaconda\\Anaconda3\\envs\\deskpal_env\\Lib\\site-packages\\pytestqt'])
+mypy spec: ModuleSpec(name='mypy', loader=<_frozen_importlib_external.ExtensionFileLoader object at 0x000001F6005D6D80>, origin='D:\\anaconda\\Anaconda3\\envs\\deskpal_env\\Lib\\site-packages\\mypy\\__init__.cp312-win_amd64.pyd', submodule_search_locations=['D:\\anaconda\\Anaconda3\\envs\\deskpal_env\\Lib\\site-packages\\mypy'])
+live2d spec: None
+OpenGL spec: None
+FILES PySide6-Essentials
+PySide6/QtGui.pyd
+PySide6/QtGui.pyi
+PySide6/QtOpenGL.pyd
+PySide6/QtOpenGL.pyi
+PySide6/QtOpenGLWidgets.pyd
+PySide6/QtOpenGLWidgets.pyi
+PySide6/QtWidgets.pyd
+PySide6/QtWidgets.pyi
+PySide6/include/PySide6/QtGui/pyside6_qtgui_python.h
+PySide6/include/PySide6/QtGui/qpytextobject.h
+PySide6/include/PySide6/QtGui/qtguihelper.h
+PySide6/include/PySide6/QtOpenGL/pyside6_qtopengl_python.h
+PySide6/include/PySide6/QtOpenGLWidgets/pyside6_qtopenglwidgets_python.h
+PySide6/include/PySide6/QtWidgets/pyside6_qtwidgets_python.h
+FILES PySide6 NOT INSTALLED
+FILES shiboken6
+PATH E:\no_game\git\kb_deskpal\kb_deskpal\data\validation\py311\python.exe
+EXISTS
+Python 3.11.17
+executable: E:\no_game\git\kb_deskpal\kb_deskpal\data\validation\py311\python.exe
+python: 3.11.17 | packaged by Anaconda, Inc. | (main, Oct  1 2026, 20:16:54) [MSC v.1942 64 bit (AMD64)]
+platform: Windows-10-10.0.26200-SP0
+PySide6: NOT INSTALLED
+PySide6-Essentials: 6.12.0
+shiboken6: 6.12.0
+pytest: 9.1.1
+pytest-qt: 4.5.0
+mypy: 2.4.0
+live2d-py: NOT INSTALLED
+PyOpenGL: NOT INSTALLED
+PySide6 spec: ModuleSpec(name='PySide6', loader=<_frozen_importlib_external.SourceFileLoader object at 0x0000028335E864D0>, origin='E:\\no_game\\git\\kb_deskpal\\kb_deskpal\\data\\validation\\py311\\Lib\\site-packages\\PySide6\\__init__.py', submodule_search_locations=['E:\\no_game\\git\\kb_deskpal\\kb_deskpal\\data\\validation\\py311\\Lib\\site-packages\\PySide6'])
+PySide6.QtOpenGL spec: ModuleSpec(name='PySide6.QtOpenGL', loader=<_frozen_importlib_external.ExtensionFileLoader object at 0x0000028335F73C10>, origin='E:\\no_game\\git\\kb_deskpal\\kb_deskpal\\data\\validation\\py311\\Lib\\site-packages\\PySide6\\QtOpenGL.pyd')
+PySide6.QtOpenGLWidgets spec: ModuleSpec(name='PySide6.QtOpenGLWidgets', loader=<_frozen_importlib_external.ExtensionFileLoader object at 0x0000028335EB2850>, origin='E:\\no_game\\git\\kb_deskpal\\kb_deskpal\\data\\validation\\py311\\Lib\\site-packages\\PySide6\\QtOpenGLWidgets.pyd')
+pytest spec: ModuleSpec(name='pytest', loader=<_frozen_importlib_external.SourceFileLoader object at 0x0000028335E87390>, origin='E:\\no_game\\git\\kb_deskpal\\kb_deskpal\\data\\validation\\py311\\Lib\\site-packages\\pytest\\__init__.py', submodule_search_locations=['E:\\no_game\\git\\kb_deskpal\\kb_deskpal\\data\\validation\\py311\\Lib\\site-packages\\pytest'])
+pytestqt spec: ModuleSpec(name='pytestqt', loader=<_frozen_importlib_external.SourceFileLoader object at 0x0000028335E87110>, origin='E:\\no_game\\git\\kb_deskpal\\kb_deskpal\\data\\validation\\py311\\Lib\\site-packages\\pytestqt\\__init__.py', submodule_search_locations=['E:\\no_game\\git\\kb_deskpal\\kb_deskpal\\data\\validation\\py311\\Lib\\site-packages\\pytestqt'])
+mypy spec: ModuleSpec(name='mypy', loader=<_frozen_importlib_external.ExtensionFileLoader object at 0x0000028335E87390>, origin='E:\\no_game\\git\\kb_deskpal\\kb_deskpal\\data\\validation\\py311\\Lib\\site-packages\\mypy\\__init__.cp311-win_amd64.pyd', submodule_search_locations=['E:\\no_game\\git\\kb_deskpal\\kb_deskpal\\data\\validation\\py311\\Lib\\site-packages\\mypy'])
+live2d spec: None
+OpenGL spec: None
+FILES PySide6-Essentials
+PySide6/QtGui.pyd
+PySide6/QtGui.pyi
+PySide6/QtOpenGL.pyd
+PySide6/QtOpenGL.pyi
+PySide6/QtOpenGLWidgets.pyd
+PySide6/QtOpenGLWidgets.pyi
+PySide6/QtWidgets.pyd
+PySide6/QtWidgets.pyi
+PySide6/include/PySide6/QtGui/pyside6_qtgui_python.h
+PySide6/include/PySide6/QtGui/qpytextobject.h
+PySide6/include/PySide6/QtGui/qtguihelper.h
+PySide6/include/PySide6/QtOpenGL/pyside6_qtopengl_python.h
+PySide6/include/PySide6/QtOpenGLWidgets/pyside6_qtopenglwidgets_python.h
+PySide6/include/PySide6/QtWidgets/pyside6_qtwidgets_python.h
+FILES PySide6 NOT INSTALLED
+FILES shiboken6
+EXIT=0
+
+========== TOOL RESULT 2: Re-run of the earlier malformed metadata query, to preserve the actual SyntaxError tool output ==========
+COMMAND:
+& 'D:\anaconda\Anaconda3\python.exe' --version; & 'D:\anaconda\Anaconda3\python.exe' -c "import sys, platform, importlib.metadata as m, importlib.util as u; print('executable:', sys.executable); print('python:', sys.version.replace('\n',' ')); print('platform:', platform.platform()); pkgs=['PySide6','pytest','pytest-qt','mypy','live2d-py','PyOpenGL']; [print(f'{p}: {m.version(p) if any(d.metadata.get("Name", "").lower()==p.lower() for d in m.distributions()) else "NOT INSTALLED"}') for p in pkgs]; [print(f'{s}: {u.find_spec(s)}') for s in ['PySide6','PySide6.QtOpenGL','PySide6.QtOpenGLWidgets','pytest','pytestqt','mypy','live2d','OpenGL']]"
+OUTPUT:
+Python 3.12.4
+  File "<string>", line 1
+    import sys, platform, importlib.metadata as m, importlib.util as u; print('executable:', sys.executable); print('python:', sys.version.replace('\n',' ')); print('platform:', platform.platform()); pkgs=['PySide6','pytest','pytest-qt','mypy','live2d-py','PyOpenGL']; [print(f'{p}: {m.version(p) if any(d.metadata.get(
+                                                                                                                                                                                                                                                                                                                              ^
+SyntaxError: '(' was never closed
+EXIT=1
+
+========== TOOL RESULT 3: Re-run of the corrected earlier metadata query, as actually returned by the tool ==========
+COMMAND:
+& 'D:\anaconda\Anaconda3\python.exe' --version; & 'D:\anaconda\Anaconda3\python.exe' -c 'import sys, platform, importlib.metadata as m, importlib.util as u
+print("executable:", sys.executable)
+print("python:", sys.version.replace("\n", " "))
+print("platform:", platform.platform())
+for p in ["PySide6", "pytest", "pytest-qt", "mypy", "live2d-py", "PyOpenGL"]:
+ try: print(p + ":", m.version(p))
+ except m.PackageNotFoundError: print(p + ": NOT INSTALLED")
+for s in ["PySide6", "PySide6.QtOpenGL", "PySide6.QtOpenGLWidgets", "pytest", "pytestqt", "mypy", "live2d", "OpenGL"]:
+ try: print(s + " spec:", u.find_spec(s))
+ except Exception as e: print(s + " spec error:", type(e).__name__, str(e))'
+OUTPUT:
+Python 3.12.4
+executable: D:\anaconda\Anaconda3\python.exe
+python: 3.12.4 | packaged by Anaconda, Inc. | (main, Jun 18 2024, 15:03:56) [MSC v.1929 64 bit (AMD64)]
+platform: Windows-11-10.0.26200-SP0
+PySide6: NOT INSTALLED
+pytest: 7.4.4
+pytest-qt: NOT INSTALLED
+mypy: 1.10.0
+live2d-py: NOT INSTALLED
+PyOpenGL: NOT INSTALLED
+PySide6 spec: None
+PySide6.QtOpenGL spec error: ModuleNotFoundError No module named 'PySide6'
+PySide6.QtOpenGLWidgets spec error: ModuleNotFoundError No module named 'PySide6'
+pytest spec: ModuleSpec(name='pytest', loader=<_frozen_importlib_external.SourceFileLoader object at 0x000001D7A52AFEC0>, origin='D:\\anaconda\\Anaconda3\\Lib\\site-packages\\pytest\\__init__.py', submodule_search_locations=['D:\\anaconda\\Anaconda3\\Lib\\site-packages\\pytest'])
+pytestqt spec: None
+mypy spec: ModuleSpec(name='mypy', loader=<_frozen_importlib_external.ExtensionFileLoader object at 0x000001D7A52D0140>, origin='D:\\anaconda\\Anaconda3\\Lib\\site-packages\\mypy\\__init__.cp312-win_amd64.pyd', submodule_search_locations=['D:\\anaconda\\Anaconda3\\Lib\\site-packages\\mypy'])
+live2d spec: None
+OpenGL spec: None
+EXIT=0
+

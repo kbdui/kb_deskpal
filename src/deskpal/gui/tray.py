@@ -48,6 +48,16 @@ class TrayController(QObject):
             quit_action = QAction("退出", self._menu)
             quit_action.triggered.connect(self.quit_requested)
             self._menu.addAction(restore)
+            for key, title in (("pet_enabled", "启用桌宠"), ("pet_visible", "显示桌宠"),
+                               ("pet_on_top", "桌宠置顶"), ("pet_click_through", "桌宠鼠标穿透")):
+                action = QAction(title, self._menu)
+                action.setCheckable(True)
+                action.setChecked(bool(getattr(preferences, key, False)))
+                action.toggled.connect(lambda value, name=key: getattr(preferences, "set_" + name)(value))
+                preferences.changed.connect(
+                    lambda name, value, name_key=key, item=action: self._sync_pet_action(item, value)
+                    if name == name_key else None)
+                self._menu.addAction(action)
             self._menu.addSeparator()
             self._menu.addAction(quit_action)
             self._tray.setContextMenu(self._menu)
@@ -64,6 +74,12 @@ class TrayController(QObject):
         if reason in {QSystemTrayIcon.ActivationReason.Trigger,
                       QSystemTrayIcon.ActivationReason.DoubleClick}:
             self.restore_requested.emit()
+
+    @staticmethod
+    def _sync_pet_action(action: QAction, value: object) -> None:
+        action.blockSignals(True)
+        action.setChecked(bool(value))
+        action.blockSignals(False)
 
     def should_hide_on_close(self) -> bool:
         """Only permit close-to-tray when a working tray can restore the window."""

@@ -1,5 +1,7 @@
 # 集成、实施顺序与验收
 
+范围更新（2026-10-19）：用户已决定 V0.7 使用静态PNG桌宠和中性状态映射，Live2D 延至正式版后的更新，不作为 V0.8/Beta/V1.0 前置。下文涉及 Live2D 的架构讨论仅作长期设计；当前以 [V0.7 验收边界](../v0.7/acceptance-boundaries.md)为准。
+
 实现映射更新（2026-10-15）：下文为长期集成与验收建议，M/P/E 编号不是当前测试完成清单。0.3.0 的真实入口为 AgentCore.memory_command、MemoryCoordinator、MemoryDraft/Item/ProfileEntry/RetrievalBundle；实际 [接口](../../versions/v0.3/interfaces.md)、[范围](../../versions/v0.3/delivery.md)、[证据](../../versions/v0.3/test-report.md)覆盖有限记忆阶段。WorkingContext、跨事件派生总结、完整隐身、导入、Persona/Affect/Presentation、Goal/UI 不在交付范围，不能由提案图或伪代码推断实现。
 
 状态：2026-10-14 设计提案；以下为拟议契约与通过条件，**不是测试结果**。本轮未修改 Python 代码、未安装依赖、未运行真实模型或迁移用户库。
@@ -103,7 +105,7 @@ memory.sqlite3 内来源/修订/失效/outbox 可同事务；Scheduling 库、Ta
 | V0.4 | Goal/Proposal/Task 恢复；事件 ID 与去重衔接 | 目标/任务/记忆权威分离，建议不授权，崩溃不盲重放 |
 | V0.5 | 记忆与画像管理页、透明确认、互动偏好设置 | 用户无需改数据库即可纠错/禁用/导出，GUI 不阻塞 Core |
 | V0.6 | 窄授权自主与执行隔离 | 人格、记忆、关系不得扩大授权；隔离需 Windows 实测 |
-| V0.7 | Live2D 独立渲染与中性状态映射 | 渲染异常不影响任务；模型/动作/DPI/退出稳定 |
+| V0.7 | 静态PNG桌宠、透明交互与中性状态映射 | 实际图片/降级/DPI/输入/资源/退出稳定；表现异常不改任务，Live2D 延至正式版后 |
 | V0.8-A | PersonaSpec、StylePolicy、稳定风格、关系偏好 | 跨模型与多轮一致性；用户临时指令正确覆盖；关键事实不变 |
 | V0.8-B | AffectEngine、cue、衰减/去重/重置、表达调节 | 事件重放/重启/极端输入不失控；关闭情绪仍完整可用 |
 | V0.9–V1.0 | 安装迁移、备份恢复、长时间运行与体验稳定 | 各层集成回归与已公开能力边界均通过 |

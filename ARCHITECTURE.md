@@ -6,6 +6,8 @@ V0.4 以“显式目标 → 本地提议 → 持久任务 → 计划确认 → �
 
 V0.5 候选版新增 gui（Widgets、bridge、host、preferences、tray、notifications）和 application.desktop 的 Qt-free 查询/命令边界。界面不调用 Core/SQL，命令/查询/控制在后台分通道，仍复用唯一 Core worker。具体接口、隐私 epoch 与最终关闭所有权见 [V0.5 接口](docs/versions/v0.5/interfaces.md)；实机与长测状态以 [测试报告](docs/versions/v0.5/test-report.md)为准。
 
+V0.7静态PNG桌宠已实现，2026-10-21按用户要求带未决项[归档](docs/versions/v0.7/delivery.md)，未全部验收通过；见[接口](docs/versions/v0.7/interfaces.md)与[测试报告](docs/versions/v0.7/test-report.md)。PetController只经既有bridge读取七字段任务元数据，角色点击只请求打开主窗口，不拥有Core或授权入口。后台单worker有界准备QImage，GUI线程拥有QPixmap、QPainter和透明窗口；关闭由Host等待后台Closed、图片worker退出及宠物窗口销毁后统一结束Qt。CLI不导入Qt，默认关宠不加载图片或专用轮询。
+
 ```mermaid
 flowchart TD
   CLI[CLI] --> App[ApplicationService / OS 实例锁]
@@ -41,6 +43,7 @@ Core 依赖 DTO/Protocol，不访问 SQL、Goal 实现、调度私有连接或�
 | --- | --- |
 | application | 生产工厂、实例锁、单 worker、CLI、管理/恢复/删除/关闭协调 |
 | gui | 可选 Qt Widgets、后台桥/宿主、版本化视图、遗忘清屏、偏好/托盘/本地通知；不反向成为领域依赖 |
+| presentation | Qt-free严格元数据DTO与固定状态/表情文字映射；GUI自行检查新鲜度和代际，不执行工具 |
 | agent / planner / llm | Observe/Think/Plan/Act/Reflect、有界静态 Plan、厂商无关 Provider |
 | workflow / tasks | 单工作库、持久 Task/Submission/Plan/attempt、依赖索引、outbox、删除 job；兼容内存 TaskManager |
 | goals | 显式 Goal/Milestone/SourceBinding、CAS、执行条件版本、完成证据 |
@@ -105,4 +108,6 @@ TTL 从 due_at 起算。静默窗口只约束命令边界展示，结束后重�
 ## 验证边界
 
 当前以 [V0.5 验收矩阵](docs/planning/v0.5/acceptance-boundaries.md)和[实际报告](docs/versions/v0.5/test-report.md)为准；V0.4 是持久后端的历史证据。双 Python/strict、权限/记忆/调度回归、真实进程竞争与崩溃、Windows 锁、安装与资源测量均须有证据。Qt 主窗口及通用状态通知已在候选版实现，实机缺项独立记录。Live2D、人格情绪、自动 Goal DAG、后台云规划、完整 WorkingContext/OS 隔离、多实例及外部效果 exactly-once 属于后续范围。
+
+V0.7新增验收按[静态桌宠T01–T08](docs/planning/v0.7/acceptance-boundaries.md)独立记录，不覆盖V0.5未结项。V0.6隔离执行仍暂停、阶段0未通过；静态表现层不证明已有隔离执行能力。Live2D明确延期至正式版后更新，人格情绪主要留V0.8，产品版本仍0.5.0rc1。
 

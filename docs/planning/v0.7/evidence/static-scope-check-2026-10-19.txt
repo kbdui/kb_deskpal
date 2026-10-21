@@ -1,0 +1,386 @@
+V0.7 静态范围文档检查记录
+日期：2026-10-19
+
+范围：当前三份 V0.7 文档、三份归档 Live2D 提案、docs/README.md、roadmap.md、companion-model README 和 integration-and-acceptance。仅检查本地 Markdown、链接/锚点、Git whitespace 与文案；没有产品测试、联网、安装依赖或访问 V0.6 封存数据。
+
+命令首败：首次 checker 在 PowerShell 中被引号解析为 ParserError，文档未变；第二次改写后 Python 内联列表字面量仍含多余转义，引发 SyntaxError，文档未变。两次失败原始输出均保留；第三次正确命令检查全部十份文档成功。
+
+静态检查结论：十份 Markdown 均 UTF-8 可读，代码围栏/冲突标记、本地目标与内部 heading 锚点（含归档开发提案指向 live2d-research 第9节）通过；外部链接按要求跳过，没有联网。git diff --check 退出0。
+
+当前三份语义复核：Live2D、SDK/绑定/Core、GL、独立渲染进程、模型动作全部明确为延期/不需要/非本版门槛，真实动作验收只存在归档提案内；静态 PNG/透明度、状态快照、点击/拖动和穿透、DPI/多屏、生命周期/异步加载、资源预算、CPU/内存/句柄/线程仍列为当前交付/待测。开发计划保留唯一 Application/Core 的状态投影边界。非商业本机研发没有被表述为通用许可豁免，研发图片/Qt使用条件仍要核查，未来发行闭包另行处理。三个归档文件开头均有历史快照横幅，并链接到当前三份文档；未执行项标作延期/未验证/待执行，V0.5历史结果没有迁为当前通过。
+
+首败之后父修复 roadmap 和当前文档范围；以下输出为本轮实际命令结果。
+
+========== TOOL RESULT 1: First attempted Markdown checker (PowerShell ParserError) ==========
+COMMAND:
+& 'D:\anaconda\Anaconda3\python.exe' -c 'from pathlib import Path
+import hashlib,html,re,sys,urllib.parse
+files=[\"docs/planning/v0.7/acceptance-boundaries.md\",\"docs/planning/v0.7/development-plan.md\",\"docs/planning/v0.7/environment-assessment.md\",\"docs/planning/v0.7/live2d-acceptance-proposal-2026-10-19.md\",\"docs/planning/v0.7/live2d-development-proposal-2026-10-19.md\",\"docs/planning/v0.7/live2d-research-2026-10-19.md\",\"docs/README.md\",\"docs/planning/roadmap.md\",\"docs/planning/companion-model/README.md\",\"docs/planning/companion-model/integration-and-acceptance.md\"]
+link_re=re.compile(r"!?\[[^\]]*\]\(([^)]*)\)")
+fence_re=re.compile(r"^\s*(`{3,}|~{3,})(.*)$")
+heading_re=re.compile(r"^\s{0,3}(#{1,6})\s+(.+?)\s*#*\s*$")
+issues=[]; doc_data={}
+def slugify(s):
+ s=re.sub(r"!\[([^\]]*)\]\([^)]*\)",r"\1",s)
+ s=re.sub(r"\[([^\]]*)\]\([^)]*\)",r"\1",s)
+ s=re.sub(r"`([^`]*)`",r"\1",s)
+ s=re.sub(r"<[^>]+>","",s)
+ s=html.unescape(s).strip().lower()
+ s=re.sub(r"[^\w\- ]", "", s, flags=re.UNICODE)
+ return re.sub(r"\s+", "-", s).strip("-")
+for name in files:
+ path=Path(name); raw=path.read_bytes(); text=raw.decode("utf-8",errors="strict"); lines=text.splitlines(); opened=None; clean=[]; anchors=[]; counts={}
+ print("FILE",name,"UTF8_OK","BYTES",len(raw),"SHA256",hashlib.sha256(raw).hexdigest())
+ for n,line in enumerate(lines,1):
+  m=fence_re.match(line)
+  if m:
+   marker,rest=m.groups(); ch=marker[0]
+   if opened is None: opened=(ch,len(marker),n)
+   elif ch==opened[0] and len(marker)>=opened[1] and not rest.strip(): opened=None
+   clean.append(""); continue
+  if opened:
+   clean.append(""); continue
+  clean.append(line)
+  if line.startswith(("<<<<<<<", ">>>>>>>")): issues.append(f"{name}:{n}: conflict marker {line}")
+  if line.strip()=="=======": issues.append(f"{name}:{n}: conflict separator")
+  h=heading_re.match(line)
+  if h:
+   base=slugify(h.group(2)); idx=counts.get(base,0); counts[base]=idx+1
+   anchors.append(base if idx==0 else f"{base}-{idx}")
+  for aid in re.findall(r"<a\s+[^>]*id=[\"\']([^\"\']+)",line,re.I): anchors.append(aid)
+ if opened: issues.append(f"{name}:{opened[2]}: unclosed fence {opened[0]*opened[1]}")
+ doc_data[path.resolve()]={"text":"\n".join(clean),"anchors":set(anchors)}
+ print("LINES",len(lines),"ANCHORS",len(anchors))
+for name in files:
+ path=Path(name); text=doc_data[path.resolve()]["text"]
+ for match in link_re.finditer(text):
+  dest=match.group(1).strip()
+  if not dest: continue
+  if dest.startswith("<") and ">" in dest: dest=dest[1:dest.index(">")]
+  else: dest=dest.split()[0]
+  if re.match(r"^[A-Za-z][A-Za-z0-9+.-]*:",dest) or dest.startswith("//"): continue
+  rawpath,sep,frag=dest.partition("#"); rawpath=rawpath.split("?",1)[0]
+  target=(path.parent/urllib.parse.unquote(rawpath)).resolve() if rawpath else path.resolve()
+  if not target.exists(): issues.append(f"{name}: missing local target {dest} -> {target}"); continue
+  if sep and frag:
+   target_doc=doc_data.get(target)
+   if target_doc is None and target.is_file() and target.suffix.lower()==".md":
+    try:
+     t=target.read_text(encoding="utf-8",errors="strict"); hs=[]; cs={}
+     for ln in t.splitlines():
+      hm=heading_re.match(ln)
+      if hm:
+       b=slugify(hm.group(2)); ix=cs.get(b,0); cs[b]=ix+1; hs.append(b if ix==0 else f"{b}-{ix}")
+     target_doc={"anchors":set(hs)}
+    except Exception: target_doc=None
+   if target_doc and urllib.parse.unquote(frag) not in target_doc["anchors"]:
+    issues.append(f"{name}: missing local anchor {dest} -> {target}")
+if issues:
+ print("ISSUES",len(issues)); print("\n".join(issues)); sys.exit(1)
+print("ALL_UTF8_FENCE_CONFLICT_LOCAL_LINK_AND_ANCHOR_CHECKS_PASSED")'
+OUTPUT:
+ParserError: 
+Line |
+  36 |    for aid in re.findall(r"<a\s+[^>]*id=[\"\']([^\"\']+)",line,re.I):  ��
+     |                                                 ~
+     | Missing type name after '['.
+EXIT=1
+
+========== TOOL RESULT 2: Second attempted Markdown checker (Python SyntaxError) ==========
+COMMAND:
+& 'D:\anaconda\Anaconda3\python.exe' -c 'from pathlib import Path
+import hashlib,html,re,sys,urllib.parse
+files=[\"docs/planning/v0.7/acceptance-boundaries.md\",\"docs/planning/v0.7/development-plan.md\",\"docs/planning/v0.7/environment-assessment.md\",\"docs/planning/v0.7/live2d-acceptance-proposal-2026-10-19.md\",\"docs/planning/v0.7/live2d-development-proposal-2026-10-19.md\",\"docs/planning/v0.7/live2d-research-2026-10-19.md\",\"docs/README.md\",\"docs/planning/roadmap.md\",\"docs/planning/companion-model/README.md\",\"docs/planning/companion-model/integration-and-acceptance.md\"]
+link_re=re.compile(r"!?\[[^\]]*\]\(([^)]*)\)")
+fence_re=re.compile(r"^\s*(`{3,}|~{3,})(.*)$")
+heading_re=re.compile(r"^\s{0,3}(#{1,6})\s+(.+?)\s*#*\s*$")
+issues=[]; doc_data={}
+def slugify(s):
+ s=re.sub(r"!\[([^\]]*)\]\([^)]*\)",r"\1",s)
+ s=re.sub(r"\[([^\]]*)\]\([^)]*\)",r"\1",s)
+ s=re.sub(r"`([^`]*)`",r"\1",s)
+ s=re.sub(r"<[^>]+>","",s)
+ s=html.unescape(s).strip().lower()
+ s=re.sub(r"[^\w\- ]", "", s, flags=re.UNICODE)
+ return re.sub(r"\s+", "-", s).strip("-")
+for name in files:
+ path=Path(name); raw=path.read_bytes(); text=raw.decode("utf-8",errors="strict"); lines=text.splitlines(); opened=None; clean=[]; anchors=[]; counts={}
+ print("FILE",name,"UTF8_OK","BYTES",len(raw),"SHA256",hashlib.sha256(raw).hexdigest())
+ for n,line in enumerate(lines,1):
+  m=fence_re.match(line)
+  if m:
+   marker,rest=m.groups(); ch=marker[0]
+   if opened is None: opened=(ch,len(marker),n)
+   elif ch==opened[0] and len(marker)>=opened[1] and not rest.strip(): opened=None
+   clean.append(""); continue
+  if opened: clean.append(""); continue
+  clean.append(line)
+  if line.startswith(("<<<<<<<", ">>>>>>>")): issues.append(f"{name}:{n}: conflict marker {line}")
+  if line.strip()=="=======": issues.append(f"{name}:{n}: conflict separator")
+  h=heading_re.match(line)
+  if h:
+   base=slugify(h.group(2)); idx=counts.get(base,0); counts[base]=idx+1
+   anchors.append(base if idx==0 else f"{base}-{idx}")
+  for aid in re.findall(r"<a\s+[^>]*id=\"([^\"]+)\"",line,re.I): anchors.append(aid)
+ if opened: issues.append(f"{name}:{opened[2]}: unclosed fence {opened[0]*opened[1]}")
+ doc_data[path.resolve()]={"text":"\n".join(clean),"anchors":set(anchors)}
+ print("LINES",len(lines),"ANCHORS",len(anchors))
+for name in files:
+ path=Path(name); text=doc_data[path.resolve()]["text"]
+ for match in link_re.finditer(text):
+  dest=match.group(1).strip()
+  if not dest: continue
+  if dest.startswith("<") and ">" in dest: dest=dest[1:dest.index(">")]
+  else: dest=dest.split()[0]
+  if re.match(r"^[A-Za-z][A-Za-z0-9+.-]*:",dest) or dest.startswith("//"): continue
+  rawpath,sep,frag=dest.partition("#"); rawpath=rawpath.split("?",1)[0]
+  target=(path.parent/urllib.parse.unquote(rawpath)).resolve() if rawpath else path.resolve()
+  if not target.exists(): issues.append(f"{name}: missing local target {dest} -> {target}"); continue
+  if sep and frag:
+   target_doc=doc_data.get(target)
+   if target_doc is None and target.is_file() and target.suffix.lower()==".md":
+    try:
+     t=target.read_text(encoding="utf-8",errors="strict"); hs=[]; cs={}
+     for ln in t.splitlines():
+      hm=heading_re.match(ln)
+      if hm:
+       b=slugify(hm.group(2)); ix=cs.get(b,0); cs[b]=ix+1; hs.append(b if ix==0 else f"{b}-{ix}")
+     target_doc={"anchors":set(hs)}
+    except Exception: target_doc=None
+   if target_doc and urllib.parse.unquote(frag) not in target_doc["anchors"]:
+    issues.append(f"{name}: missing local anchor {dest} -> {target}")
+if issues:
+ print("ISSUES",len(issues)); print("\n".join(issues)); sys.exit(1)
+print("ALL_UTF8_FENCE_CONFLICT_LOCAL_LINK_AND_ANCHOR_CHECKS_PASSED")'
+OUTPUT:
+  File "<string>", line 3
+    files=[\"docs/planning/v0.7/acceptance-boundaries.md\",\"docs/planning/v0.7/development-plan.md\",\"docs/planning/v0.7/environment-assessment.md\",\"docs/planning/v0.7/live2d-acceptance-proposal-2026-10-19.md\",\"docs/planning/v0.7/live2d-development-proposal-2026-10-19.md\",\"docs/planning/v0.7/live2d-research-2026-10-19.md\",\"docs/README.md\",\"docs/planning/roadmap.md\",\"docs/planning/companion-model/README.md\",\"docs/planning/companion-model/integration-and-acceptance.md\"]
+            ^
+SyntaxError: unexpected character after line continuation character
+EXIT=1
+
+========== TOOL RESULT 3: Corrected all-doc Markdown checker and hashes ==========
+COMMAND:
+& 'D:\anaconda\Anaconda3\python.exe' -c 'from pathlib import Path
+import hashlib,html,re,sys,urllib.parse
+files=["docs/planning/v0.7/acceptance-boundaries.md","docs/planning/v0.7/development-plan.md","docs/planning/v0.7/environment-assessment.md","docs/planning/v0.7/live2d-acceptance-proposal-2026-10-19.md","docs/planning/v0.7/live2d-development-proposal-2026-10-19.md","docs/planning/v0.7/live2d-research-2026-10-19.md","docs/README.md","docs/planning/roadmap.md","docs/planning/companion-model/README.md","docs/planning/companion-model/integration-and-acceptance.md"]
+link_re=re.compile(r"!?\[[^\]]*\]\(([^)]*)\)")
+fence_re=re.compile(r"^\s*(`{3,}|~{3,})(.*)$")
+heading_re=re.compile(r"^\s{0,3}(#{1,6})\s+(.+?)\s*#*\s*$")
+issues=[]; doc_data={}
+def slugify(s):
+ s=re.sub(r"!\[([^\]]*)\]\([^)]*\)",r"\1",s)
+ s=re.sub(r"\[([^\]]*)\]\([^)]*\)",r"\1",s)
+ s=re.sub(r"`([^`]*)`",r"\1",s)
+ s=re.sub(r"<[^>]+>","",s)
+ s=html.unescape(s).strip().lower()
+ s=re.sub(r"[^\w\- ]", "", s, flags=re.UNICODE)
+ return re.sub(r"\s+", "-", s).strip("-")
+for name in files:
+ path=Path(name); raw=path.read_bytes(); text=raw.decode("utf-8",errors="strict"); lines=text.splitlines(); opened=None; clean=[]; anchors=[]; counts={}
+ print("FILE",name,"UTF8_OK","BYTES",len(raw),"SHA256",hashlib.sha256(raw).hexdigest())
+ for n,line in enumerate(lines,1):
+  m=fence_re.match(line)
+  if m:
+   marker,rest=m.groups(); ch=marker[0]
+   if opened is None: opened=(ch,len(marker),n)
+   elif ch==opened[0] and len(marker)>=opened[1] and not rest.strip(): opened=None
+   clean.append(""); continue
+  if opened: clean.append(""); continue
+  clean.append(line)
+  if line.startswith(("<<<<<<<", ">>>>>>>")): issues.append(f"{name}:{n}: conflict marker {line}")
+  if line.strip()=="=======": issues.append(f"{name}:{n}: conflict separator")
+  h=heading_re.match(line)
+  if h:
+   base=slugify(h.group(2)); idx=counts.get(base,0); counts[base]=idx+1
+   anchors.append(base if idx==0 else f"{base}-{idx}")
+  for aid in re.findall(r"<a\s+[^>]*id=\"([^\"]+)\"",line,re.I): anchors.append(aid)
+ if opened: issues.append(f"{name}:{opened[2]}: unclosed fence {opened[0]*opened[1]}")
+ doc_data[path.resolve()]={"text":"\n".join(clean),"anchors":set(anchors)}
+ print("LINES",len(lines),"ANCHORS",len(anchors))
+for name in files:
+ path=Path(name); text=doc_data[path.resolve()]["text"]
+ for match in link_re.finditer(text):
+  dest=match.group(1).strip()
+  if not dest: continue
+  if dest.startswith("<") and ">" in dest: dest=dest[1:dest.index(">")]
+  else: dest=dest.split()[0]
+  if re.match(r"^[A-Za-z][A-Za-z0-9+.-]*:",dest) or dest.startswith("//"): continue
+  rawpath,sep,frag=dest.partition("#"); rawpath=rawpath.split("?",1)[0]
+  target=(path.parent/urllib.parse.unquote(rawpath)).resolve() if rawpath else path.resolve()
+  if not target.exists(): issues.append(f"{name}: missing local target {dest} -> {target}"); continue
+  if sep and frag:
+   target_doc=doc_data.get(target)
+   if target_doc is None and target.is_file() and target.suffix.lower()==".md":
+    try:
+     t=target.read_text(encoding="utf-8",errors="strict"); hs=[]; cs={}
+     for ln in t.splitlines():
+      hm=heading_re.match(ln)
+      if hm:
+       b=slugify(hm.group(2)); ix=cs.get(b,0); cs[b]=ix+1; hs.append(b if ix==0 else f"{b}-{ix}")
+     target_doc={"anchors":set(hs)}
+    except Exception: target_doc=None
+   if target_doc and urllib.parse.unquote(frag) not in target_doc["anchors"]:
+    issues.append(f"{name}: missing local anchor {dest} -> {target}")
+if issues:
+ print("ISSUES",len(issues)); print("\n".join(issues)); sys.exit(1)
+print("ALL_UTF8_FENCE_CONFLICT_LOCAL_LINK_AND_ANCHOR_CHECKS_PASSED")'
+OUTPUT:
+FILE docs/planning/v0.7/acceptance-boundaries.md UTF8_OK BYTES 14734 SHA256 6de6b1ac3267a7496741d2bff571337b6c2bf16ae92c334be023a121f6fbc0a1
+LINES 125 ANCHORS 8
+FILE docs/planning/v0.7/development-plan.md UTF8_OK BYTES 10213 SHA256 f5e7c663e6b624abfa0863b1ae511d00fb8293f0245d7a615b202dfff44c1e6e
+LINES 100 ANCHORS 8
+FILE docs/planning/v0.7/environment-assessment.md UTF8_OK BYTES 10730 SHA256 07de8bc436a1d797f0e3c156a8447ed5367e28ff3ce3ca49a9b694273f84b25b
+LINES 109 ANCHORS 8
+FILE docs/planning/v0.7/live2d-acceptance-proposal-2026-10-19.md UTF8_OK BYTES 17403 SHA256 fd2a44bcca9c8b5bc4ea24053b73dd73f17dce3a89724d4d4cb094876f54ab17
+LINES 121 ANCHORS 8
+FILE docs/planning/v0.7/live2d-development-proposal-2026-10-19.md UTF8_OK BYTES 15406 SHA256 8c8d87c9e18de15e3ab7ab86d4b003a7f2e951876307e8cd94088863cbc68047
+LINES 110 ANCHORS 8
+FILE docs/planning/v0.7/live2d-research-2026-10-19.md UTF8_OK BYTES 23685 SHA256 3e1fd0d6c7b89f47179db1bdf552776a3a3a064c06d389aaf967329836a22b53
+LINES 161 ANCHORS 10
+FILE docs/README.md UTF8_OK BYTES 10349 SHA256 2f50cfb7b70ea708c8fadbdb3161c375ba9a0fd3e732f1a17fc429d19325f90d
+LINES 119 ANCHORS 4
+FILE docs/planning/roadmap.md UTF8_OK BYTES 11567 SHA256 681aa2e1efd7a2ff70c87f69c2ed8ddec288a7d1ba935fc8138f03f937084a48
+LINES 83 ANCHORS 9
+FILE docs/planning/companion-model/README.md UTF8_OK BYTES 12002 SHA256 6e57c02ea486ce9c2ddd2a5605d95459cf2f214759958b50e74f8a84fc676aaa
+LINES 124 ANCHORS 8
+FILE docs/planning/companion-model/integration-and-acceptance.md UTF8_OK BYTES 22993 SHA256 a0470739f2bd2df8952ed2da1bfdddb72dbcff535c737fc73b07c7e8c9d212e0
+LINES 180 ANCHORS 11
+ALL_UTF8_FENCE_CONFLICT_LOCAL_LINK_AND_ANCHOR_CHECKS_PASSED
+EXIT=0
+
+========== TOOL RESULT 4: git diff --check ==========
+COMMAND:
+git -c safe.directory=E:/no_game/git/kb_deskpal/kb_deskpal diff --check
+OUTPUT:
+
+EXIT=0
+
+========== TOOL RESULT 5: git status --short ==========
+COMMAND:
+git -c safe.directory=E:/no_game/git/kb_deskpal/kb_deskpal status --short
+OUTPUT:
+ M docs/README.md
+ M docs/planning/companion-model/README.md
+ M docs/planning/companion-model/integration-and-acceptance.md
+ M docs/planning/roadmap.md
+?? docs/planning/v0.7/
+EXIT=0
+
+========== TOOL RESULT 6: Targeted current-scope requirements excerpts ==========
+COMMAND:
+rg -n 'V0\.7 不做|延期|不作为.*阻断|本版无需|不安装|不测试|不作为.*门槛|不要求Live2D|PNG|透明|状态|拖动|点击|输入|DPI|DPR|生命周期|资源|唯一Application|唯一 Core|非商业|研发使用许可|Core/Factory' docs/planning/v0.7/acceptance-boundaries.md docs/planning/v0.7/development-plan.md docs/planning/v0.7/environment-assessment.md
+OUTPUT:
+Warning: truncated output (original token count: 7104)
+Total output lines: 119
+
+docs/planning/v0.7/environment-assessment.md:11:采用现有PySide6-Essentials的Qt Widgets/QPainter，在宿主Qt GUI线程绘制有限静态PNG；受控后台线程负责读取/预算预检/QImage解码，GUI只做有界呈现和控制。状态以事件切换图片或一张角色图配中性文字/标识表达，不做序列帧或Live2D动画。
+docs/planning/v0.7/environment-assessment.md:13:本版无需Cubism SDK/Core、live2d-py、PyOpenGL、WebEngine、独立渲染进程/IPC、建模Editor、CMake/MSVC、CUDA或新推理模型。没有这些组件不构成V0.7静态版缺环境，未来Live2D更新再核验其有效性。
+docs/planning/v0.7/environment-assessment.md:17:| 窗口/图片呈现 | 既有Qt GUI与Essentials依赖、后台桥/宿主/偏好/托盘可复用 | 透明PNG/命中/独立桌宠/DPI/线程生命周期尚未实施 |
+docs/planning/v0.7/environment-assessment.md:18:| 状态投影 | 已有Qt-free DesktopFacade、任务状态与异步Bridge | 完整最小表现快照尚未新增；Ready和通知流不能替代 |
+docs/planning/v0.7/environment-assessment.md:19:| 美术资源 | 用户允许Agent使用内置生图工具制作本项目初版美术 | 角色方向/定稿PNG未确定，本轮未生图；实际alpha/边缘/比例/来源待检 |
+docs/planning/v0.7/environment-assessment.md:20:| 开发验收 | 双Python已有GUI测试环境，纯UI逻辑可复用合成夹具 | 无静态桌宠自动化/原生/资源/最终长测结果 |
+docs/planning/v0.7/environment-assessment.md:40:本轮没有重新执行环境导入、pip check、窗口或图片解码探针。显卡/驱动/缩放/显示器与RDP实况仍未核查；静态方案不需要先做GL能力测量，但原生DPI/透明/输入和OS合成效果仍需验收。
+docs/planning/v0.7/environment-assessment.md:46:| QWidget/QPainter | 宿主GUI线程自绘透明图片/中性状态标识 | 不创建动画帧timer，不从工作线程更新Widgets |
+docs/planning/v0.7/environment-assessment.md:47:| QImageReader/QImage | 后台线程读取已核验的本地PNG；先检格式/尺寸/总像素预算，得到完整图像后交付 | 每reader/文件句柄独占；失败/超量拒绝；解码成功不代表图片美术合格 |
+docs/planning/v0.7/environment-assessment.md:48:| QPixmap | GUI线程按有限图片/DPR缓存转换与绘制 | 不后台创建；缓存有总量/淘汰，不每次paint重新解码 |
+docs/planning/v0.7/environment-assessment.md:49:| PetController | 管理代际/加载/显示/状态查询/关停，与DesktopHost协调 | 不持整个Application，不直接写数据库/工具/授权 |
+docs/planning/v0.7/environment-assessment.md:51:| importlib.resources/包资源 | 按固定清单取得实际PNG，源码和wheel一致 | 不信任任意文件路径/远程URL/角色卡脚本，不建立自动下载器 |
+docs/planning/v0.7/environment-assessment.md:53:QImage可交付不表示任意可变图像对象可跨线程共享；结果交付后工作线程不再修改，Qt GUI资源和最终销毁留GUI线程。加载超时失效结果，但worker引用和生命周期必须保留；没有独立进程时不能强杀Python线程来伪造已回收。首版仅可信、大小受控、本地随包静态PNG，遇到异常崩溃或挂起必须归因审查。
+docs/planning/v0.7/environment-assessment.md:55:只有可恢复的图片加载/绘制失败能中性回退；不能承诺任意Qt/native进程崩溃后主窗口仍存活，也不能把该类故障忽略为无影响。验收使用坏PNG/慢加载注入和实际资源验证正常失败路径，原生崩溃为阻断。
+docs/planning/v0.7/environment-assessment.md:57:透明图片的alpha与Windows输入穿透分开验证；不能因为背景看不见就假定不挡鼠标。几何保存逻辑坐标，当前DPR用于缩放与命中，多屏可有负坐标/间隙；不沿用只取primaryScreen DPR的做法。
+docs/planning/v0.7/environment-assessment.md:68:| PNG处理 | 优先Qt自有读写/检查；不因生图资产添加Pillow/numpy/PyOpenGL运行依赖 |
+docs/planning/v0.7/environment-assessment.md:69:| 图片生成 | 开发期内置image_gen工具，输出静态资源；用户运行应用不依赖生图服务/API key/联网 |
+docs/planning/v0.7/environment-assessment.md:70:| 打包 | 先验证setuptools源码/wheel携带PNG和manifest；不提前引入PyInstaller/安装器 |
+docs/planning/v0.7/environment-assessment.md:71:| 资源测量 | 复用已审Windows只读指标/Qt heartbeat；不为静态桌宠预装psutil/驱动/服务 |
+docs/planning/v0.7/environment-assessment.md:72:| Live2D/Cubism/GL/建模工具 | 延期至正式版后更新，本版不安装/构建/评估，历史初审仅供未来参考 |
+docs/planning/v0.7/environment-assessment.md:74:先核对实际包资源读取/Qt插件兼容性，再做合成PNG和原生窗口探针。若确认需要新依赖，说明来源/许可/用途，按工具要求中文批准；不静默加库，不换全局环境。
+docs/planning/v0.7/environment-assessment.md:78:当前流程：角色方向→概念图→同一角色透明PNG定稿→alpha/边缘/比例/缩放检查→入包。Agent可使用内置生图与定向编辑，优先原创角色、不采用未经授权现成角色或私人照片作参考。
+docs/planning/v0.7/environment-assessment.md:80:至少一张合格静态图配准确状态标识即可完成首版；多张表情/状态图是可选美术提升。没有逐帧动画、拆件PSD、网格/变形器、骨骼绑定、动作导出或.moc3制作任务。后者全部属于延期的Live2D更新，不阻断本版静态资产。
+docs/planning/v0.7/environment-assessment.md:82:记录生成工具/日期/提示词、参考使用依据、原图/定稿hash、编辑历史、尺寸和用途；AI生成不自动等于排他版权或所有用途许可。保存真alpha，不能用棋盘格/白底冒充透明。定稿资产复制到项目工作区，不只引用工具默认目录；不覆盖用户已有图片。
+docs/planning/v0.7/environment-assessment.md:84:静态资产预算初值：≤8个PNG、单文件≤5MiB、合计≤20MiB、单图≤2048×2048、总解码像素≤8M；缓存总预算32MiB。尺寸/数量是待初测冻结的项目限制，不是Qt的普适安全保证。编码大小、解码像素、缩放副本和资源峰值分别计量。
+docs/planning/v0.7/environment-assessment.md:86:本版实际需核查的是图片来源/参考许可、Qt/shiboken与包内通知。当前非商业本机使用不构成所有条款的普遍豁免；未来若发行再核实际分发闭包。Cubism出版/Expandable分类、SDK二进制和模型许可不适用于本版实现，留在[历史Live2D调研](live2d-research-2026-10-19.md)，未来采用时重新核查。
+docs/planning/v0.7/environment-assessment.md:94:| 角色定稿PNG | 待确定形象后内置生图/检查；技术夹具可用自制合成小PNG |
+docs/planning/v0.7/environment-assessment.md:95:| 窄状态快照 | 待开发Qt-free投影/查询，不能从UI/通知猜Core状态 |
+docs/planning/v0.7/environment-assessment.md:97:| 真实桌面 | 待验证透明边缘、命中/穿透/焦点、DPI/多屏/位置、托盘生命周期 |
+docs/planning/v0.7/environment-assessment.md:99:| 资源/最终构建 | 待建立静态版基线、100轮开关/隐藏、30分钟原生同构建长测 |
+docs/planning/v0.7/environment-assessment.md:101:CPU/内存/句柄/线程和cache预算是本版指标；不沿用原Live2D的帧率/GPU/GL对象释放要求。没有动画不代表资源验收已通过；持续增长、卡死、错误线程销毁或任务副作用都需保留首败并升级父审。
+docs/planning/v0.7/environment-assessment.md:105:原Live2D三份方案以live2d-*-2026-10-19.md保留，原环境/文档取证在evidence目录继续保存。新静态方案需新检查记录/源码与资源指纹，不覆盖历史SHA或将旧测试迁为新通过。
+docs/planning/v0.7/environment-assessment.md:107:仍由6 Luna高思考执行常规测试/证据，父Agent负责架构、线程生命周期与最终验收。不读取.env/私人配置/数据库/API key，不调用应用云API，不恢复V0.6实验，不新增服务/账户/驱动，不自动Git提交。
+docs/planning/v0.7/development-plan.md:3:更新：2026-10-19（Asia/Shanghai）。状态：实施前计划；尚无本版产品代码/测试通过结论。产品仍为 **0.5.0rc1**。
+docs/planning/v0.7/development-plan.md:5:用户已冻结方向：**V0.7 使用静态图片，不做Live2D；Live2D推迟到正式版后的更新。** 不再准备SDK/绑定/模型、建模工具、OpenGL探针或独立渲染进程。此前[Live2D开发提案](live2d-development-proposal-2026-10-19.md)作为历史保留；未执行条目是延期，不是已验收。
+docs/planning/v0.7/development-plan.md:15:| src/deskpal/gui/bridge.py | 后台命令/查询/控制分通道、背压、epoch与关闭 | 最小状态查询复用读通道，单个在途，不能挤占取消/退出 |
+docs/planning/v0.7/development-plan.md:17:| src/deskpal/gui/preferences.py、tray.py、window.py | QSettings、恢复/退出、几何与DPR修正 | 独立桌宠开关/显示/位置/置顶/穿透偏好，不复用主窗口geometry |
+docs/planning/v0.7/development-plan.md:18:| tests/gui/与既有GUI脚本 | 合成/offscreen、权限/隐私/慢后端/退出、原生屏幕检查 | 新增静态PNG与桌宠测试；新证据不覆盖旧版本/旧失败 |
+docs/planning/v0.7/development-plan.md:20:当前主窗口文字占位不等于独立桌宠。本版需要实际PNG窗口、交互、状态与退出闭环。
+docs/planning/v0.7/development-plan.md:24:使用现有PySide6-Essentials的Qt Widgets/QPainter，在宿主GUI线程创建PetWindow；受控工作线程读取/解码QImage，GUI线程有界转换QPixmap并绘制。静态图按状态事件切换，或同一图配中性文字/标识，不建立逐帧动画循环。
+docs/planning/v0.7/development-plan.md:26:调用方向：唯一Application/Core → Qt-free最小快照 → 现有Bridge → PetController → PetWindow/静态图片适配。用户点击只发本地反馈或交DesktopHost导航；工具/授权仍走原有主窗口审查路径。
+docs/planning/v0.7/development-plan.md:32:| presentation/models.py、state.py | Qt-free不可变状态DTO/映射、过期/乱序/去重规则，不依赖Application具体对象 |
+docs/planning/v0.7/development-plan.md:33:| gui/pet_controller.py | 窗口/加载/状态请求所有权、generation、开关/隐藏/关闭、偏好协调 |
+docs/planning/v0.7/development-plan.md:34:| gui/pet_window.py | GUI线程透明窗口、QPainter/图像呈现、命中/拖动/DPR/工作区 |
+docs/planning/v0.7/development-plan.md:35:| gui/pet_assets.py | 有界可信PNG清单、异步读取/解码和缓存预算；不带用户正文 |
+docs/planning/v0.7/development-plan.md:36:| 项目package资源目录 | 最终透明PNG和非敏感来源manifest，通过importlib.resources取得，wheel确实包含 |
+docs/planning/v0.7/development-plan.md:38:…1604 tokens truncated…0rc1**。
+docs/planning/v0.7/acceptance-boundaries.md:5:**用户已决定：V0.7 不做 Live2D，采用静态图片；Live2D 推迟到正式版后的更新，不放入 V0.8、Beta 或 V1.0 的必交范围。** 本文件替代此前以真实模型/动作为门槛的 V0.7 提案，属于明确范围调整，不是将未通过的 Live2D 项标为通过。
+docs/planning/v0.7/acceptance-boundaries.md:7:配套：[开发计划](development-plan.md)、[环境评估](environment-assessment.md)。原[Live2D 验收提案](live2d-acceptance-proposal-2026-10-19.md)和已有环境/检查证据保留为历史，不作为本版门槛。
+docs/planning/v0.7/acceptance-boundaries.md:13:| 边界 | 当前状态和本版约束 |
+docs/planning/v0.7/acceptance-boundaries.md:16:| V0.6 | 按[最新暂停检查点](../../versions/v0.6/pause-checkpoint-2026-10-19-1457.md)冻结；阶段0未通过，原型未接生产 Core/Factory，不换 Worker/权限策略，不访问封存 profile/key/runtime |
+docs/planning/v0.7/acceptance-boundaries.md:18:| V0.8 | 人格/情绪/长期关系为后续独立范围；本版只映射实际宿主状态 |
+docs/planning/v0.7/acceptance-boundaries.md:27:| 实际静态图片 | 从项目资源加载真实透明 PNG 并绘制，检查 alpha/边缘/比例；原始图、定稿和运行资源有来源/hash。不能仅凭 mock 或文字占位宣称图片桌宠完成 |
+docs/planning/v0.7/acceptance-boundaries.md:28:| 状态展示 | idle/thinking/executing/success/failure，以及 queued/waiting/review/uncertain/cancelled/unknown/closing 的准确中性表示。至少一张合格角色图配文字/标识即可覆盖状态；多张状态图可选，不要求五套美术 |
+docs/planning/v0.7/acceptance-boundaries.md:29:| 基础交互 | 拖动、点击本地反馈或显式打开主窗口、显示/隐藏、关闭桌宠、位置恢复；拖动不触发点击，状态变化不主动抢焦点 |
+docs/planning/v0.7/acceptance-boundaries.md:30:| 桌面适配 | 透明窗口、工作区夹回、逻辑坐标/DPR换算、多屏负坐标/混合缩放/屏幕变化、独立位置偏好 |
+docs/planning/v0.7/acceptance-boundaries.md:31:| 输入控制 | 置顶选项、交互/穿透切换；透明区域命中有原生证据。穿透后可从主窗口/托盘恢复交互，不能无路找回 |
+docs/planning/v0.7/acceptance-boundaries.md:32:| 生命周期 | 主窗口/托盘/宠物显示状态独立；关闭宠物不关闭后台任务；退出应用统一关闭。图片准备中退出、迟到回调、反复开关/释放正确 |
+docs/planning/v0.7/acceptance-boundaries.md:34:| 资源控制 | 异步图片读取/解码、有限缓存与单个在途加载、无动画/帧循环、隐藏无专用周期绘制，重复开关与最终同构建长测 |
+docs/planning/v0.7/acceptance-boundaries.md:35:| 兼容性 | CLI 不安装 Qt 仍可运行；现有 GUI 不依赖桌宠或图片生成服务；偏好/资源缺失有安全默认 |
+docs/planning/v0.7/acceptance-boundaries.md:37:**不在本版：**Live2D/Cubism/模型动作、SDK/绑定评估或安装、拆件PSD/网格/变形绑定、序列帧/GIF/QMovie连续动画、自动摆动/呼吸、面捕/语音/音频、模型或皮肤市场、任意远程素材/脚本导入、独立渲染进程/IPC、人格情绪算法、V0.6实验与完整安装器。静态状态图按事件切换，不属于逐帧动画。
+docs/planning/v0.7/acceptance-boundaries.md:39:生图可承担角色概念和透明PNG；正式使用前仍检查形体、透明边缘、状态一致性和来源。角色方向不阻断窗口/契约开发；自有中性标记只作为缺资源降级，最终静态图片验收仍需实际合格PNG。Live2D由未来更新重新立项、重核环境和许可，不能继承本版静态验收为其通过证据。
+docs/planning/v0.7/acceptance-boundaries.md:44:2. 桌宠只消费经过定义的、无用户正文的 PresentationSnapshot；本地图片与角色描述无工具字段、授权字段或可执行脚本。点击仅本地反馈/导航并重查，不提供工具确认快捷入口。
+docs/planning/v0.7/acceptance-boundaries.md:49:7. 隐藏与关闭区分：隐藏可保留受限缓存；关宠释放窗口/图片缓存和信号/定时器，不再发专用状态查询。宿主退出时异步等待所有自有工作结束；超时显示真实Closing，不强杀Core或遗失线程。
+docs/planning/v0.7/acceptance-boundaries.md:52:## 4. 状态与输入语义
+docs/planning/v0.7/acceptance-boundaries.md:54:bridge Ready只表示应用可服务，不表示Core空闲。现有notification_feed受通知开关控制且只覆盖部分状态，不能充当完整状态来源；需新增Qt-free最小应用快照，后台经现有bridge读取，不读SQL或当前UI选中项。
+docs/planning/v0.7/acceptance-boundaries.md:56:| 权威输入 | 图片/标识语义 | 限制 |
+docs/planning/v0.7/acceptance-boundaries.md:66:快照包含schema/session/generation/sequence/revision/privacy_epoch/有效期及固定状态枚举，不含请求/结果/标题正文。宿主生命周期优先，活动工作优先于短时终态；旧/重复/乱序状态不重复触发反馈，恢复显示只刷新当前快照，不补播历史。快照可能合并短暂状态，不承诺每个瞬时阶段都有一张图。
+docs/planning/v0.7/acceptance-boundaries.md:68:透明alpha不自动等于鼠标穿透。命中按本窗口图像/形状做有界判断，不采集全桌面、不逐帧读屏；使用当前DPR换算，拖动采用Qt阈值。单击导航必须来自明确操作；后台任务变化不能raise/activateWindow。
+docs/planning/v0.7/acceptance-boundaries.md:72:U=纯逻辑，Q=合成数据Qt/offscreen，N=Windows原生窗口和实际图片，H=人工桌面/硬件，R=资源测量。下列全部待执行；U/Q不替代N/H/R，缺设备/skip如实记未验证。
+docs/planning/v0.7/acceptance-boundaries.md:76:| A01 | 实际PNG与来源 | N：实际角色图可见，真alpha无黑底/白边/拉伸；记录来源/工具/参考权限/尺寸/hash；透明背景棋盘格图片不能冒充透明 |
+docs/planning/v0.7/acceptance-boundaries.md:77:| A02 | 缺失/损坏/超量/非静态资源 | U+Q+N：拒绝坏资源，降级标记可见；无自动联网补图，无GUI卡死或任务变化 |
+docs/planning/v0.7/acceptance-boundaries.md:78:| A03 | 中文/空格路径、越界资源引用 | U+Q：资源清单限制在项目可信闭包；拒绝绝对路径/root外链接、动画/脚本/远程URL；缓存有总量限制 |
+docs/planning/v0.7/acceptance-boundaries.md:79:| W01 | 透明、焦点、叠放、置顶 | N+H：正常桌面背景下边缘正确；状态更新不抢焦点，置顶由用户设置 |
+docs/planning/v0.7/acceptance-boundaries.md:80:| W02 | 点击/拖动/透明区域/穿透 | Q+N+H：拖动不触发点击，命中不偏移；透明区不无故阻挡桌面，穿透后仍能恢复控制 |
+docs/planning/v0.7/acceptance-boundaries.md:81:| W03 | 100/125/150/200%、混合DPI/多屏负坐标 | U+Q+N+H：跨屏往返无尺寸累增/模糊缓存错用/命中偏移，位置可找回 |
+docs/planning/v0.7/acceptance-boundaries.md:83:| S01 | 全部状态、连续任务、忙Core | U+集成+N：图片/中性标识与权威快照相符，不因通知关闭停止展示，不额外执行工具 |
+docs/planning/v0.7/acceptance-boundaries.md:86:| C01 | 开关/加载释放100轮，隐藏恢复100轮 | N+R：窗口/句柄/线程/缓存无逐轮增长；关宠后停止专用查询且释放自有资源 |
+docs/planning/v0.7/acceptance-boundaries.md:91:| F02 | 锁屏/休眠恢复/RDP | N+H：恢复后尺寸/位置/控制可用，刷新当前状态；无重复任务/历史反馈风暴；缺环境列未测 |
+docs/planning/v0.7/acceptance-boundaries.md:93:| P02 | 关闭/隐藏/空闲/切图/故障资源 | N+R：CPU/private bytes/RSS/句柄/线程/缓存与预算相符；空闲无自设帧循环 |
+docs/planning/v0.7/acceptance-boundaries.md:94:| P03 | 同一最终构建30分钟混合长测及正常退出 | N+R：完整资源/heartbeat/切图/退出与锁释放证据；没有持续增长/挂起 |
+docs/planning/v0.7/acceptance-boundaries.md:96:| G02 | CLI无Qt、原GUI禁用宠物、源码/wheel资源安装 | 合成环境：CLI不依赖图形包；GUI禁宠可用；安装后PNG确实入包，关闭宠物不读取/加载素材 |
+docs/planning/v0.7/acceptance-boundaries.md:98:原Live2D L01–L03、动作/GL/IPC/子进程生命周期条目已转入历史提案，**状态为延期，不是通过或测试skip**；本版以A01–A03等新矩阵验收。
+docs/planning/v0.7/acceptance-boundaries.md:100:## 6. 资源与响应预算
+docs/planning/v0.7/acceptance-boundaries.md:102:阶段0用同一机器/Qt/QPA/显示器/DPR、相同合成负载比较“禁宠”和“启宠”。记录实际PNG与源码/依赖指纹，CPU口径为进程CPU时间/墙钟（100%=一个逻辑核）；GPU指标若可取得可附记，正常桌面合成不代表GPU完全零开销，但不要求Live2D/GL指标。
+docs/planning/v0.7/acceptance-boundaries.md:108:| 资源输入 | 首版仅可信静态PNG；文件≤8个，单文件≤5MiB、合计≤20MiB；单图≤2048×2048、总解码像素≤8M；使用前校验尺寸/格式/预算 |
+docs/planning/v0.7/acceptance-boundaries.md:109:| 缓存 | 源图/缩放图缓存总量有明确计数与淘汰，预算32MiB；DPR/尺寸变化不无限积累旧副本 |
+docs/planning/v0.7/acceptance-boundaries.md:110:| 绘制 | 不设动画/FPS timer；只响应状态/尺寸/显示/系统重绘，隐藏/关闭无专用周期update；系统请求重绘不算应用自设帧循环 |
+docs/planning/v0.7/acceptance-boundaries.md:111:| 状态读取 | 最多一个在途快照请求，活跃显示时初始每1秒一次，隐藏/禁用停止专用轮询；事件更新可合并 |
+docs/planning/v0.7/acceptance-boundaries.md:115:| 循环/长测 | 预热10轮后100轮关宠回稳，宿主private bytes相对基线增量≤20MiB、句柄≤10、线程回基线；结合斜率/存活资源与30分钟曲线判断 |
+docs/planning/v0.7/acceptance-boundaries.md:121:每项分别标已实现/已测/未验证/阻断/不适用及理由。证据用新的 data/validation/v07/<日期-场景-轮次>/，保存原始命令/退出码、绝对解释器、源码/依赖/图片指纹、资源曲线与人工范围；不覆盖首次失败，不读取真实配置/密钥/数据库。
+docs/planning/v0.7/acceptance-boundaries.md:123:合格静态PNG、完整桌宠交互、准确状态、生命周期/资源及受影响回归才构成本版技术完成门槛。图片缺失降级可单独通过，但不能代替正常图片加载验收。Live2D已明确移出本版，完成静态版不表述为Live2D完成；V0.7无需等待未来Live2D更新才能验收。
+docs/planning/v0.7/acceptance-boundaries.md:125:当前仅评非商业本机研发；未来发行前复核实际图片/Qt及依赖的分发条件。产品仍0.5.0rc1，不自动改版本。V0.5未结项及V0.6阶段0未通过状态继续独立保留。
+EXIT=0
+
+========== TOOL RESULT 7: Archived proposals historical banners, links and untested status excerpts ==========
+COMMAND:
+rg -n -i '历史方案快照|历史提案|未完成.*不得标作通过|未执行条目.*延期|未验证|待执行|本轮没有产品.*测试通过|当前范围见|当前范围|最新范围' docs/planning/v0.7/live2d-acceptance-proposal-2026-10-19.md docs/planning/v0.7/live2d-development-proposal-2026-10-19.md docs/planning/v0.7/live2d-research-2026-10-19.md
+OUTPUT:
+docs/planning/v0.7/live2d-acceptance-proposal-2026-10-19.md:1:> 历史方案快照（2026-10-19）：用户已决定 V0.7 改用静态图片，Live2D 推迟到正式版后的更新。下文不是当前开发范围、依赖或验收门槛；未完成的 Live2D 项不得标作通过。当前范围见 [V0.7 验收边界](acceptance-boundaries.md)、[开发计划](development-plan.md)和[环境评估](environment-assessment.md)。
+docs/planning/v0.7/live2d-acceptance-proposal-2026-10-19.md:39:素材暂缺时可以交付“桌宠控制和降级接口已实现”，必须明确“真实 Live2D 未验证/被资源阻断”。只完成无模型部分不能称 V0.7 已交付。五种宿主状态可采用模型内合法动作/参数或中性状态标识组合，不能为了凑五个动作擅自修改素材；实际映射在阶段0随模型冻结。
+docs/planning/v0.7/live2d-acceptance-proposal-2026-10-19.md:71:下列均为**待执行**。U=纯逻辑/契约测试，Q=合成数据 Qt/offscreen，N=Windows 原生图形/真实模型，H=人工硬件/桌面，R=同构建资源/生命周期。U/Q 不能代替 N/H/R，skip/缺环境均记“未验证”。
+docs/planning/v0.7/live2d-acceptance-proposal-2026-10-19.md:117:每项写“已实现/已测试/未验证/阻断/不适用及理由”，附测试命令、解释器绝对路径、退出码、原始日志、源码/依赖/SDK/模型指纹、人工观察人/时间/范围。新证据使用 `data/validation/v07/<日期-场景-轮次>/` 独占目录，不覆盖首败；可分发的结论摘要进入未来 `docs/versions/v0.7/`，不得提交配置/密钥/用户数据/未经许可模型。
+docs/planning/v0.7/live2d-development-proposal-2026-10-19.md:1:> 历史方案快照（2026-10-19）：用户已决定 V0.7 改用静态图片，Live2D 推迟到正式版后的更新。下文不是当前开发范围、依赖或验收门槛；未完成的 Live2D 项不得标作通过。当前范围见 [V0.7 验收边界](acceptance-boundaries.md)、[开发计划](development-plan.md)和[环境评估](environment-assessment.md)。
+docs/planning/v0.7/live2d-research-2026-10-19.md:1:> 历史方案快照（2026-10-19）：用户已决定 V0.7 改用静态图片，Live2D 推迟到正式版后的更新。下文不是当前开发范围、依赖或验收门槛；未完成的 Live2D 项不得标作通过。当前范围见 [V0.7 验收边界](acceptance-boundaries.md)、[开发计划](development-plan.md)和[环境评估](environment-assessment.md)。
+docs/planning/v0.7/live2d-research-2026-10-19.md:18:| 本机环境 | 指定解释器版本/包元数据、模块可发现、发行包文件归属 | 没有 QApplication/GL context 探针，DLL 可加载与 GPU 驱动兼容未验证 |
+docs/planning/v0.7/live2d-research-2026-10-19.md:20:| 本项目验收 | 仅形成待执行矩阵和候选预算 | 没有 V0.7 模型/动作/稳定性/实机通过证据，V0.5 结果仅是基线 |
+docs/planning/v0.7/live2d-research-2026-10-19.md:144:本轮没有产品功能变更或产品测试通过结论。环境命令的引号失败与公开资料获取失败均已保留说明；后续证据须按日期/场景/轮次独占保存，不覆写首败。是否完成Live2D、是否可分发、是否完成V0.7只能由对应真实证据分别判断。
+EXIT=0
+

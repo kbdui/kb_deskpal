@@ -1,0 +1,53 @@
+V0.7 文档研究与测试范围静态复核
+日期：2026-10-20
+范围：只读复核以下六份文档；唯一写入为本证据文件。
+  docs/planning/v0.7/acceptance-boundaries.md
+  docs/planning/v0.7/development-plan.md
+  docs/planning/v0.7/environment-assessment.md
+  docs/planning/v0.7/research-and-test-scope-2026-10-20.md
+  docs/README.md
+  docs/planning/roadmap.md
+未运行产品测试、GUI、联网或依赖安装；未访问封存 V0.6 数据。
+
+检查命令与首败记录
+1. 首次 Python 静态检查命令：PowerShell 临时脚本 `$scopeCheckPath = Join-Path ([System.IO.Path]::GetTempPath()) 'deskpal_v07_research_scope_check.py'`，随后执行 `& 'D:\anaconda\Anaconda3\python.exe' $scopeCheckPath`。脚本将文件路径保留为 str，首败原始输出如下（exit 1）：
+Traceback (most recent call last):
+  File "C:\Users\86172\AppData\Local\Temp\deskpal_v07_research_scope_check.py", line 23, in <module>
+    raw = path.read_bytes()
+          ^^^^^^^^^^^^^^^^
+AttributeError: 'str' object has no attribute 'read_bytes'
+这是检查器错误，未得出文档检查结果。另有两次 `functions.exec` JavaScript 脚本在解析阶段报 SyntaxError、shell 未启动；未修改任何文件。
+在该轮迭代中还出现过一次 Python 正则编译失败。当前可取回的工具记录中没有保留其完整原始异常文本/命令，不在此重构成 raw；该失败属于检查器构造错误，不代表文档问题。以上失败与最终通过结果分开记录。
+
+2. 修正后的文件元数据命令：PowerShell 将 UTF-8 Python 脚本写入 `$env:TEMP\v07_static_check_20261020.py`，执行 `& 'D:\anaconda\Anaconda3\python.exe' $p`。脚本对六个指定文件逐一 `read_bytes()`、严格 UTF-8 解码、统计围栏行数并查找冲突标记。原始关键输出（exit 0）：
+FILE docs\planning\v0.7\acceptance-boundaries.md bytes 16159 sha256 f631dbdde62e5c6d849f33f319addacf2588d22ae9e218b9e7e48dabe037ef6e utf8=OK; fence_count 0 paired True; conflict_markers []
+FILE docs\planning\v0.7\development-plan.md bytes 12605 sha256 9582b4b8e865f25187b22d6e7b7754e79674fec3ec9d00b4fa94916fd020773e utf8=OK; fence_count 0 paired True; conflict_markers []
+FILE docs\planning\v0.7\environment-assessment.md bytes 12345 sha256 d33af9695f978f29a535863e1a324723179919c5074f6be2148f779f75e1d9f8 utf8=OK; fence_count 0 paired True; conflict_markers []
+FILE docs\planning\v0.7\research-and-test-scope-2026-10-20.md bytes 9812 sha256 da717c1220c88204c2062ef906c80dfb9f508006a0ac97eff35b7f2f0cdf03c9 utf8=OK; fence_count 0 paired True; conflict_markers []
+FILE docs\README.md bytes 10614 sha256 505b596159fe244bc1718318a9ff4878a1c0dd97057ab55aee736d588bb1cbb0 utf8=OK; fence_count 2 paired True; conflict_markers []
+FILE docs\planning\roadmap.md bytes 12183 sha256 5009e98b08d7ace4596581731367f63df7db8a4fe18fe5164b86fb18891b996a utf8=OK; fence_count 0 paired True; conflict_markers []
+CHECKER_FILES_DONE
+
+3. 链接/锚点与内容扫描命令：PowerShell 将 UTF-8 Python 检查器写入 `$env:TEMP\v07_final_audit_20261020.py`，执行 `& 'D:\anaconda\Anaconda3\python.exe' $p`，输出重定向到 `$env:TEMP\v07_final_audit_20261020.out` 后以 UTF-8 读取。检查仅覆盖上述六份文件；移除代码围栏/行内代码后解析 Markdown 链接，跳过外部 URL，检查本地路径和目标文件属于本次六份范围时的标题锚点。原始汇总输出（exit 0）：
+LINK_AUDIT {"local_links": 126, "external_skipped": 3, "in_scope_anchors_checked": 1, "issues": []}
+PY_EXIT=0
+
+4. Git 只读检查命令与原始输出：
+`git -c safe.directory=E:/no_game/git/kb_deskpal/kb_deskpal diff --check`
+输出为空；exit 0。
+`git -c safe.directory=E:/no_game/git/kb_deskpal/kb_deskpal status --short`
+输出；exit 0：
+ M docs/README.md
+ M docs/planning/companion-model/README.md
+ M docs/planning/companion-model/integration-and-acceptance.md
+ M docs/planning/roadmap.md
+?? docs/planning/v0.7/
+状态未显示 src/、tests/、pyproject.toml 或 docs/versions/v0.6 文件变更；现有其他 dirty 文档保持原状。
+
+语义复核结论
+- 当前 V0.7 定义为静态图片桌宠；Live2D 延后到正式版后更新，开发计划明确不新增 SDK/模型/建模工具/OpenGL/独立渲染进程。未见 Live2D、GL、IPC 或动作作为 V0.7 必交/阻断项。
+- 当前三份 V0.7 文档出现“21 项”、A01–A03、100 轮等字样均处于旧矩阵追踪、被合并/删除的说明，或首轮 20 轮采样异常后的条件性升级复验；未把旧 21 项、逐项目 100 轮或 A01–A03 恢复为首版硬门槛。RDP、休眠、真实拔屏属于扩展且明确未验证；屏幕消失位置夹回、实际可用混合 DPI 往返仍保留。
+- T01–T08 保留：慢 Core 与慢 loader 分开；加载期间隐藏/关闭/Host 退出、迟到结果及线程归属；状态权威、乱序/代际/关闭抢占、不重放；真实输入、透明/穿透/宿主恢复输入控制、代表 DPI 与实际混合 DPI；最终同构建 30 分钟（5 分钟空闲加 20 轮周期）并逐周期看资源曲线。neutral 必需，其他差分可选且缺失回退中性图。展示防闪烁不能延迟真实状态。
+- 研究文档注明指定上游文件的 4 次 raw 与 3 次 blob 请求均 Cache miss，因此没有独立复核上游源码；把报告描述与本地采用决定分开，未把报告机制宣称为本项目实测。
+- Roadmap 第 75 行附近 72 小时 soak 位于 V0.9 Beta/V1.0 通用发布验证段，不属于 V0.7 首版桌宠门槛；本次未发现与 30 分钟 V0.7 T08 方案的直接矛盾。
+

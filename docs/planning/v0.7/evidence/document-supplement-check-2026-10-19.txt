@@ -1,0 +1,180 @@
+V0.7 文档补充静态检查记录
+日期：2026-10-19
+
+范围：仅对 acceptance-boundaries.md、development-plan.md、environment-assessment.md 做 UTF-8、代码围栏、冲突标记和本地链接检查；另执行 git diff --check 与只读 status。未运行产品测试、未联网/安装依赖、未访问封存 V0.6 数据。
+
+首败：本轮所有实际检查命令均退出 0，没有新失败需要记录。宽泛关键词扫描的工具响应由工具自身标记 truncated；该响应按实际可见内容保存，不作为完整 raw。随后执行的聚焦语义摘录无截断。
+
+静态结论：三份文档均严格 UTF-8 可读，围栏配对、冲突标记和本地链接扫描通过；git diff --check 通过。SHA256 和字节数见静态检查命令的原始输出。
+
+语义复核：
+1. 文件把合法研发使用与未来发行/再分发区分；明确研发阶段仍须核实SDK/模型/素材使用许可，并明确“非商业”不是所有限制的通用豁免。没有把无发行计划写成已获发行许可。
+2. 图像流程明确区分概念/静态PNG、拆件与补绘、建模/动作/导出、真实模型验收；PNG不作为运行模型或L02证据。文档称生图工具不会直接交付可用.moc3/.model3.json，且没有已验证自动建模/绑定能力。
+3. 文档只提出由Agent使用内置生图工具作为美术工作路线，没有宣称本轮已生成图像或Cubism建模工具已可用；环境评估明确角色方向尚未确定，本轮未调用生图。
+
+以下记录检查期间实际命令、输出和退出码。
+
+========== TOOL RESULT 1: Markdown static checks and SHA256 ==========
+COMMAND:
+& 'D:\anaconda\Anaconda3\python.exe' -c 'from pathlib import Path
+import hashlib,re,sys
+files=[Path("docs/planning/v0.7/acceptance-boundaries.md"),Path("docs/planning/v0.7/development-plan.md"),Path("docs/planning/v0.7/environment-assessment.md")]
+link_re=re.compile(r"!?\[[^\]]*\]\(([^)]*)\)")
+fence_re=re.compile(r"^\s*(`{3,}|~{3,})(.*)$")
+issues=[]
+for path in files:
+ raw=path.read_bytes(); text=raw.decode("utf-8",errors="strict"); lines=text.splitlines(); opened=None
+ print("FILE",path,"UTF8_OK", "BYTES",len(raw),"SHA256",hashlib.sha256(raw).hexdigest())
+ for n,line in enumerate(lines,1):
+  m=fence_re.match(line)
+  if m:
+   marker,rest=m.groups(); char=marker[0]
+   if opened is None: opened=(char,len(marker),n)
+   elif char==opened[0] and len(marker)>=opened[1] and not rest.strip(): opened=None
+ if opened: issues.append(f"{path}:{opened[2]}: unclosed fence {opened[0]*opened[1]}")
+ for n,line in enumerate(lines,1):
+  if line.startswith(("<<<<<<<", ">>>>>>>")): issues.append(f"{path}:{n}: conflict marker {line}")
+  if line.strip()=="=======": issues.append(f"{path}:{n}: conflict separator")
+ for m in link_re.finditer(text):
+  dest=m.group(1).strip()
+  if not dest: continue
+  if dest.startswith("<") and ">" in dest: dest=dest[1:dest.index(">")]
+  else: dest=dest.split()[0]
+  if re.match(r"^[A-Za-z][A-Za-z0-9+.-]*:",dest) or dest.startswith("#"): continue
+  dest=dest.split("#",1)[0].split("?",1)[0]
+  if not dest: continue
+  target=(path.parent/dest.replace("%20"," ")).resolve()
+  if not target.exists(): issues.append(f"{path}: missing local link {dest} -> {target}")
+ print("LINES",len(lines),"LOCAL_LINKS_AND_FENCES_SCANNED")
+if issues:
+ print("ISSUES",len(issues)); print("\n".join(issues)); sys.exit(1)
+print("ALL_STATIC_MARKDOWN_CHECKS_PASSED")'
+OUTPUT:
+FILE docs\planning\v0.7\acceptance-boundaries.md UTF8_OK BYTES 17007 SHA256 2d033ee91ebccffadab10d7c1a8c2ab226a13dac6760ffb8db70d6a27f725a9c
+LINES 119 LOCAL_LINKS_AND_FENCES_SCANNED
+FILE docs\planning\v0.7\development-plan.md UTF8_OK BYTES 15012 SHA256 3143b7228a34c0f88629992318705d8788d90917ea73afee8d4888af5c79b0c2
+LINES 108 LOCAL_LINKS_AND_FENCES_SCANNED
+FILE docs\planning\v0.7\environment-assessment.md UTF8_OK BYTES 23277 SHA256 ff38d567739ad987b4a16c8f9b088756e13d3f2e28687ab432c1d0812579edba
+LINES 159 LOCAL_LINKS_AND_FENCES_SCANNED
+ALL_STATIC_MARKDOWN_CHECKS_PASSED
+EXIT=0
+
+========== TOOL RESULT 2: git diff --check ==========
+COMMAND:
+git -c safe.directory=E:/no_game/git/kb_deskpal/kb_deskpal diff --check
+OUTPUT:
+
+EXIT=0
+
+========== TOOL RESULT 3: git status --short ==========
+COMMAND:
+git -c safe.directory=E:/no_game/git/kb_deskpal/kb_deskpal status --short
+OUTPUT:
+ M docs/README.md
+ M docs/planning/roadmap.md
+?? docs/planning/v0.7/
+EXIT=0
+
+========== TOOL RESULT 4: Local semantic wording review excerpts ==========
+COMMAND:
+rg -n -i 'non.?commercial|noncommercial|non-commercial|非商业|非商用|发行|出版|许可|PNG|\.moc3|生图|生成图|Live2D|建模|建模工具|绘图工具|模型验收|真实模型|美术|商业|应用初版|发行前|工作假设' docs/planning/v0.7/acceptance-boundaries.md docs/planning/v0.7/development-plan.md docs/planning/v0.7/environment-assessment.md
+OUTPUT:
+Warning: truncated output (original token count: 6953)
+Total output lines: 84
+
+docs/planning/v0.7/acceptance-boundaries.md:1:# V0.7 验收边界：Live2D 与桌宠表现层
+docs/planning/v0.7/acceptance-boundaries.md:7:用户补充（2026-10-19）：暂无商业使用计划；当前不开展应用发行（“应用初版打算”暂按发行/出版意向理解）。本机研发验收与未来发行许可/打包准备分开；研发使用SDK/模型/素材仍须合法。初版美术可采用Agent调用生图工具的路线，但不降低真实模型与动作门槛。
+docs/planning/v0.7/acceptance-boundaries.md:15:| V0.5 GUI | `DesktopHost` 组装 `MainWindow`、`ApplicationBridge`、托盘、通知、偏好；主窗口内为文字/静态占位，没有独立桌宠/Live2D 渲染器 | 复用应用所有权、后台命令/查询/控制、隐私 epoch 和关闭回执；新增独立表现模块 |
+docs/planning/v0.7/acceptance-boundaries.md:27:| 实际 Live2D | 真实 `.moc3`、纹理、`.motion3.json` 加载和播放；至少一段空闲动作与一段点击触发动作，证据含模型/动作 hash 与录屏或自身窗口帧 |
+docs/planning/v0.7/acceptance-boundaries.md:33:| 依赖与交付 | CLI 无 Qt/Live2D 仍可运行；optional extras 由 pyproject 统一声明；给出安装、缺资源诊断、许可清单与同构建验证证据 |
+docs/planning/v0.7/acceptance-boundaries.md:37:素材暂缺时可以交付“桌宠控制和降级接口已实现”，必须明确“真实 Live2D 未验证/被资源阻断”。只完成无模型部分不能称 V0.7 已交付。五种宿主状态可采用模型内合法动作/参数或中性状态标识组合，不能为了凑五个动作擅自修改素材；实际映射在阶段0随模型冻结。
+docs/planning/v0.7/acceptance-boundaries.md:43:3. 后端及 CLI 不反向导入 PySide6/Live2D；桌宠关闭后原 GUI/CLI 行为不减少。渲染状态与任务状态为独立状态机，渲染故障不能改 TaskStatus、触发重放或增加 attempt。
+docs/planning/v0.7/acceptance-boundaries.md:69:下列均为**待执行**。U=纯逻辑/契约测试，Q=合成数据 Qt/offscreen，N=Windows 原生图形/真实模型，H=人工硬件/桌面，R=同构建资源/生命周期。U/Q 不能代替 N/H/R，skip/缺环境均记“未验证”。
+docs/planning/v0.7/acceptance-boundaries.md:73:| L01 | SDK、绑定、二进制、模型和素材逐组件核查 | 固定来源/版本/hash及研发使用许可/署名；未来发行前另核可再分发清单/出版条件。当前不发行时列“待发行前核查”，不冒充可分发；未获研发使用许可的资源不可用 |
+docs/planning/v0.7/acceptance-boundaries.md:74:| L02 | 真实模型与动作 | N：加载实际资源、播放空闲/点击动作、验证参数/帧变化及结束回调；录屏/自身窗口帧与日志相符；缺动作中性回退 |
+docs/planning/v0.7/acceptance-boundaries.md:87:| F01 | 未装绑定/无 SDK、模型缺失、GL 初始化失败 | Q+N：提供可关闭的降级状态/静态提示，主窗口/托盘/任务可用；不称 Live2D 成功 |
+docs/planning/v0.7/acceptance-boundaries.md:93:| G02 | 无图形依赖 CLI、wheel/源码干净合成环境 | 无 Qt/Live2D 的 CLI 导入与离线任务可用；GUI 无 Live2D 可用；开启桌宠才按可选依赖诊断 |
+docs/planning/v0.7/acceptance-boundaries.md:115:每项写“已实现/已测试/未验证/阻断/不适用及理由”，附测试命令、解释器绝对路径、退出码、原始日志、源码/依赖/SDK/模型指纹、人工观察人/时间/范围。新证据使用 `data/validation/v07/<日期-场景-轮次>/` 独占目录，不覆盖首败；可分发的结论摘要进入未来 `docs/versions/v0.7/`，不得提交配置/密钥/用户数据/未经许可模型。
+docs/planning/v0.7/acceptance-boundaries.md:117:功能实现完成、离线 mock 通过、本机真实模型运行、分发许可核清、最终验收通过分别记录。所有首版必交和硬门槛有实际证据、未解决缺项被如实披露后，才讨论 V0.7 交付；硬门槛缺证据时只能维持开发/候选状态。V0.5 未结项和 V0.6 阶段0状态在报告中继续独立保留，产品版本号由用户后续发布决定。
+docs/planning/v0.7/acceptance-boundaries.md:119:当前可形成“非商业本机研发验收”结论，尚无发行计划的商业出版手续不作为该结论的前置条件；不得将其写成“已获对外发行许可”。若将来发行，先完成对应许可、通知和分发闭包复核。生图概念稿/透明PNG验收、拆件画稿验收、可运行Live2D模型/动作验收分别记录，不以生成立绘数量代替L02。
+docs/planning/v0.7/development-plan.md:1:# V0.7 开发计划：Live2D 与桌宠表现层
+docs/planning/v0.7/development-plan.md:3:日期：2026-10-19（Asia/Shanghai）。状态：实施前计划；当前产品 **0.5.0rc1**，未开始 V0.7 产品代码开发。本轮交付本计划、[验收边界](acceptance-boundaries.md)和[环境评估](environment-assessment.md)，不是 Live2D 已接入的声明。以源码和最新检查点修正历史规划，不覆盖历史失败证据。
+docs/planning/v0.7/development-plan.md:5:用户补充：暂无商业使用计划；当前不开展应用发行（“应用初版”暂按发行/出版理解，仍是工作假设）。先以非商业本机研发为目标，实际使用许可必须核清；商业发行准备仅在未来发行前执行。初版美术资源可由Agent使用内置生图工具制作，边界见[环境评估第9节](environment-assessment.md#9-初版美术资源的生图路线用户补充)。
+docs/planning/v0.7/development-plan.md:18:现有静态占位在主窗口对话提示中，没有可直接升级的独立桌宠窗口，也没有已定义的 Live2D 状态总线。不能只换一张图就完成 V0.7。
+docs/planning/v0.7/development-plan.md:22:首选验证路线是 **现有 Qt 宿主 + 窄状态投影/controller + 独立 Qt 渲染进程 + 已维护绑定/Cubism SDK**。首个探针候选为 `live2d-py 1.0.0`，尚未冻结依赖或证明可用；具体风险见环境评估。只有探针失败且可维护性理由明确时，才评估官方 Native SDK 小型 helper 或其它现成绑定，不默认自研 Live2D 渲染底层。
+docs/planning/v0.7/development-plan.md:37:拟分包（名称在阶段1冻结，不代表当前已有接口）：`presentation/models.py, ports.py, state.py` 为 Qt-free 纯 DTO/映射；`gui/pet_controller.py` 为宿主所有权；`gui/pet_process.py` 为 IPC/进程适配；`gui/pet_window.py` 与 Live2D adapter 只在渲染进程导入。纯领域 DTO 不导入 Qt，后端不导入具体渲染器。
+docs/planning/v0.7/development-plan.md:52:| ModelManifest | 明确 model3 入口、资源闭包/hash/尺寸/动作映射/许可；禁止 URL、脚本、绝对路径和 root 外引用，控制 JSON、纹理尺寸与总量；不自动下载缺文件 |
+docs/planning/v0.7/development-plan.md:60:各阶段有实际结果再推进；不承诺未经探针验证的日历工期。模型/许可受阻时阶段1、2的无模型工作继续，不能把阶段3、4改写成占位验收。
+docs/planning/v0.7/development-plan.md:64:| 0A 来源与兼容性冻结 | 同一 release/commit 核查构建/加载/渲染/析构/GIL/测试源码；审 wheel 内文件/PE依赖/许可；官方 SDK 与模型用途核验 | 固定版本/hash/清单/许可结论；列出二进制来源与未覆盖项；新增下载/安装前按工具要求中文批准 | 本计划完成；公开源码文本可先读 |
+docs/planning/v0.7/development-plan.md:65:| 0B 最小原生探针 | 独立合成环境中真实模型首帧/动作、alpha、Qt版本/GL profile/FBO/DPR、重复释放、故障/退出/父死；双 Python | 真实资源与线程/context日志、完整首败、资源初测；冻结路线/模型/参数/预算与首版范围。不可行则输出替代路线审查，不强接生产 | 0A，合法 SDK/模型和获准依赖 |
+docs/planning/v0.7/development-plan.md:70:| 5 最终构建和本机验收审查 | 双Python受影响回归/strict、纯CLI/GUI无Live2D、本机wheel源码安装、同构建30分钟长测、研发使用许可/操作/测试报告 | 构建/依赖/模型指纹一致；已实现/已测/未测/阻断分别记录；父 Agent 最终验收限定非商业本机范围；对外发行条件另列 | 前述技术硬门槛与实际研发使用许可满足；无发行计划时不要求先办商业出版手续 |
+docs/planning/v0.7/development-plan.md:72:先执行的实现工作为：冻结最小表现 DTO 和应用状态来源、独立开关/降级、子进程生命周期和测试夹具；这些不因缺少模型停止。真正装 SDK/绑定前先给出来源/许可/用途和受控命令，不静默运行上游自动下载构建脚本。
+docs/planning/v0.7/development-plan.md:74:美术工作线与技术探针分开推进：角色方向→生图概念/透明静态图→拆件/遮挡补绘/一致性检查→评估Cubism建模与动作制作工具→导出实际模型→L02验收。Agent可承担生图、定向编辑和工程整理，但当前不承诺仅靠生图完成分层PSD、网格绑定或`.moc3`导出；需要Editor或建模协作时提供具体缺项。技术探针使用合法可测试模型，不等自有美术完成；生图静态资源可先服务于明确标注的降级界面。
+docs/planning/v0.7/development-plan.md:101:| 角色美术与实际模型/动作来源 | Agent可负责内置生图和资源整理；角色方向在实际生图前确定；建模/导出能力另评，采购/外部委托由用户决定 | 合法测试模型技术探针、无模型控制层；不将生图PNG当运行模型 |
+docs/planning/v0.7/development-plan.md:102:| 未来模型与动作分发许可 | 当前无发行工作；未来发行前再核查，未到需要采购时不反复询问 | 合法非商业本机开发与真实模型验收 |
+docs/planning/v0.7/development-plan.md:103:| 可扩展应用分类/出版许可与实际发行主体 | 发行前由用户决定真实发行方式，必要时向Live2D核实；不代用户签约/发邮件 | 内部开发与明确许可的本机验证；不承诺免费可分发 |
+docs/planning/v0.7/environment-assessment.md:3:评估日期：2026-10-19（Asia/Shanghai）。基于当前 **0.5.0rc1** 源码、V0.5 实际接口与 V0.6 最新暂停检查点。状态：**公开源码/许可初审及本机元数据核查完成，渲染路线尚未冻结，未安装或运行 Live2D**。关联：[验收边界](acceptance-boundaries.md)、[开发计划](development-plan.md)。
+docs/planning/v0.7/environment-assessment.md:5:用户补充（2026-10-19）：项目暂无商业使用计划，询问初版美术资源由 Agent 调用生图模型制作的可行性。原话“暂无商业使用与应用初版打算”的后一部分暂按“暂无应用发行/出版计划”理解，发行意向未作为已确认法律事实；当前不开展发行、采购或签约。研发使用许可仍需核查，产品再分发条件留作未来发行前门槛，不以尚未办理商业发行手续阻断合法的本机开发验收。
+docs/planning/v0.7/environment-assessment.md:9:现有 Qt 宿主、后台桥接与关闭所有权可继续使用；不需要为 V0.7 更换 Core、Worker 或权限策略。建议优先做 **独立 PySide6 渲染进程 + 维护中的 Native Python 绑定** 探针，首候选为 `EasyLive2D/live2d-py 1.0.0`。这只是验证顺序，尚非生产选型批准。
+docs/planning/v0.7/environment-assessment.md:11:当前两个明确的项目解释器已经有 Qt OpenGL 模块；新增绑定、SDK、模型、合法分发闭包和实际 GL/生命周期证据仍缺。现在能推进无模型的状态 DTO、控制/降级/生命周期；不能宣称真实 Live2D 已完成。
+docs/planning/v0.7/environment-assessment.md:16:| 本机环境 | 指定解释器版本/包元数据、模块可发现、发行包文件归属 | 没有 QApplication/GL context 探针，DLL 可加载与 GPU 驱动兼容未验证 |
+docs/pla…953 tokens truncated…docs/planning/v0.7/environment-assessment.md:63:| [main Python入口](https://raw.githubusercontent.com/EasyLive2D/live2d-py/main/package/live2d/__init__.py) | 声明1.0.0、`__csm_version__="5-r.5"`，init进入扩展，导入有banner输出 | 5-r.5只是所读绑定目标，不声称官方最新；协议stdout需避免被导入日志污染；实际DLL与声明是否相符待查 |
+docs/planning/v0.7/environment-assessment.md:64:| [PySide6示例](https://raw.githubusercontent.com/EasyLive2D/live2d-py/main/examples/main_pyside6.py) | QOpenGLWidget.initializeGL里glInit/建Model/同步LoadModelJson；paintGL更新绘制；120FPS timer、primaryScreen DPR和glReadPixels命中，退出后dispose | 能说明接入方式，不能原样生产复用：高帧率、跨屏DPR、上下文current、阻塞加载和释放顺序需重做项目适配 |
+docs/planning/v0.7/environment-assessment.md:65:| [main stub](https://raw.githubusercontent.com/EasyLive2D/live2d-py/main/package/live2d/_live2d.pyi) | 声明 LoadModelJson(create_renderer)、Create/DestroyRenderer、glRelease/dispose 等接口 | 声明不是线程安全/异步/析构实现证明；必须对选定二进制验证 |
+docs/planning/v0.7/environment-assessment.md:66:| [C++ PyModel 源码页面](https://github.com/EasyLive2D/live2d-py/blob/main/Wrapper/V3/PyModel.cpp) | 可读页面含 `new Model`/Dealloc `delete self->model` 与直接LoadModelJson；所读方法命名/签名与1.0入口/stub有差异 | 这是不同时间缓存的局部源码证据；未证明统一wrapper的GIL释放、GPU清理/异常传播/回调引用寿命，不据此冻结1.0生命周期 |
+docs/planning/v0.7/environment-assessment.md:67:| [根 LICENSE](https://raw.githubusercontent.com/EasyLive2D/live2d-py/main/LICENSE) | wrapper作者代码 MIT，要求保留许可/版权 | 不能将SDK/Core/样例/模型统一贴成MIT |
+docs/planning/v0.7/environment-assessment.md:69:资料获取限制：GitHub commit API 返回 Internal Error；v1.0.0 多个原文件/目录及固定commit的 Python入口返回 Cache miss；部分 raw C++ 文件404或空响应；examples目录一次重定向至 `EasyLive2D/relive2d`。本轮不跟随重定向改选另一项目、不声称读完上游全部实现。固定commit的 setup.py 成功读取，动态 main 的少量文件/示例与部分C++页面成功读取；仍缺**同一固定版本**的统一扩展初始化、Model/纹理/动作析构、GIL/线程约束、异常路径、构建CI/测试和wheel内容核对。这些缺项阻止正式绑定冻结，但不阻止状态层开发。
+docs/planning/v0.7/environment-assessment.md:83:## 6. 许可与分发清单
+docs/planning/v0.7/environment-assessment.md:85:本节是工程准入清单，**没有代用户签约、购买、确认发行主体或申请出版许可**。具体发行包必须按实际版本文件与官方条件核对，依赖作者的免责声明不取代官方条款。
+docs/planning/v0.7/environment-assessment.md:87:当前按非商业、本机研发组织工作，不预先采购商业发行许可。开发试用与应用发行是不同条件；未来分享应用/模型/演示材料时，按实际行为重核条款。“非商业”本身不是所有 SDK、模型、素材限制的通用豁免。[官方许可区分](https://www.live2d.com/en/sdk/license/)
+docs/planning/v0.7/environment-assessment.md:89:| 组件/资源 | 来源和许可 | 开发/测试处理 | 产品分发条件与当前缺项 |
+docs/planning/v0.7/environment-assessment.md:91:| Python wrapper | live2d-py LICENSE，MIT | 可审源码，采用时保留通知 | 核对固定版和wheel内第三方内容；MIT仅覆盖有权授权部分 |
+docs/planning/v0.7/environment-assessment.md:92:| Cubism Native Framework/Samples | [官方Framework LICENSE](https://github.com/Live2D/CubismNativeFramework/blob/develop/LICENSE.md)、[Live2D Open Software Agreement](https://www.live2d.com/eula/live2d-open-software-license-agreement_en.html) | 按对应协议使用；不是泛称MIT/Apache | 记录组件/修改/通知及实际SDK对应版本，不将develop视为冻结版 |
+docs/planning/v0.7/environment-assessment.md:93:| Cubism Core | 官方SDK包，[Proprietary Agreement](https://www.live2d.com/eula/live2d-proprietary-software-license-agreement_en.html) | 需接受适用协议再取得合法包；本轮未下载 | 核对实际包的RedistributableFiles及协议条件；不能单独镜像整套SDK/Core，也不能笼统认定所有Core都不可随应用分发 |
+docs/planning/v0.7/environment-assessment.md:94:| 应用出版 | [官方SDK发行许可](https://www.live2d.com/en/sdk/license/) | 开发试用与发行分开判断 | 个人/小规模豁免有条件，Expandable Application例外；本应用若允许无限导入模型，存在该分类风险（工程推断），发行前核实，不承诺“免费开源就免许可” |
+docs/planning/v0.7/environment-assessment.md:95:| 官方样例模型/动作/纹理 | [样例入口](https://www.live2d.com/en/learn/sample/)、[Free Material Agreement](https://www.live2d.com/eula/live2d-free-material-license-agreement_en.html)、[逐模型使用条件](https://www.live2d.com/learn/sample/model-terms/) | 只能在相应条款允许的用途内选测试模型 | 每个模型可能有额外限制，需记录名称/版本/版权/改编和再分发范围；公开下载不等于产品附带授权 |
+docs/planning/v0.7/environment-assessment.md:97:| PySide6/Qt | [Qt for Python许可清单](https://doc.qt.io/qtforpython-6/licenses.html)，依实际模块商业或开源许可路线 | 沿用现有Essentials，不因新功能改变许可路线 | 对实际DLL/插件/NOTICE列闭包，满足所选许可义务；打包不意味着许可工作自动完成 |
+docs/planning/v0.7/environment-assessment.md:98:| PyOpenGL/numpy/Pillow/打包工具 | 依各固定发行包LICENSE/NOTICE | 上游声明有此依赖，不预先安装全部可选演示库 | 在下载固定包后逐一核查其第三方许可/二进制，尚未完成，不提前宣称整个闭包可分发 |
+docs/planning/v0.7/environment-assessment.md:100:Core条款包含特定可再分发代码的条件与发行许可例外，不能将上游setup.py中“禁止分发”的概括当成最终法律结论。这里保留待核查的实际文件清单，不凭网站下载按钮绕过许可，也不替用户接受SDK下载协议。
+docs/planning/v0.7/environment-assessment.md:102:阶段0的资源manifest至少记录：来源URL/获取日期、SDK/绑定/model版本与SHA256、平台架构/链接方式、许可证原件/通知路径、用途（内部测试/用户自备/可随产品分发）、动作映射、资源闭包与尺寸上限、许可判定依据/未解决项。用户自备素材不自动免除应用SDK发行条件。首版暂不提供任意模型平台，不代表自动排除了Expandable分类。
+docs/planning/v0.7/environment-assessment.md:106:现有 `pyproject.toml` 仍是唯一直接依赖声明：基础python-dotenv/tzdata，gui为 `PySide6-Essentials>=6.12,<6.13`，gui-dev为pytest-qt。CLI不得因V0.7导入Qt/Live2D。保留现有constraints和requirements，不用整份Conda freeze替代项目依赖闭包。[现有依赖约定](../../guides/dependencies.md)
+docs/planning/v0.7/environment-assessment.md:110:| live2d 或 pet extra（待命名冻结） | 经验证的绑定和实际直接使用的图形库；包含所需gui依赖 | 不新增空extra/不可用安装命令；不改pyproject |
+docs/planning/v0.7/environment-assessment.md:112:| Python3.11/3.12的pet约束 | 固定验证后的Qt/绑定/传递闭包及下载hash | 尚未解析/安装/pip check；不把py312-gui约束视为Live2D锁 |
+docs/planning/v0.7/environment-assessment.md:120:2. 获取并审定固定源码/二进制文件清单与许可，明确正式模型或内部测试模型用途；下载/安装遵守工具批准要求，所有请求中文。不运行上游setup自动下载，不允许无wheel时静默走sdist。
+docs/planning/v0.7/environment-assessment.md:123:5. 再接入生产表现接口；运行关闭桌宠/缺依赖/CLI安装对照和受影响GUI回归。同构建原生长测完成后审发行闭包。
+docs/planning/v0.7/environment-assessment.md:129:Luna只读盘点 `tests/gui/`：已有桥接背压/关闭、窗口授权与隐私缓存、任务/记忆/通知、慢后端和进程互斥等测试；fixture使用offscreen并在Qt缺失时importorskip。未运行这些测试，定义数量不作为通过结论。当前没有真实Live2D模型/动作、GL上下文重建/回收或宠物交互/性能验收资产。
+docs/planning/v0.7/environment-assessment.md:135:| 固定绑定全链源码/二进制审核 | 同版本释放/GIL/CI、wheel内DLL与许可未核完 | 纯DTO/reducer/IPC/controller设计与mock |
+docs/planning/v0.7/environment-assessment.md:142:本轮没有产品功能变更或产品测试通过结论。环境命令的引号失败与公开资料获取失败均已保留说明；后续证据须按日期/场景/轮次独占保存，不覆写首败。是否完成Live2D、是否可分发、是否完成V0.7只能由对应真实证据分别判断。
+docs/planning/v0.7/environment-assessment.md:144:## 9. 初版美术资源的生图路线（用户补充）
+docs/planning/v0.7/environment-assessment.md:146:可由 Agent 使用内置生图工具承担角色概念稿、透明背景静态立绘、表情参考、降级图片及有需要的位图装饰。先确定同一角色的造型/比例/配色，再围绕定稿编辑，减少每张重新生成导致的角色漂移。已有代码/矢量图标仍按原生资产方式维护，不为简单控件增加位图库。
+docs/planning/v0.7/environment-assessment.md:150:| 概念与静态资源 | 原创角色方案、透明PNG、表情参考、定向修图；检查alpha、边缘、形体和一致性 | 合格后可用于静态降级/界面展示；不是Live2D接入证据 |
+docs/planning/v0.7/environment-assessment.md:151:| Live2D画稿准备 | 制订拆件清单，尝试分件/补全遮挡区域和统一画布对齐，记录参考与生成来源 | 生图输出通常为栅格图片，不能承诺直接得到可靠的分层PSD；拆件质量和连续变形需另验 |
+docs/planning/v0.7/environment-assessment.md:152:| 建模/动作/导出 | 另行评估可用Cubism Editor/工具链、网格、变形器、参数、物理与动作的制作方式 | 本轮没有已验证的自动建模/绑定能力；生图工具不会直接交付可用`.moc3`/`.model3.json`运行包 |
+docs/planning/v0.7/environment-assessment.md:153:| 真模型验收 | 将实际导出模型接入冻结渲染路线，执行动作/命中/资源/回收测试 | 继续满足L02与原生验收，静态图或序列帧不能顶替 |
+docs/planning/v0.7/environment-assessment.md:155:Live2D官方制作说明将插画拆为眼睫、眼球、轮廓等部件，并要求补绘运动时会露出的区域；这正是“生图立绘”与“可变形模型”之间需要独立投入的工作。[官方拆件说明](https://docs.live2d.com/en/cubism-editor-manual/divide-the-material/)
+docs/planning/v0.7/environment-assessment.md:157:资源记录包含提示词/生成日期/工具、参考输入及其使用依据、原图与定稿hash、编辑历史和用途。优先原创、不使用未经授权的现成角色/参考素材；不把AI生成等同于排他版权、第三方无权利或所有用途均已获许可。当前不据此承诺商业发行资格。
+docs/planning/v0.7/environment-assessment.md:159:实际制作采用内置image_gen路径，不读取项目API key，不接入应用的LLM调用链，不下载本地推理模型。允许制作本项目美术不等于允许上传私人照片/配置/数据；使用外部参考前核查其来源。选定项目资产落入工作区的版本化资源目录，记录生成来源；角色方向尚未确定，本轮没有调用生图或生成资产。真实Live2D技术探针可使用合法测试模型独立推进，不必等待自有角色建模完成。
+EXIT=0
+
+========== TOOL RESULT 5: undefined ==========
+COMMAND:
+rg -n '暂无商业|非商业本机|研发使用许可|“非商业”本身|内置生图|不降低真实模型|.moc3|不以生成立绘数量|暂未验证|当前没有自动建模|当前不承诺|没有调用生图|不等于Live2D|不等于允许上传|发行前|仅在未来|不作为.*前置' docs/planning/v0.7/acceptance-boundaries.md docs/planning/v0.7/development-plan.md docs/planning/v0.7/environment-assessment.md
+OUTPUT:
+docs/planning/v0.7/development-plan.md:5:用户补充：暂无商业使用计划；当前不开展应用发行（“应用初版”暂按发行/出版理解，仍是工作假设）。先以非商业本机研发为目标，实际使用许可必须核清；商业发行准备仅在未来发行前执行。初版美术资源可由Agent使用内置生图工具制作，边界见[环境评估第9节](environment-assessment.md#9-初版美术资源的生图路线用户补充)。
+docs/planning/v0.7/development-plan.md:70:| 5 最终构建和本机验收审查 | 双Python受影响回归/strict、纯CLI/GUI无Live2D、本机wheel源码安装、同构建30分钟长测、研发使用许可/操作/测试报告 | 构建/依赖/模型指纹一致；已实现/已测/未测/阻断分别记录；父 Agent 最终验收限定非商业本机范围；对外发行条件另列 | 前述技术硬门槛与实际研发使用许可满足；无发行计划时不要求先办商业出版手续 |
+docs/planning/v0.7/development-plan.md:74:美术工作线与技术探针分开推进：角色方向→生图概念/透明静态图→拆件/遮挡补绘/一致性检查→评估Cubism建模与动作制作工具→导出实际模型→L02验收。Agent可承担生图、定向编辑和工程整理，但当前不承诺仅靠生图完成分层PSD、网格绑定或`.moc3`导出；需要Editor或建模协作时提供具体缺项。技术探针使用合法可测试模型，不等自有美术完成；生图静态资源可先服务于明确标注的降级界面。
+docs/planning/v0.7/development-plan.md:101:| 角色美术与实际模型/动作来源 | Agent可负责内置生图和资源整理；角色方向在实际生图前确定；建模/导出能力另评，采购/外部委托由用户决定 | 合法测试模型技术探针、无模型控制层；不将生图PNG当运行模型 |
+docs/planning/v0.7/development-plan.md:102:| 未来模型与动作分发许可 | 当前无发行工作；未来发行前再核查，未到需要采购时不反复询问 | 合法非商业本机开发与真实模型验收 |
+docs/planning/v0.7/development-plan.md:103:| 可扩展应用分类/出版许可与实际发行主体 | 发行前由用户决定真实发行方式，必要时向Live2D核实；不代用户签约/发邮件 | 内部开发与明确许可的本机验证；不承诺免费可分发 |
+docs/planning/v0.7/acceptance-boundaries.md:7:用户补充（2026-10-19）：暂无商业使用计划；当前不开展应用发行（“应用初版打算”暂按发行/出版意向理解）。本机研发验收与未来发行许可/打包准备分开；研发使用SDK/模型/素材仍须合法。初版美术可采用Agent调用生图工具的路线，但不降低真实模型与动作门槛。
+docs/planning/v0.7/acceptance-boundaries.md:27:| 实际 Live2D | 真实 `.moc3`、纹理、`.motion3.json` 加载和播放；至少一段空闲动作与一段点击触发动作，证据含模型/动作 hash 与录屏或自身窗口帧 |
+docs/planning/v0.7/acceptance-boundaries.md:73:| L01 | SDK、绑定、二进制、模型和素材逐组件核查 | 固定来源/版本/hash及研发使用许可/署名；未来发行前另核可再分发清单/出版条件。当前不发行时列“待发行前核查”，不冒充可分发；未获研发使用许可的资源不可用 |
+docs/planning/v0.7/acceptance-boundaries.md:119:当前可形成“非商业本机研发验收”结论，尚无发行计划的商业出版手续不作为该结论的前置条件；不得将其写成“已获对外发行许可”。若将来发行，先完成对应许可、通知和分发闭包复核。生图概念稿/透明PNG验收、拆件画稿验收、可运行Live2D模型/动作验收分别记录，不以生成立绘数量代替L02。
+docs/planning/v0.7/environment-assessment.md:5:用户补充（2026-10-19）：项目暂无商业使用计划，询问初版美术资源由 Agent 调用生图模型制作的可行性。原话“暂无商业使用与应用初版打算”的后一部分暂按“暂无应用发行/出版计划”理解，发行意向未作为已确认法律事实；当前不开展发行、采购或签约。研发使用许可仍需核查，产品再分发条件留作未来发行前门槛，不以尚未办理商业发行手续阻断合法的本机开发验收。
+docs/planning/v0.7/environment-assessment.md:87:当前按非商业、本机研发组织工作，不预先采购商业发行许可。开发试用与应用发行是不同条件；未来分享应用/模型/演示材料时，按实际行为重核条款。“非商业”本身不是所有 SDK、模型、素材限制的通用豁免。[官方许可区分](https://www.live2d.com/en/sdk/license/)
+docs/planning/v0.7/environment-assessment.md:94:| 应用出版 | [官方SDK发行许可](https://www.live2d.com/en/sdk/license/) | 开发试用与发行分开判断 | 个人/小规模豁免有条件，Expandable Application例外；本应用若允许无限导入模型，存在该分类风险（工程推断），发行前核实，不承诺“免费开源就免许可” |
+docs/planning/v0.7/environment-assessment.md:146:可由 Agent 使用内置生图工具承担角色概念稿、透明背景静态立绘、表情参考、降级图片及有需要的位图装饰。先确定同一角色的造型/比例/配色，再围绕定稿编辑，减少每张重新生成导致的角色漂移。已有代码/矢量图标仍按原生资产方式维护，不为简单控件增加位图库。
+docs/planning/v0.7/environment-assessment.md:152:| 建模/动作/导出 | 另行评估可用Cubism Editor/工具链、网格、变形器、参数、物理与动作的制作方式 | 本轮没有已验证的自动建模/绑定能力；生图工具不会直接交付可用`.moc3`/`.model3.json`运行包 |
+docs/planning/v0.7/environment-assessment.md:159:实际制作采用内置image_gen路径，不读取项目API key，不接入应用的LLM调用链，不下载本地推理模型。允许制作本项目美术不等于允许上传私人照片/配置/数据；使用外部参考前核查其来源。选定项目资产落入工作区的版本化资源目录，记录生成来源；角色方向尚未确定，本轮没有调用生图或生成资产。真实Live2D技术探针可使用合法测试模型独立推进，不必等待自有角色建模完成。
+EXIT=0
+

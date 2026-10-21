@@ -163,6 +163,11 @@ class ApplicationService:
         self._ready()
         return self.journal.review(task_id)
 
+    def presentation_snapshot(self) -> dict[str, Any]:
+        """Expose bounded task metadata through the existing lifecycle gates."""
+        self._ready()
+        return self.tasks.presentation_snapshot()
+
     def resume(self, task_id: str) -> PlanSnapshot | Task:
         self._ready()
         with self._dispatcher.management():

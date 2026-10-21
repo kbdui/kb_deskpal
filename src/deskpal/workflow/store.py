@@ -34,6 +34,15 @@ _SCHEMA = (
     "CREATE TABLE memory_block(memory_id TEXT PRIMARY KEY)",
 )
 
+# Additive access paths for recognized schema 1 databases, including upgrades.
+# Existing histories pay the index-build cost once during owned startup, inside
+# the initialization transaction; snapshot reads never create or rebuild them.
+_PRESENTATION_INDEXES = (
+    "CREATE INDEX IF NOT EXISTS task_presentation_status ON task(status,updated_at DESC,id DESC)",
+    "CREATE INDEX IF NOT EXISTS task_presentation_latest ON task(updated_at DESC,id DESC)",
+    "CREATE INDEX IF NOT EXISTS submission_presentation_status ON submission(status,sequence,task_id)",
+)
+
 
 class WorkflowStore:
     def __init__(self, path: Path, *, queue_capacity: int = 100, request_max_bytes: int = 65536,
@@ -69,6 +78,8 @@ class WorkflowStore:
                         raise ValueError("Workflow database has no recognized schema version")
                     for statement in _SCHEMA:
                         conn.execute(statement)
+                for statement in _PRESENTATION_INDEXES:
+                    conn.execute(statement)
         except BaseException:
             self._conn.close()
             self._closed = True

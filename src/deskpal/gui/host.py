@@ -12,6 +12,7 @@ from deskpal.application.service import ApplicationService
 
 from .bridge import ApplicationBridge
 from .notifications import NotificationController
+from .pet_controller import PetController
 from .preferences import GuiPreferences
 from .tray import TrayController
 from .window import MainWindow
@@ -28,7 +29,12 @@ class DesktopHost(QObject):
         self.preferences = preferences if preferences is not None else GuiPreferences()
         self.bridge = ApplicationBridge(factory, parent=self)
         self.window = MainWindow(self.bridge, self.preferences)
+        self.window.defer_closed = True
         self.tray = TrayController(self.window, self.preferences, parent=self)
+        self.pet = PetController(self.bridge, self.preferences, parent=self)
+        self.pet.navigation_requested.connect(self.restore)
+        self.pet.stopped.connect(self._finish_closed)
+        self._finalized = False
         self._timezone = ZoneInfo("Asia/Shanghai")
         self.notifications = NotificationController(self.preferences, settings=notification_settings,
             show_message=self.tray.show_message,
@@ -62,6 +68,7 @@ class DesktopHost(QObject):
     def start(self, *, visible: bool = True) -> None:
         if visible:
             self.window.show()
+        self.pet.start()
         self.bridge.start()
 
     @Slot()
@@ -94,12 +101,25 @@ class DesktopHost(QObject):
                 # A hidden close-to-tray window must remain available on timeout.
                 self.restore()
             if state == "Closed":
-                self.tray.dispose()
-                self.window.hide()
-                if self._quit_on_closed:
-                    app = QApplication.instance()
-                    if app is not None:
-                        app.quit()
+                self._finish_closed()
+
+    @Slot()
+    def _finish_closed(self) -> None:
+        if self.bridge.state != "Closed" or self._finalized:
+            return
+        if not self.pet.settled:
+            self.restore()
+            self.window.state_label.setText("正在关闭：后台已释放，等待桌宠图片和窗口资源释放。")
+            return
+        self._finalized = True
+        self.tray.dispose()
+        self.window.defer_closed = False
+        self.window.on_state_changed("Closed")
+        self.window.hide()
+        if self._quit_on_closed:
+            app = QApplication.instance()
+            if app is not None:
+                app.quit()
 
     @Slot(int)
     def _privacy(self, epoch: int) -> None:
@@ -112,6 +132,8 @@ class DesktopHost(QObject):
 
     @Slot(str, object)
     def _preference(self, key: str, value: Any) -> None:
+        if key == "pet_click_through" and value and not self.tray.available:
+            self.restore()
         if key == "notifications_enabled":
             self._privacy(self.bridge.privacy_epoch)
             if self.bridge.state == "Ready":

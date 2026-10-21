@@ -17,6 +17,13 @@ class GuiPreferences(QObject):
         "notifications_enabled": "gui/notifications_enabled",
         "quiet_start": "gui/quiet_start",
         "quiet_end": "gui/quiet_end",
+        "pet_enabled": "pet/enabled",
+        "pet_visible": "pet/visible",
+        "pet_on_top": "pet/on_top",
+        "pet_click_through": "pet/click_through",
+        "pet_x": "pet/x",
+        "pet_y": "pet/y",
+        "pet_screen": "pet/screen",
     }
 
     def __init__(self, settings: QSettings | None = None, parent: QObject | None = None):
@@ -86,6 +93,68 @@ class GuiPreferences(QObject):
             if normalized in {"false", "0", "no"}:
                 return False
         return default
+
+    @property
+    def pet_enabled(self) -> bool:
+        return self._bool("pet_enabled", False)
+
+    @property
+    def pet_visible(self) -> bool:
+        return self._bool("pet_visible", True)
+
+    @property
+    def pet_on_top(self) -> bool:
+        return self._bool("pet_on_top", True)
+
+    @property
+    def pet_click_through(self) -> bool:
+        return self._bool("pet_click_through", False)
+
+    def _set_pet_bool(self, key: str, value: bool) -> bool:
+        if not isinstance(value, bool):
+            return False
+        self._set(key, value)
+        return True
+
+    def set_pet_enabled(self, value: bool) -> bool:
+        return self._set_pet_bool("pet_enabled", value)
+
+    def set_pet_visible(self, value: bool) -> bool:
+        return self._set_pet_bool("pet_visible", value)
+
+    def set_pet_on_top(self, value: bool) -> bool:
+        return self._set_pet_bool("pet_on_top", value)
+
+    def set_pet_click_through(self, value: bool) -> bool:
+        return self._set_pet_bool("pet_click_through", value)
+
+    @property
+    def pet_position(self) -> tuple[int, int]:
+        values: list[int] = []
+        for key in ("pet_x", "pet_y"):
+            raw = self._value(key, 80)
+            try:
+                value = int(raw) if isinstance(raw, (str, int)) and not isinstance(raw, bool) else 80
+            except ValueError:
+                value = 80
+            values.append(value if abs(value) <= 1_000_000 else 80)
+        return values[0], values[1]
+
+    @property
+    def pet_screen(self) -> str:
+        raw = self._value("pet_screen", "")
+        return raw[:256] if isinstance(raw, str) else ""
+
+    def set_pet_position(self, position: tuple[int, int], screen: str) -> bool:
+        if (len(position) != 2 or any(type(v) is not int or abs(v) > 1_000_000 for v in position)
+                or not isinstance(screen, str) or len(screen) > 256 or "\x00" in screen):
+            return False
+        self._settings.setValue(self._KEYS["pet_x"], position[0])
+        self._settings.setValue(self._KEYS["pet_y"], position[1])
+        self._settings.setValue(self._KEYS["pet_screen"], screen)
+        self._settings.sync()
+        self.changed.emit("pet_position", position)
+        return True
 
     @property
     def quiet_start(self) -> int:
