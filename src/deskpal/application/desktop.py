@@ -88,7 +88,7 @@ class DesktopFacade:
             return self._respond(operation, args)
 
     def _respond(self, operation: str, args: dict[str, Any]) -> dict[str, Any]:
-        if operation not in {"diagnostics", "settings", "retry_cleanup"}:
+        if operation not in {"diagnostics", "settings", "retry_cleanup", "request_forget", "cleanup_status"}:
             self.app._ready()
         before = self.app.core.memory_runtime
         assert before is not None
@@ -100,12 +100,50 @@ class DesktopFacade:
         result["session_id"] = self.session_id
         # Read DTOs retain their read epoch; a later mutation cannot label old
         # content with the newer epoch. Memory pages provide their atomic epoch.
-        mutating = operation in {"memory", "retry_cleanup"}
-        result["memory_epoch"] = result.pop("epoch", before.epoch if mutating else epoch)
+        mutating = operation in {"memory", "retry_cleanup", "request_forget"}
+        result["memory_epoch"] = (result.pop("epoch", before.epoch if mutating else epoch)
+                                  if operation in {"memory", "memories"}
+                                  else before.epoch if mutating else epoch)
         return dict(json.loads(json.dumps(result, ensure_ascii=False, allow_nan=False)))
 
     def _execute(self, operation: str, args: dict[str, Any]) -> Any:
         app = self.app
+        if operation == "conversation_open":
+            args.pop("command_id", None)
+            if args:
+                raise ValueError("Conversation open takes no parameters")
+            return app.conversation_open()
+        if operation == "conversation_close":
+            args.pop("command_id", None)
+            return app.conversation_close(**args)
+        if operation == "conversation_snapshot":
+            return app.conversation_snapshot(**args)
+        if operation == "interaction_snapshot":
+            if args:
+                raise ValueError("Interaction snapshot takes no parameters")
+            return app.interaction_snapshot()
+        if operation == "interaction_command":
+            self._command(args)
+            action = args.pop("action", None)
+            if not isinstance(action, str):
+                raise ValueError("Interaction command requires an action")
+            return app.interaction_command(action, **args)
+        if operation == "request_forget":
+            self._command(args)
+            return app.request_forget(**args)
+        if operation == "cleanup_status":
+            if args:
+                raise ValueError("Cleanup status takes no parameters")
+            return app.cleanup_status()
+        if operation == "companion":
+            if args:
+                raise ValueError("Companion query does not accept parameters")
+            return app.companion_snapshot()
+        if operation == "companion_command":
+            action = args.pop("action", None)
+            if not isinstance(action, str):
+                raise ValueError("Companion command requires an action")
+            return app.companion_command(action, **args)
         if operation == "presentation":
             if args:
                 raise ValueError("Presentation query does not accept parameters")
@@ -117,7 +155,7 @@ class DesktopFacade:
             return app.review_task(**args)
         if operation == "submit":
             self._command(args)
-            if set(args) - {"request", "command_id", "use_policy"}:
+            if set(args) - {"request", "command_id", "use_policy", "conversation_id", "expected_conversation_epoch"}:
                 raise ValueError("Unsupported submission parameter")
             return self._receipt(app.submit(**args))
         if operation == "confirm":

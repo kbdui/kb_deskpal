@@ -33,8 +33,9 @@ class _Command:
 
 READ_OPERATIONS = frozenset({"tasks", "task", "memories", "goals", "goal", "milestones",
                              "bindings", "proposals", "proposal", "settings", "notification_feed",
-                             "notification_validate", "presentation"})
-CONTROL_OPERATIONS = frozenset({"cancel", "diagnostics"})
+                             "notification_validate", "presentation", "companion",
+                             "conversation_snapshot", "interaction_snapshot", "cleanup_status"})
+CONTROL_OPERATIONS = frozenset({"cancel", "diagnostics", "request_forget"})
 PRIVACY_ACTIONS = frozenset({"forget", "correct", "accept", "reject"})
 MAX_PENDING = 32
 MAX_PARAMETERS_BYTES = 131072
@@ -177,7 +178,7 @@ class ApplicationBridge(QObject):
                     or self._state not in {"Ready", "CleanupBlocked", "Closing"}):
                 self._reject(request_id, operation, generation, "Busy", "应用尚未就绪或正在关闭。")
                 return request_id
-            if self._state == "CleanupBlocked" and operation not in {"diagnostics", "retry_cleanup"}:
+            if self._state == "CleanupBlocked" and operation not in {"diagnostics", "retry_cleanup", "cleanup_status", "request_forget"}:
                 self._reject(request_id, operation, generation, "CleanupBlocked", "记忆清理未完成，请重试清理。")
                 return request_id
             if len(self._pending) >= MAX_PENDING:
@@ -192,7 +193,7 @@ class ApplicationBridge(QObject):
                     previous = self._pending.get(existing)
                     if previous is not None and previous.generation == generation and previous.privacy_epoch == self._epoch:
                         return existing
-            if operation == "memory" and copied.get("action") in PRIVACY_ACTIONS:
+            if operation == "request_forget" or (operation == "memory" and copied.get("action") in PRIVACY_ACTIONS):
                 self._epoch += 1
                 self.privacy_changed.emit(self._epoch)
             command = _Command(request_id, operation, copied, generation, self._epoch)
@@ -274,6 +275,7 @@ class ApplicationBridge(QObject):
             self._inflight += 1
         envelope: dict[str, Any] = {"request_id": command.request_id, "operation": command.operation,
                                    "generation": command.generation, "privacy_epoch": command.privacy_epoch}
+        delivery_epoch = command.privacy_epoch
         try:
             facade = self._facade
             if facade is None:
@@ -283,12 +285,26 @@ class ApplicationBridge(QObject):
             if len(serialized.encode("utf-8")) > MAX_REPLY_BYTES:
                 raise ValueError("Reply exceeds the view budget")
             envelope.update(ok=True, data=json.loads(serialized))
+            if command.operation == "interaction_command" and data.get("privacy_invalidated") is True:
+                with self._lock:
+                    if command.privacy_epoch == self._epoch:
+                        self._epoch += 1
+                        delivery_epoch = self._epoch
+                        envelope["privacy_epoch"] = delivery_epoch
+                        # The command's own receipt crosses this barrier only as
+                        # a new-epoch acknowledgement; all prior reads expire.
+                        self.privacy_changed.emit(delivery_epoch)
             if command.operation == "retry_cleanup":
                 assert self._app is not None
                 self._set_state("CleanupBlocked" if self._app.diagnostics().get("cleanup_pending") else "Ready")
-            elif command.operation == "memory" and self._app is not None:
-                if self._app.diagnostics().get("cleanup_pending"):
+            elif command.operation in {"memory", "request_forget", "cleanup_status"} and self._app is not None:
+                pending = (data.get("status") in {"Pending", "AcceptedPending"}
+                           or data.get("blocked") is True or data.get("cleanup_pending") is True
+                           or bool(self._app.diagnostics().get("cleanup_pending")))
+                if pending:
                     self._set_state("CleanupBlocked")
+                elif command.operation in {"request_forget", "cleanup_status"} and self.state == "CleanupBlocked":
+                    self._set_state("Ready")
         except Exception as exc:
             envelope.update(ok=False, error=_error(exc))
         finally:
@@ -296,7 +312,7 @@ class ApplicationBridge(QObject):
                 self._inflight -= 1
         with self._lock:
             if ((not self._closing.is_set() or command.operation in CONTROL_OPERATIONS)
-                    and command.privacy_epoch == self._epoch):
+                    and delivery_epoch == self._epoch):
                 self._deliver(envelope)
             else:
                 self._finish(command)

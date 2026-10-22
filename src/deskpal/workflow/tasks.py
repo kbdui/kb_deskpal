@@ -141,6 +141,7 @@ class PersistentTaskManager:
         self.store = store
 
     def _create(self, conn: sqlite3.Connection, request: str, use_policy: str = "cloud_allowed") -> Task:
+        self.store.check_privacy(conn)
         if not isinstance(request, str) or not request.strip():
             raise ValueError("Task request must be a non-empty string")
         if len(request.encode("utf-8")) > self.store.request_max_bytes:
@@ -148,8 +149,9 @@ class PersistentTaskManager:
         if use_policy not in {"cloud_allowed", "local_only"}:
             raise ValueError("Invalid task use policy")
         task_id, now = str(uuid4()), utc_now().isoformat()
-        conn.execute("INSERT INTO task(id,request,status,created_at,updated_at,use_policy) VALUES(?,?,?,?,?,?)",
-                     (task_id, request, TaskStatus.CREATED.value, now, now, use_policy))
+        privacy_epoch = conn.execute("SELECT epoch FROM privacy_control WHERE id=1").fetchone()[0]
+        conn.execute("INSERT INTO task(id,request,status,created_at,updated_at,use_policy,privacy_epoch) VALUES(?,?,?,?,?,?,?)",
+                     (task_id, request, TaskStatus.CREATED.value, now, now, use_policy, privacy_epoch))
         self.store.record_event("task_created", task_id)
         row = conn.execute("SELECT * FROM task WHERE id=?", (task_id,)).fetchone()
         assert row is not None
@@ -182,6 +184,10 @@ class PersistentTaskManager:
             if len(saved.encode("utf-8")) > self.store.result_max_bytes:
                 saved = canonical({"output_omitted": True})
             scrubbed = conn.execute("SELECT scrubbed FROM task WHERE id=?", (task_id,)).fetchone()[0]
+            try:
+                self.store.check_privacy(conn, task_id)
+            except WorkflowBlocked:
+                scrubbed = True
             if scrubbed:
                 saved, error = "null", None
             # A late cancellation cannot be overwritten by ordinary successful finalization.
@@ -189,6 +195,7 @@ class PersistentTaskManager:
                 status = TaskStatus.CANCELLED
             conn.execute("UPDATE task SET status=?,result=?,error=?,revision=revision+1,updated_at=? WHERE id=?",
                          (status.value, saved, error, utc_now().isoformat(), task_id))
+            self.store.record_terminal_effect(conn, task_id, status.value)
             self.store.record_event("task_status_changed", task_id, {"previous_status": current.status.value, "status": status.value})
             if status in {TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED}:
                 self.finish_submission(task_id)
@@ -369,6 +376,9 @@ class PersistentTaskManager:
             conn.execute("UPDATE immutableplan SET canonical_json='{}',scrubbed=1 WHERE task_id=?", (task_id,))
             conn.execute("UPDATE attempt SET result=NULL,review_evidence=NULL WHERE task_id=?", (task_id,))
             conn.execute("UPDATE audit_outbox SET data='{}' WHERE task_id=?", (task_id,))
+            conn.execute("DELETE FROM context_snapshot WHERE task_id=?", (task_id,))
+            conn.execute("DELETE FROM companion_effect_outbox WHERE task_id=?", (task_id,))
+            conn.execute("UPDATE dependency_version SET active=0,revision=revision+1 WHERE kind='dialogue_turn' AND object_id IN (?,?,?)", (task_id, task_id + ":user", task_id + ":assistant"))
             conn.execute("UPDATE submission SET status='Blocked' WHERE task_id=? AND status IN ('Queued','Claimed')", (task_id,))
             task = self.get(task_id)
             if task is None:

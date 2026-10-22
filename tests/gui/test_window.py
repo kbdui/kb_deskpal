@@ -29,7 +29,8 @@ class FakeBridge(QObject):
         self.start_count = 0
 
     def send(self, operation: str, parameters: dict[str, Any] | None = None, *, generation: int = 0) -> str:
-        if operation == "memory" and (parameters or {}).get("action") in {"forget", "correct", "accept", "reject"}:
+        if operation == "request_forget" or (operation == "memory" and (
+                parameters or {}).get("action") in {"forget", "correct", "accept", "reject"}):
             self.privacy_epoch += 1
             self.privacy_changed.emit(self.privacy_epoch)
         request_id = "request-" + str(len(self.sent) + 1)
@@ -356,8 +357,11 @@ def test_forget_clears_all_sensitive_views_before_send_and_drops_queued_body(win
         assert editor.toPlainText() == ""
     assert widget.privacy_barrier
     assert bridge.privacy_epoch == 1
-    forget = bridge.requests_for("memory")[-1]
-    assert forget["parameters"]["expected_revision"] == 3
+    forget = bridge.requests_for("request_forget")[-1]
+    parameters = dict(forget["parameters"])
+    assert parameters.pop("command_id")
+    assert parameters == {"memory_id": "memory-1", "expected_revision": 3}
+    assert forget["privacy_epoch"] == 1 and old["privacy_epoch"] == 0
     deliver(qtbot, widget, bridge, forget, {"status": "Pending", "blocked": True})
     assert widget.forget_state == "pending"
     assert widget.tasks.detail.toPlainText() == ""
@@ -376,7 +380,7 @@ def test_unsubmitted_forget_requires_explicit_reload(window: Any, qtbot: Any, co
     widget, bridge = window
     widget._memory_selected(memory_item())
     widget.memory_action("forget")
-    deliver(qtbot, widget, bridge, bridge.requests_for("memory")[-1], error=code)
+    deliver(qtbot, widget, bridge, bridge.requests_for("request_forget")[-1], error=code)
     assert widget.forget_state == "unsubmitted"
     assert "遗忘未提交" in widget.notice.text()
     widget._poll()

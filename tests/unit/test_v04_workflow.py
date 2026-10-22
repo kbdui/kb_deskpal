@@ -213,6 +213,8 @@ def test_reopen_and_online_backup_preserve_queue(tmp_path):
     task = PersistentTaskManager(store).submit("persist", command_id="persist")
     backup = tmp_path / "backup.sqlite3"
     store.backup(backup)
+    with sqlite3.connect(backup) as connection:
+        assert connection.execute("SELECT version FROM schema_version").fetchone()[0] == 2
     store.close()
     reopened = WorkflowStore(backup)
     assert PersistentTaskManager(reopened).get(task.id).request == "persist"

@@ -34,7 +34,7 @@ class CapturedLLM:
                 "value": "", "scope": "global", "profile_key": "",
                 "importance": .5, "extraction_confidence": .8,
             }]}, ensure_ascii=False))
-        if system.startswith("[REFLECT]"):
+        if system.startswith("[EXPRESSION]"):
             if self.reflection_error:
                 raise TimeoutError("fake reflection timeout")
             return LLMResponse("已根据实际工具结果反馈")
@@ -181,8 +181,13 @@ def test_optional_model_failure_preserves_completed_tool_and_durable_episode(app
         assert core.tasks.get(result.task_id).result["tool_results"][0]["output"] == "actual output"
         episodes = [item for item in core.memory_command("list_items") if item.source.origin == "tool_result"]
         assert len(episodes) == 1 and episodes[0].source.task_id == result.task_id
+        expression_calls = [(messages, tools) for messages, tools in llm.calls
+                            if messages[0].content.startswith("[EXPRESSION]")]
+        assert len(expression_calls) == 1
+        assert expression_calls[0][1] == ()
         if fault == "reflection":
-            assert "结构化结果" in result.response
+            assert result.response == "工具结果（记录事实）：\n1. echo：成功。actual output"
+            assert "Response generation failed; authoritative evidence is unchanged" in result.warnings
     events = [json.loads(line)["event"] for line in (root / "data" / "execution.jsonl").read_text(encoding="utf-8").splitlines()]
     assert events.count("tool_started") == 1
 

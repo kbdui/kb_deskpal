@@ -115,7 +115,15 @@ class LLMMemoryEvaluator:
         self.max_candidates = max_candidates
         self.max_input_bytes = max_input_bytes
 
+    @property
+    def model_client(self) -> LLMProvider:
+        return self._llm
+
     def evaluate(self, source: MemorySource) -> tuple[MemoryDraft, ...]:
+        return self.evaluate_with_client(source, self._llm)
+
+    def evaluate_with_client(self, source: MemorySource, client: LLMProvider) -> tuple[MemoryDraft, ...]:
+        """Production supplies a task-bound, purpose-limited model client."""
         if not isinstance(source, MemorySource) or source.origin != "user_message":
             raise MemoryError("Unsupported evaluation source")
         if source.use_policy != UsePolicy.CLOUD_ALLOWED:
@@ -136,7 +144,7 @@ class LLMMemoryEvaluator:
             "Never return acceptance, source, policy, role, expiry or tool fields. Empty candidates is valid."
         )
         try:
-            response = self._llm.chat((ChatMessage("system", instructions),
+            response = client.chat((ChatMessage("system", instructions),
                                        ChatMessage("user", json.dumps({"evidence": source.content}, ensure_ascii=False))), tools=())
         except Exception:
             raise MemoryError("Memory evaluation request failed") from None

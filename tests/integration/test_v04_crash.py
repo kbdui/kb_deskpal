@@ -120,11 +120,13 @@ app.store.record_event("pending_private_copy", result.task_id, {"body": marker})
 assert any(marker in repr(event.data) for event in app.store.pending_audit())
 
 if phase == "deletion_job_committed":
-    original = app.journal.begin_deletion
-    def begin(memory_id, expected_revision):
-        original(memory_id, expected_revision)
+    # begin_deletion is nested in the privacy-control transaction now. Crash
+    # only after that outer transaction commits, otherwise no forget was accepted.
+    original = app._privacy.begin
+    def begin(memory_id, expected_revision, command_id):
+        original(memory_id, expected_revision, command_id)
         crash()
-    app.journal.begin_deletion = begin
+    app._privacy.begin = begin
 elif phase == "memory_deleted":
     runtime = app.core.memory_runtime
     original = runtime.forget

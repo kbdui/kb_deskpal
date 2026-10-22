@@ -68,7 +68,7 @@ class ExecutionJournal:
                   "permission_level": int(spec.permission_level), "contract_version": getattr(spec, "contract_version", "1")}
                  for spec in tool_specs]
         value = {"task_id": task_id, "reply": plan.reply, "steps": calls, "tool_specs": specs,
-                 "workspace_dir": str(workspace_dir), "memory_refs": list(memory_refs), "policy_version": "1"}
+                 "workspace_dir": str(workspace_dir), "memory_refs": list(memory_refs), "policy_version": "2"}
         with self.store.transaction() as conn:
             self.set_dependencies(task_id, memory_refs)
             self.store.check_dependencies(conn, task_id)
@@ -78,11 +78,21 @@ class ExecutionJournal:
                 raise TaskCancellationRequested("Task cancellation requested")
             value["dependencies"] = [(r.kind, r.object_id, r.revision) for r in self.get_dependencies(task_id)]
             value["use_policy"] = conn.execute("SELECT use_policy FROM task WHERE id=?", (task_id,)).fetchone()[0]
+            context = conn.execute("SELECT digest FROM context_snapshot WHERE task_id=? AND purpose='planning'", (task_id,)).fetchone()
+            value["context_digest"] = "" if context is None else context["digest"]
+            value["context_refs"] = [tuple(row) for row in conn.execute("SELECT kind,object_id,revision FROM context_dependency WHERE task_id=? AND purpose='planning' ORDER BY kind,object_id", (task_id,))]
+            prior = conn.execute("SELECT hash,scrubbed,canonical_json FROM immutableplan WHERE task_id=?", (task_id,)).fetchone()
+            if prior is not None and not prior["scrubbed"]:
+                old = json.loads(prior["canonical_json"])
+                if str(old.get("policy_version", "1")) == "1" and context is None:
+                    # Legacy save_plan idempotency uses the original canonical
+                    # shape. Reading a plan never rewrites its bytes or hash.
+                    value["policy_version"] = old.get("policy_version", "1")
+                    del value["context_digest"], value["context_refs"]
             encoded = canonical(value)
             if len(encoded.encode("utf-8")) > self.store.plan_max_bytes:
                 raise ValueError("Plan exceeds byte limit; no executable snapshot saved")
             digest = sha256(encoded.encode("utf-8")).hexdigest()
-            prior = conn.execute("SELECT hash,scrubbed FROM immutableplan WHERE task_id=?", (task_id,)).fetchone()
             if prior:
                 if prior[0] != digest or prior[1]:
                     raise WorkflowBlocked("An immutable plan already exists for this task")
@@ -101,12 +111,17 @@ class ExecutionJournal:
             if sha256(row["canonical_json"].encode("utf-8")).hexdigest() != row["hash"]:
                 raise WorkflowBlocked("Persisted plan integrity failed")
             data = json.loads(row["canonical_json"])
+            policy_version = str(data.get("policy_version", "1"))
+            if policy_version not in {"1", "2"}:
+                raise WorkflowBlocked("Unsupported immutable plan policy version")
             plan = Plan(data["reply"], tuple(ToolCall(call["name"], call["arguments"], call["call_id"]) for call in data["steps"]))
             specs = tuple(ToolSpec(spec["name"], spec["description"], spec["parameters"],
                                    PermissionLevel(spec["permission_level"]), spec["contract_version"])
                           for spec in data["tool_specs"])
             return PlanSnapshot(row["id"], task_id, row["hash"], row["canonical_json"], plan, specs,
-                                data["workspace_dir"], tuple((ref[0], ref[1]) for ref in data["memory_refs"]))
+                                data["workspace_dir"], tuple((ref[0], ref[1]) for ref in data["memory_refs"]),
+                                policy_version=policy_version, context_digest=data.get("context_digest", ""),
+                                context_refs=tuple((ref[0], ref[1], ref[2]) for ref in data.get("context_refs", ())))
 
     def review(self, task_id: str) -> dict[str, Any]:
         """Read the task, immutable plan and attempts in one workflow transaction."""
@@ -154,6 +169,10 @@ class ExecutionJournal:
                     raise WorkflowBlocked("Step result does not match its immutable tool call")
                 body["tool_name"], body["call_id"] = call.name, call.call_id
             omitted = bool(row["scrubbed"])
+            try:
+                self.store.check_privacy(conn, row["task_id"])
+            except WorkflowBlocked:
+                omitted = True
             try:
                 encoded = canonical(body)
                 omitted = omitted or len(encoded.encode("utf-8")) > self.store.result_max_bytes
@@ -261,6 +280,7 @@ class ExecutionJournal:
                     if len(encoded_result.encode("utf-8")) > self.store.result_max_bytes:
                         encoded_result = canonical({"output_omitted": True, "warning": "Recovered committed outcomes; aggregate output omitted"})
                     conn.execute("UPDATE task SET status=?,result=?,error=NULL,revision=revision+1 WHERE id=?", (status.value, encoded_result, task.id))
+                    self.store.record_terminal_effect(conn, task.id, status.value)
                     self.tasks.finish_submission(task.id)
                     self.store.record_event("task_recovered_finalized", task.id, {"status": status.value})
                 elif task.cancel_requested and not attempts:
@@ -307,7 +327,7 @@ class ExecutionJournal:
             raise ValueError("Deletion requires memory ID and positive revision")
         with self.store.transaction() as conn:
             conn.execute("INSERT OR IGNORE INTO memory_block VALUES(?)", (memory_id,))
-            affected = conn.execute("SELECT t.id,t.status FROM task t JOIN dependency d ON d.task_id=t.id WHERE d.kind='memory' AND d.object_id=?", (memory_id,)).fetchall()
+            affected = conn.execute("SELECT id,status FROM task WHERE id IN (SELECT task_id FROM dependency WHERE kind='memory' AND object_id=? UNION SELECT task_id FROM context_dependency WHERE kind='memory' AND object_id=?)", (memory_id, memory_id)).fetchall()
             for task in affected:
                 conn.execute("UPDATE audit_outbox SET data='{}' WHERE task_id=?", (task["id"],))
                 if task["status"] in {TaskStatus.CREATED.value, TaskStatus.WAITING.value, TaskStatus.NEEDS_REVIEW.value}:
@@ -328,7 +348,16 @@ class ExecutionJournal:
     def scrub_memory(self, memory_id: str) -> tuple[str, ...]:
         with self.store.transaction() as conn:
             conn.execute("INSERT OR IGNORE INTO memory_block VALUES(?)", (memory_id,))
-            ids = tuple(row[0] for row in conn.execute("SELECT task_id FROM dependency WHERE kind='memory' AND object_id=?", (memory_id,)))
+            # Derived replies keep conservative refs; follow dialogue-turn links
+            # too, so missing an inherited direct memory ref cannot revive text.
+            ids = tuple(row[0] for row in conn.execute("""WITH RECURSIVE affected(task_id) AS (
+                SELECT task_id FROM dependency WHERE kind='memory' AND object_id=?
+                UNION SELECT task_id FROM context_dependency WHERE kind='memory' AND object_id=?
+                UNION SELECT d.task_id FROM context_dependency d JOIN affected a
+                    ON d.kind='dialogue_turn' AND d.object_id IN (a.task_id,a.task_id||':user',a.task_id||':assistant')
+                UNION SELECT d.task_id FROM dependency d JOIN affected a
+                    ON d.kind='dialogue_turn' AND d.object_id IN (a.task_id,a.task_id||':user',a.task_id||':assistant')
+                ) SELECT task_id FROM affected ORDER BY task_id""", (memory_id, memory_id)))
             for task_id in ids:
                 self.tasks.scrub(task_id)
             return ids

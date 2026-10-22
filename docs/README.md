@@ -6,7 +6,11 @@
 
 2026-10-21：V0.7「静态图片桌宠表现层」已实现，按用户要求带未决项[归档](versions/v0.7/delivery.md)，未全部验收通过；Live2D 延至正式版后的更新。[验收边界](planning/v0.7/acceptance-boundaries.md)、[开发计划](planning/v0.7/development-plan.md)和[环境评估](planning/v0.7/environment-assessment.md)记录范围，[接口](versions/v0.7/interfaces.md)、[运行说明](versions/v0.7/operations.md)和[测试报告](versions/v0.7/test-report.md)记录实现及证据。[内存简析](versions/v0.7/memory-review-2026-10-21.md)与[后续测试清单](versions/v0.7/deferred-tests.md)保留收尾判断和未执行项。原 Live2D 提案/调研保留为历史；不改变0.5.0rc1版本或V0.6暂停状态。
 
+2026-10-21：V0.8「人格、情绪与文本风格」完成实现后，用户授权[最小T01–T09](versions/v0.8/minimal-test-plan.md)。新增76项定向、修补后主环境119项及兼容171项通过，strict106源文件通过；T07并发受理和两项符号链接权限仍有边界，见[测试报告](versions/v0.8/test-report.md)。[开发计划](planning/v0.8/development-plan.md)、[验收边界](planning/v0.8/acceptance-boundaries.md)、[接口](versions/v0.8/interfaces.md)、[操作说明](versions/v0.8/operations.md)及[开发记录](versions/v0.8/development-status.md)区分规划、实际契约及证据，不宣称完整版本验收。
+
 ## 推荐阅读顺序
+
+2026-10-22 新增[拟人化优化方案](planning/v0.8/humanization-proposal.md)、[代码组织与状态协议](planning/v0.8/humanization-architecture.md)和[实施/验收计划](planning/v0.8/humanization-delivery-plan.md)。主 Agent 独立完成设计后，已组织实现至 H5 并准备 H6 验收材料，见[源码开发记录](versions/v0.8/humanization-development-status.md)。用户已授权集中执行[最小 HM01–HM08](planning/v0.8/humanization-minimal-test-plan.md)；首败、修补、定向复测及真实模型未通过项见[本轮测试记录](versions/v0.8/humanization-test-report.md)，不宣称整体通过。桌宠仅预留接口。
 
 1. [根目录总体架构](../ARCHITECTURE.md)：模块边界、调用方向和安全保证。
 2. [V0.4 交付说明](versions/v0.4/delivery.md)、[接口契约](versions/v0.4/interfaces.md)、[操作指南](versions/v0.4/operations.md)、[测试报告](versions/v0.4/test-report.md)：持久目标/任务、来源用途与恢复边界；V0.3 目录保留记忆契约，V0.2 保留工具契约。
@@ -20,6 +24,8 @@
 10. [V0.6 环境评估](planning/v0.6/environment-assessment.md)、[开发计划](planning/v0.6/development-plan.md)、[验收边界](planning/v0.6/acceptance-boundaries.md)：用户已要求[保存进度并暂停](versions/v0.6/pause-checkpoint-2026-10-19-1457.md)，阶段0仍未通过，尚未接入生产执行；[架构重评](versions/v0.6/execution-environment-architecture-review-2026-10-19.md)是后续路线建议，不是实际迁移批准。[进度](versions/v0.6/development-status.md)、[证据与剩余门槛](versions/v0.6/stage0-evidence.md)、[runtime 调查](versions/v0.6/runtime-investigation.md)、[权限静态审查](versions/v0.6/runtime-security-review.md)与[工具迁移表](versions/v0.6/tool-migration.md)记录实际范围。
 11. [V0.7 验收边界](planning/v0.7/acceptance-boundaries.md)、[开发计划](planning/v0.7/development-plan.md)、[环境评估](planning/v0.7/environment-assessment.md)：可选静态PNG桌宠、透明/拖动/点击、中性状态、DPI/多屏、加载/窗口生命周期与资源验收；人格情绪留 V0.8，Live2D 留正式版后更新。
 12. [2026-10-20 研究适配与测试取舍](planning/v0.7/research-and-test-scope-2026-10-20.md)：Coopanion/Cortico报告对V0.7的适用边界、推荐五张静态表情差分、状态防闪烁和精简T01–T08测试矩阵；不是已实现/已测试记录。
+13. [V0.8 开发计划](planning/v0.8/development-plan.md)、[验收边界](planning/v0.8/acceptance-boundaries.md)、[接口](versions/v0.8/interfaces.md)、[开发记录](versions/v0.8/development-status.md)、[最小测试报告](versions/v0.8/test-report.md)：默认关闭的声明式人格、有限情绪、显式偏好、后台管理与静态映射；测试范围与限制独立记录。
+14. [V0.8 拟人化优化提案](planning/v0.8/humanization-proposal.md)：多轮上下文、自然语言情境、稳定表达和可控偏好；[架构](planning/v0.8/humanization-architecture.md)与[实施计划](planning/v0.8/humanization-delivery-plan.md)保留设计依据，[开发记录](versions/v0.8/humanization-development-status.md)记录 H0–H6 材料。按[最小 HM01–HM08](planning/v0.8/humanization-minimal-test-plan.md)集中测试的实际结果见[本轮报告](versions/v0.8/humanization-test-report.md)；真实模型体验仍未验收通过。
 
 ## 分类与命名规则
 
@@ -107,6 +113,7 @@ Markdown 链接相对于当前文档；正文中的 `src/...`、`docs/...` 等�
 
 | 版本 | 计划与接口 | 测试证据 | 交付/环境 |
 | --- | --- | --- | --- |
+| V0.8 最小测试已执行 | [开发计划](planning/v0.8/development-plan.md)、[接口](versions/v0.8/interfaces.md) | [实际报告](versions/v0.8/test-report.md)、[最小计划](versions/v0.8/minimal-test-plan.md)，有明确边界 | [开发记录](versions/v0.8/development-status.md)、[运行说明](versions/v0.8/operations.md) |
 | V0.7 静态桌宠归档 | [开发计划](planning/v0.7/development-plan.md)、[验收边界](planning/v0.7/acceptance-boundaries.md) | [实际报告](versions/v0.7/test-report.md)；T08未整体通过 | [归档](versions/v0.7/delivery.md)、[后续测试](versions/v0.7/deferred-tests.md)、[环境评估](planning/v0.7/environment-assessment.md)；Live2D延至正式版后 |
 | V0.6 阶段0 | [开发计划](planning/v0.6/development-plan.md)、[验收边界](planning/v0.6/acceptance-boundaries.md) | 原型开发中，未通过完整隔离/自动规则验收 | [进度](versions/v0.6/development-status.md)、[工具迁移表](versions/v0.6/tool-migration.md)、[原评估](planning/v0.6/environment-assessment.md) |
 | V0.5 rc1 | [接口](versions/v0.5/interfaces.md)、[操作指南](versions/v0.5/operations.md)、[验收边界](planning/v0.5/acceptance-boundaries.md) | [实际报告](versions/v0.5/test-report.md)、[Windows 实机记录](versions/v0.5/windows-checklist.md)、[稳定性调查](versions/v0.5/stability-investigation.md) | [候选状态](versions/v0.5/delivery.md)、[进度交接](versions/v0.5/development-status.md)、[原评估](planning/v0.5/environment-assessment.md) |

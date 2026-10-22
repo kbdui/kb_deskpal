@@ -183,7 +183,7 @@ def test_projection_failures_and_corrupt_status_are_not_idle(workflow):
         tasks.presentation_snapshot()
 
 
-def test_existing_schema_one_gains_indexes_once_without_changing_tables(workflow):
+def test_existing_schema_two_gains_indexes_once_without_changing_tables(workflow):
     store, tasks = workflow
     tasks.create("synthetic existing history")
     names = {"task_presentation_status", "task_presentation_latest", "submission_presentation_status"}
@@ -195,7 +195,7 @@ def test_existing_schema_one_gains_indexes_once_without_changing_tables(workflow
     reopened = WorkflowStore(store.path)
     try:
         with reopened.transaction() as conn:
-            assert conn.execute("SELECT version FROM schema_version").fetchone()[0] == 1
+            assert conn.execute("SELECT version FROM schema_version").fetchone()[0] == 2
             assert [tuple(row) for row in conn.execute(
                 "SELECT name,sql FROM sqlite_master WHERE type='table' ORDER BY name")] == [tuple(row) for row in tables]
             actual = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='index'")}

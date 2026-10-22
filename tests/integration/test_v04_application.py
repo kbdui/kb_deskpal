@@ -10,7 +10,7 @@ from deskpal.config import LLMConfig, load_config
 from deskpal.planner.models import Plan
 from deskpal.tasks import TaskStatus
 from deskpal.tools.models import ToolCall
-from deskpal.workflow.models import QueueFull
+from deskpal.workflow.models import QueueFull, WorkflowBlocked
 
 
 class StaticPlanner:
@@ -282,7 +282,10 @@ def test_forget_scrubs_cached_result_and_pending_audit_before_retry_delivery(con
         assert result.task_id in receipt.affected_task_ids
         assert app.tasks.get(result.task_id).request == "[forgotten]"
         assert app.tasks.get(result.task_id).result is None
-        assert marker not in repr(app.wait(result.task_id, timeout=1))
+        with pytest.raises(WorkflowBlocked, match="privacy generation"):
+            app.wait(result.task_id, timeout=1)
+        assert marker not in repr(app.review_task(result.task_id))
+        assert result.task_id not in app._dispatcher._results
         assert all(marker not in repr(event.data) for event in app.store.pending_audit())
         log_path = config.storage.data_dir / "execution.jsonl"
         previous = log_path.read_bytes() if log_path.exists() else b""

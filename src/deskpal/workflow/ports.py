@@ -1,6 +1,7 @@
 """Execution-facing persistence boundary; Core never imports a SQLite adapter."""
 
-from typing import Protocol
+from collections.abc import Sequence
+from typing import Any, Protocol
 
 from deskpal.planner.models import Plan
 from deskpal.tasks.models import Task
@@ -26,3 +27,22 @@ class ExecutionJournalPort(Protocol):
     def attempts(self, task_id: str) -> tuple[StepAttempt, ...]: ...
 
     def mark_uncertain(self, task_id: str, error: str) -> Task: ...
+
+
+class HumanizationPort(Protocol):
+    """Execution sees data and safety gates, never concrete SQL adapters."""
+
+    def privacy(self) -> dict[str, Any]: ...
+
+    def turn(self, task_id: str) -> dict[str, Any] | None: ...
+
+    def save_context(self, task_id: str, digest: str, items: Sequence[Any],
+                     refs: Sequence[tuple[str, str, int]], purpose: str) -> None: ...
+
+    def context(self, task_id: str, purpose: str = "planning") -> dict[str, Any] | None: ...
+
+    def check(self, task_id: str, purpose: str = "expression") -> None: ...
+
+    def reserve_call(self, task_id: str, purpose: str, limit: int = 1) -> str: ...
+
+    def finish_call(self, call_id: str, status: str) -> None: ...

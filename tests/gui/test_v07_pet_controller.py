@@ -44,7 +44,9 @@ def deliver(pet, bridge, status, *, sequence=1, revision=1, task="t", epoch=None
     pet.poll()
     receipt = pet._request
     assert receipt is not None
-    request_generation = bridge.calls[-1][3]
+    request = next(call for call in bridge.calls if call[0] == receipt)
+    assert request[1] == "presentation"
+    request_generation = request[3]
     bridge.reply.emit({"request_id": receipt, "operation": "presentation", "ok": True,
                        "generation": request_generation if generation is None else generation,
                        "privacy_epoch": bridge.privacy_epoch if epoch is None else epoch,
@@ -100,7 +102,9 @@ def test_t02_baseline_dedup_restore_freshness_and_priority(qtbot, tmp_path):
         clock[0] += 4
         pet._expire()
         assert pet.status == "Unknown"
-        assert {item[1] for item in bridge.calls} == {"presentation"}
+        # Both v0.8 reads are permitted; submit, confirm and tool execution are not.
+        assert {item[1] for item in bridge.calls} == {"presentation", "companion"}
+        assert all(parameters == {} for _, _, parameters, _ in bridge.calls)
     finally:
         dispose(qtbot, pet)
 

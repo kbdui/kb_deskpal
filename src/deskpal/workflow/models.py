@@ -37,6 +37,9 @@ class PlanSnapshot:
     workspace_dir: str
     memory_refs: tuple[tuple[str, int], ...] = ()
     revision: int = 1
+    policy_version: str = "1"
+    context_digest: str = ""
+    context_refs: tuple[tuple[str, str, int], ...] = ()
 
 
 @dataclass(frozen=True)

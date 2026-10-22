@@ -15,6 +15,7 @@ from deskpal.presentation.state import expression_for_status, status_label
 from .pet_assets import AssetResult, MAX_CACHE_BYTES, PREPARED_EDGE, PetAssetLoader, expression_id
 from .pet_window import PetWindow
 from .preferences import GuiPreferences
+from .companion_state import CompanionSnapshot
 
 FRESH_SECONDS = 3.0
 
@@ -41,6 +42,12 @@ class PetController(QObject):
         self._baseline = True
         self._snapshot: PresentationSnapshot | None = None
         self._received_at = 0.0
+        self._companion_request: str | None = None
+        self._companion_request_at = 0.0
+        self._companion_polled = False
+        self._companion: CompanionSnapshot | None = None
+        self._companion_authority: CompanionSnapshot | None = None
+        self._companion_received_at = 0.0
         self._seen: deque[tuple[str, int, str | None, int]] = deque(maxlen=128)
         self._cache: dict[str, QPixmap] = {}
         self.cache_bytes = 0
@@ -50,6 +57,7 @@ class PetController(QObject):
         self.status = "Unknown"
         self._expression_at = 0.0
         self._desired = "neutral"
+        self._desired_completion = False
         self._decoration_token: tuple[int, int, int, str | None, int] | None = None
         self._stopping = False
         self._render_broken = False
@@ -89,6 +97,7 @@ class PetController(QObject):
         self._generation += 1
         self._baseline = True
         self._snapshot = None
+        self._clear_companion()
         self.window = PetWindow()
         self.diagnostics = ()
         self._render_broken = False
@@ -114,6 +123,7 @@ class PetController(QObject):
         self._generation += 1
         self._baseline = True
         self._snapshot = None
+        self._clear_companion()
         self._cancel_decorations()
         self._set_unknown()
         if self.preferences.pet_visible:
@@ -146,6 +156,8 @@ class PetController(QObject):
         self._cache.clear()
         self.cache_bytes = 0
         self._snapshot = None
+        self._clear_companion()
+        self._companion_authority = None
         self._baseline = True
         self.lifecycle = "Stopping" if not self.settled else "Disabled"
 
@@ -248,22 +260,30 @@ class PetController(QObject):
         self._generation += 1
         # Bridge drops these receipts itself after an epoch change.
         self._request = None
+        self._companion_request = None
+        self._clear_companion()
+        self._companion_authority = None
         self._snapshot = None
         self._baseline = True
         self._set_unknown()
 
     def poll(self) -> None:
         if (self.window is None or not self.preferences.pet_visible or self._stopping
-                or self.bridge.state != "Ready" or self._request is not None):
+                or self.bridge.state != "Ready"):
             return
-        try:
-            self._request_at = self._clock()
-            self._request = self.bridge.send("presentation", {}, generation=self._generation)
-        except BufferError:
-            # The regular one-second timer is the only capacity retry.
-            self._set_unknown()
+        if self._request is None:
+            try:
+                self._request_at = self._clock()
+                self._request = self.bridge.send("presentation", {}, generation=self._generation)
+            except BufferError:
+                # The regular one-second timer is the only capacity retry.
+                self._set_unknown()
+        self._poll_companion()
 
     def _reply(self, envelope: Any) -> None:
+        if isinstance(envelope, dict) and envelope.get("request_id") == self._companion_request:
+            self._companion_reply(envelope)
+            return
         if not isinstance(envelope, dict) or envelope.get("request_id") != self._request:
             return
         self._request = None
@@ -299,42 +319,136 @@ class PetController(QObject):
                 # events. Its same-sequence snapshot establishes a new baseline;
                 # no old decoration survives the database privacy boundary.
                 self._cancel_decorations()
+                self._clear_companion()
+                self._companion_authority = None
                 self._baseline = True
                 self._set_expression("neutral")
         baseline, self._baseline = self._baseline, False
         self._snapshot = snapshot
         self._received_at = self._clock()
-        self.stale_timer.start(int(FRESH_SECONDS * 1000))
+        self._arm_stale()
         self.status = snapshot.status
+        if snapshot.status not in {"Idle", "Completed"}:
+            self._clear_companion()
         target = expression_for_status(snapshot.status)
+        if snapshot.status == "Idle":
+            target = self._companion_expression()
         terminal = (snapshot.session_id, snapshot.memory_epoch, snapshot.task_id, snapshot.revision)
         if snapshot.status == "Completed":
             if baseline or terminal in self._seen:
                 target = "neutral"
             if terminal not in self._seen:
                 self._seen.append(terminal)
-        if snapshot.status in {"Waiting", "Failed", "Unknown"}:
+        if snapshot.status in {"Waiting", "Failed", "Unknown", "NeedsReview", "Uncertain"}:
             self._cancel_decorations()
             self._set_expression(target)
         elif snapshot.status == "Completed" and target == "neutral":
             # Preserve an already active single feedback interval without extending it.
-            if self.expression != "pleased" or not self.success_timer.isActive():
-                self._schedule("neutral")
+            if self._resting():
+                self._schedule(self._companion_expression())
         else:
-            self._schedule(target)
+            self._schedule(target, completion=snapshot.status == "Completed" and target == "pleased")
         self._render()  # Text is authoritative immediately, independent of image scheduling.
+        self._poll_companion()
+
+    def _poll_companion(self) -> None:
+        """Reuse the existing one-second timer; a slow decoration read cannot block status."""
+        if (self.window is None or not self.preferences.pet_visible or self._stopping
+                or self.bridge.state != "Ready" or self.status not in {"Idle", "Completed"}):
+            return
+        if self._companion is not None and self._clock() - self._companion_received_at >= FRESH_SECONDS:
+            self._clear_companion(restore=True)
+        if self._companion_request is not None:
+            return
+        if self._companion_polled and self._clock() - self._companion_request_at < 1.0:
+            return
+        try:
+            self._companion_request_at = self._clock()
+            self._companion_polled = True
+            self._companion_request = self.bridge.send("companion", {}, generation=self._generation)
+        except BufferError:
+            self._clear_companion(restore=True)
+
+    def _companion_reply(self, envelope: dict[str, Any]) -> None:
+        self._companion_request = None
+        if (self.window is None or not self.preferences.pet_visible or self._stopping
+                or self.bridge.state != "Ready" or envelope.get("generation") != self._generation
+                or envelope.get("privacy_epoch") != self.bridge.privacy_epoch):
+            return
+        if not envelope.get("ok") or self._clock() - self._companion_request_at > FRESH_SECONDS:
+            self._clear_companion(restore=True)
+            return
+        try:
+            snapshot = CompanionSnapshot.from_payload(envelope.get("data"))
+            authority = self._snapshot
+            if (authority is None or snapshot.session_id != authority.session_id
+                    or snapshot.memory_epoch != authority.memory_epoch):
+                raise ValueError("Companion is outside the presentation privacy boundary")
+            previous = self._companion_authority
+            if previous is not None and not snapshot.follows(previous):
+                raise ValueError("Companion state moved backwards")
+        except (KeyError, TypeError, ValueError):
+            self._clear_companion(restore=True)
+            return
+        self._companion_authority = snapshot
+        # A late response can never decorate an intervening authoritative state.
+        if self.status not in {"Idle", "Completed"} or self._clock() - self._received_at >= FRESH_SECONDS:
+            self._clear_companion()
+            return
+        self._companion = snapshot
+        self._companion_received_at = self._clock()
+        if self._resting():
+            target = self._companion_expression()
+            if target == "neutral":
+                self._clear_companion(restore=True)
+            else:
+                self._schedule(target)
+        self._arm_stale()
+
+    def _resting(self) -> bool:
+        return self.status == "Idle" or (
+            self.status == "Completed" and not self.success_timer.isActive()
+            and not (self.decoration_timer.isActive() and self._desired_completion))
+
+    def _companion_expression(self) -> str:
+        value, authority = self._companion, self._snapshot
+        if (value is None or authority is None or not self._resting()
+                or self._clock() - self._companion_received_at >= FRESH_SECONDS
+                or self._clock() - self._received_at >= FRESH_SECONDS
+                or not value.enabled or not value.emotions_enabled or value.has_warnings
+                or value.session_id != authority.session_id
+                or value.memory_epoch != authority.memory_epoch):
+            return "neutral"
+        # Missing optional images keep the original neutral fallback.
+        return value.expression if value.expression in self._cache else "neutral"
+
+    def _clear_companion(self, *, restore: bool = False) -> None:
+        self._companion = None
+        self._companion_received_at = 0.0
+        if restore and self._resting():
+            self._cancel_decorations()
+            self._set_expression("neutral")
+
+    def _arm_stale(self) -> None:
+        deadlines = [self._received_at + FRESH_SECONDS]
+        if self._companion is not None:
+            deadlines.append(self._companion_received_at + FRESH_SECONDS)
+        self.stale_timer.start(max(1, ceil((min(deadlines) - self._clock()) * 1000)))
 
     def _expire(self) -> None:
+        if self._companion is not None and self._clock() - self._companion_received_at >= FRESH_SECONDS:
+            self._clear_companion(restore=True)
         remaining = FRESH_SECONDS - (self._clock() - self._received_at)
         if remaining <= 0:
             self._set_unknown()
         else:
             # Coarse Qt timers can fire early. Never lose the freshness deadline.
-            self.stale_timer.start(max(1, ceil(remaining * 1000)))
+            self._arm_stale()
 
     def _set_unknown(self) -> None:
         self.stale_timer.stop()
         self._baseline = True
+        self._clear_companion()
         self._cancel_decorations()
         self.status = "Unknown"
         self._set_expression("neutral")
@@ -343,6 +457,7 @@ class PetController(QObject):
         self.decoration_timer.stop()
         self.success_timer.stop()
         self._decoration_token = None
+        self._desired_completion = False
 
     def _token(self) -> tuple[int, int, int, str | None, int]:
         snapshot = self._snapshot
@@ -350,11 +465,18 @@ class PetController(QObject):
                 snapshot.memory_epoch if snapshot else 0,
                 snapshot.task_id if snapshot else None, snapshot.revision if snapshot else 0)
 
-    def _schedule(self, target: str) -> None:
+    def _schedule(self, target: str, *, completion: bool = False) -> None:
         target = expression_id(target)
         self._desired = target
+        self._desired_completion = completion
         self.decoration_timer.stop()
         if target == self.expression:
+            # An idle simulated smile cannot consume a new authoritative
+            # completion's one finite feedback interval.
+            if (completion and target == "pleased"
+                    and (not self.success_timer.isActive() or self._decoration_token != self._token())):
+                self._decoration_token = self._token()
+                self.success_timer.start(1500)
             return
         self.success_timer.stop()
         # Activity must immediately supersede success. Thinking alone has a short
@@ -373,12 +495,13 @@ class PetController(QObject):
                 or not self.preferences.pet_visible or self.status == "Unknown"):
             return
         self._set_expression(self._desired)
-        if self._desired == "pleased":
+        if self._desired_completion and self._desired == "pleased" and self.status == "Completed":
             self.success_timer.start(1500)
 
     def _success_done(self) -> None:
         if self.expression == "pleased" and self._decoration_token == self._token():
-            self._set_expression("neutral")
+            self._desired_completion = False
+            self._set_expression(self._companion_expression())
 
     def _set_expression(self, value: str) -> None:
         value = expression_id(value)

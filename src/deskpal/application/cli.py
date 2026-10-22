@@ -10,6 +10,7 @@ from dataclasses import is_dataclass
 from datetime import datetime
 from enum import Enum
 from typing import Any
+from uuid import uuid4
 
 from deskpal.agent.models import AgentResult
 from deskpal.config import ConfigError, load_config
@@ -80,6 +81,57 @@ def _show_memory(value: Any) -> None:
         value, default=_memory_default, ensure_ascii=False, allow_nan=False, indent=2))
 
 
+def _companion_parameters(raw: str | None, action: str) -> dict[str, Any]:
+    """Reject ambiguous JSON before opening local state; domain validates values."""
+    if raw is not None and len(raw.encode("utf-8")) > 16384:
+        raise ValueError("Companion parameters exceed 16 KiB")
+
+    def unique_pairs(items: list[tuple[str, Any]]) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for key, value in items:
+            if key in result:
+                raise ValueError("Duplicate JSON key")
+            result[key] = value
+        return result
+
+    value = snapshot_json(json.loads("{}" if raw is None else raw, object_pairs_hook=unique_pairs))
+    if not isinstance(value, dict):
+        raise ValueError("Companion parameters must be an object")
+    allowed = {
+        "show": set(),
+        "configure": {"expected_revision", "enabled", "emotions_enabled", "preset", "style"},
+        "reset": {"expected_revision", "target"},
+        "rollback": {"expected_revision", "persona_version"},
+        "preference": {"expected_revision", "scope", "verbosity", "humor_allowed"},
+        "cue": {"expected_revision", "mode", "ttl_seconds"},
+    }
+    if set(value) - allowed[action]:
+        raise ValueError("Unsupported companion parameter")
+    if action != "show":
+        revision = value.get("expected_revision")
+        if type(revision) is not int or not 0 <= revision < 2**63:
+            raise ValueError("Expected companion revision must be a non-negative SQLite integer")
+    return dict(value)
+
+
+def _interaction_parameters(raw: str | None) -> dict[str, Any]:
+    if raw is not None and len(raw.encode("utf-8")) > 16384:
+        raise ValueError("Interaction parameters exceed budget")
+
+    def unique_pairs(items: list[tuple[str, Any]]) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for key, value in items:
+            if key in result:
+                raise ValueError("Duplicate JSON key")
+            result[key] = value
+        return result
+
+    value = snapshot_json(json.loads(raw or "{}", object_pairs_hook=unique_pairs))
+    if not isinstance(value, dict):
+        raise ValueError("Expected a bounded JSON object")
+    return dict(value)
+
+
 def _proposal_notice(agent: ApplicationService, shown: deque[str]) -> None:
     """Display only at an input boundary, with a bounded session history."""
     for item in agent.proposal_summary():
@@ -107,6 +159,22 @@ def main(argv: Sequence[str] | None = None) -> int:
     workflow_cli.add_arguments(parser)
     request_mode.add_argument("--memory", choices=("remember", "list", "profile", "accept", "reject", "correct", "forget", "export", "rebuild-index"),
                               help="Explicit local memory management; never invokes the planner")
+    request_mode.add_argument("--companion", choices=("show", "configure", "reset", "rollback", "preference", "cue"),
+                              help="Local persona and expression management; never invokes the planner")
+    request_mode.add_argument("--conversation", choices=("interactive",),
+                              help="Explicit process-local dialogue; never restores a previous CLI history")
+    parser.add_argument("--conversation-cloud", action="store_true",
+                        help="Allow current requests in this interactive conversation to use the cloud")
+    request_mode.add_argument("--interaction", choices=("show", "cloud_permissions", "identity", "preference",
+                              "confirm_candidate", "reject_candidate", "clear_cue", "clear_constraints"),
+                              help="Local interaction settings/candidate management, with zero model calls")
+    parser.add_argument("--interaction-parameters", metavar="JSON",
+                        help="Bounded unique-key JSON, including expected_revision for interaction writes")
+    request_mode.add_argument("--privacy", choices=("status", "forget", "retry"),
+                              help="Local privacy blocking and Pending cleanup management, with zero model calls")
+    parser.add_argument("--privacy-command-id", help="Stable command identifier for --privacy forget")
+    parser.add_argument("--companion-parameters", metavar="JSON",
+                        help="Unique-key JSON object for --companion, including expected_revision for writes")
     parser.add_argument("--content", help="Content for memory remember/correct")
     parser.add_argument("--memory-id", help="Memory identifier for a revision-bound operation")
     parser.add_argument("--revision", type=int, help="Expected memory revision")
@@ -119,14 +187,41 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--temporal", action="store_true", help="Correction is a time change, retaining the prior valid period")
     args = parser.parse_args(argv)
     workflow_cli.validate(parser, args)
+    if args.conversation_cloud and args.conversation is None:
+        parser.error("--conversation-cloud requires --conversation interactive")
+    if args.interaction_parameters is not None and args.interaction is None:
+        parser.error("--interaction-parameters requires --interaction")
+    if args.privacy_command_id is not None and args.privacy != "forget":
+        parser.error("--privacy-command-id requires --privacy forget")
+    if args.privacy == "forget" and (not args.memory_id or args.revision is None or args.revision < 1):
+        parser.error("--privacy forget requires --memory-id and a positive --revision")
+    interaction_parameters: dict[str, Any] = {}
+    if args.interaction is not None:
+        try:
+            interaction_parameters = _interaction_parameters(args.interaction_parameters)
+        except (ValueError, TypeError, RecursionError):
+            parser.error("--interaction-parameters must be a bounded, finite, unique-key JSON object")
+        if args.interaction == "show" and interaction_parameters:
+            parser.error("--interaction show accepts no parameters")
+        if args.interaction != "show" and type(interaction_parameters.get("expected_revision")) is not int:
+            parser.error("Interaction writes require expected_revision in --interaction-parameters")
     if (args.authorize or args.authorize_high_risk) and args.request is None and args.tool is None and args.workflow not in {"submit", "confirm"}:
         parser.error("Authorization flags require a single --request or --tool")
     if args.arguments is not None and args.tool is None:
         parser.error("--arguments requires --tool")
+    if args.companion_parameters is not None and args.companion is None:
+        parser.error("--companion-parameters requires --companion")
+    companion_parameters: dict[str, Any] = {}
+    if args.companion is not None:
+        try:
+            companion_parameters = _companion_parameters(args.companion_parameters, args.companion)
+        except (ValueError, TypeError, RecursionError):
+            parser.error("--companion-parameters must be a finite, bounded JSON object with unique keys, "
+                         "supported fields and an expected_revision for writes")
     memory_options = (args.content is not None or args.memory_id is not None or args.revision is not None
                       or args.local_only or args.profile_key or args.profile_value or args.history
                       or args.status is not None or args.temporal or args.scope != "global")
-    if memory_options and args.memory is None:
+    if memory_options and args.memory is None and args.privacy != "forget":
         parser.error("Memory options require --memory")
     if args.memory in {"remember", "correct"} and not args.content:
         parser.error("Memory remember/correct requires --content")
@@ -152,9 +247,33 @@ def main(argv: Sequence[str] | None = None) -> int:
         except (ValueError, TypeError, RecursionError):
             parser.error("--arguments must be a finite JSON object with unique keys")
     try:
-        local_management = args.memory is not None or (args.workflow is not None and args.workflow not in workflow_cli.EXECUTION_ACTIONS)
+        local_management = (args.memory is not None or args.companion is not None
+                            or args.interaction is not None or args.privacy is not None
+                            or (args.conversation is not None and not args.conversation_cloud)
+                            or (args.workflow is not None and args.workflow not in workflow_cli.EXECUTION_ACTIONS))
         settings = load_config(args.config, provider_override="offline" if local_management else None)
         with create_application(settings, planner=direct_planner) as agent:
+            if args.interaction is not None:
+                if args.interaction == "show":
+                    _show_memory(agent.interaction_snapshot())
+                else:
+                    interaction_parameters.setdefault("command_id", str(uuid4()))
+                    _show_memory(agent.interaction_command(args.interaction, **interaction_parameters))
+                return 0
+            if args.privacy is not None:
+                if args.privacy == "status":
+                    _show_memory(agent.cleanup_status())
+                elif args.privacy == "retry":
+                    _show_memory({"complete": agent.retry_cleanup(), "cleanup": agent.cleanup_status()})
+                else:
+                    _show_memory(agent.request_forget(args.memory_id, args.revision,
+                        args.privacy_command_id or str(uuid4())))
+                return 0
+            if args.companion is not None:
+                value = (agent.companion_snapshot() if args.companion == "show" else
+                         agent.companion_command(args.companion, **companion_parameters))
+                _show_memory(value)
+                return 0
             if args.workflow is not None:
                 result_value = workflow_cli.execute(agent, args)
                 _show_memory(result_value)
@@ -195,6 +314,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             else:
                 print("Deskpal interactive mode. Enter /quit to exit.", file=sys.stderr)
             code = 0
+            conversation = agent.conversation_open() if args.conversation else None
+            if conversation is not None:
+                print("会话仅保留本次进程的有界历史。/conversation new|show|close|single 管理上下文；"
+                      "/interaction ACTION JSON 与 /privacy status|retry|forget ID REV COMMAND_ID 为本地管理。", file=sys.stderr)
             pending: dict[str, AgentResult] = {}
             shown_proposals: deque[str] = deque(maxlen=1000)
             while True:
@@ -207,6 +330,55 @@ def main(argv: Sequence[str] | None = None) -> int:
                 if request.strip() in {"/quit", "/exit"}:
                     return code
                 if not request.strip():
+                    continue
+                if request.startswith("/conversation "):
+                    action = request.partition(" ")[2].strip()
+                    try:
+                        if action in {"close", "single", "new"} and conversation is not None:
+                            agent.conversation_close(conversation["conversation_id"], conversation["epoch"])
+                            conversation = None
+                        if action == "new":
+                            conversation = agent.conversation_open()
+                            _show_memory(conversation)
+                        elif action == "show" and conversation is not None:
+                            _show_memory(agent.conversation_snapshot(conversation["conversation_id"]))
+                        elif action in {"close", "single"}:
+                            _show_memory({"closed": True, "persistent_tasks_retained": True})
+                        else:
+                            raise ValueError("Invalid conversation operation")
+                    except (ValueError, RuntimeError, KeyError):
+                        print("Conversation operation rejected; no history restored.", file=sys.stderr)
+                        code = 1
+                    continue
+                if request.startswith("/interaction "):
+                    try:
+                        parts = request.split(maxsplit=2)
+                        action = parts[1]
+                        parameters_i = _interaction_parameters(parts[2] if len(parts) > 2 else None)
+                        if action == "show" and not parameters_i:
+                            _show_memory(agent.interaction_snapshot())
+                        else:
+                            parameters_i.setdefault("command_id", str(uuid4()))
+                            _show_memory(agent.interaction_command(action, **parameters_i))
+                    except (ValueError, TypeError, RuntimeError, KeyError):
+                        print("Interaction command rejected; reload its current revision.", file=sys.stderr)
+                        code = 1
+                    continue
+                if request.startswith("/privacy "):
+                    try:
+                        parts = request.split()
+                        if parts == ["/privacy", "status"]:
+                            _show_memory(agent.cleanup_status())
+                        elif parts == ["/privacy", "retry"]:
+                            _show_memory({"complete": agent.retry_cleanup()})
+                        elif len(parts) == 5 and parts[1] == "forget":
+                            _show_memory(agent.request_forget(parts[2], int(parts[3]), parts[4]))
+                            conversation = None
+                        else:
+                            raise ValueError("Invalid privacy command")
+                    except (ValueError, TypeError, RuntimeError, KeyError):
+                        print("Privacy command rejected; inspect cleanup status before retrying.", file=sys.stderr)
+                        code = 1
                     continue
                 if request.startswith(("/memory ", "/remember ", "/forget ", "/correct ", "/accept ", "/reject ")):
                     try:
@@ -270,7 +442,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                         code = 1
                         continue
                 else:
-                    result = agent.run(request)
+                    if conversation is None:
+                        result = agent.run(request)
+                    else:
+                        task = agent.submit(request, conversation_id=conversation["conversation_id"],
+                            expected_conversation_epoch=conversation["epoch"],
+                            use_policy="cloud_allowed" if args.conversation_cloud else "local_only")
+                        result = agent.wait(task.id)
                 if result.status == TaskStatus.WAITING:
                     pending[result.task_id] = result
                 else:

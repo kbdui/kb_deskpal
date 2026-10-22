@@ -3,6 +3,7 @@
 from threading import Event, current_thread
 
 from PySide6.QtCore import QTimer
+import pytest
 
 from deskpal.gui.bridge import ApplicationBridge, MAX_PENDING
 
@@ -106,7 +107,8 @@ def test_command_wait_does_not_block_cancel_or_qt_timer(qtbot):
     assert app.closed
 
 
-def test_privacy_barrier_drops_old_query_and_copies_parameters(qtbot):
+@pytest.mark.parametrize("forget_operation", ["memory", "request_forget"])
+def test_privacy_barrier_drops_old_query_and_copies_parameters(qtbot, forget_operation):
     _, facade, bridge, results = running(qtbot)
     facade.block = "task"
     values = {"nested": {"value": "original"}}
@@ -114,8 +116,11 @@ def test_privacy_barrier_drops_old_query_and_copies_parameters(qtbot):
         old = bridge.send("task", values)
         qtbot.waitUntil(facade.entered.is_set)
         values["nested"]["value"] = "mutated"
-        bridge.send("memory", {"action": "forget", "memory_id": "synthetic", "expected_revision": 1})
-        qtbot.waitUntil(lambda: any(r["operation"] == "memory" for r in results))
+        parameters = {"memory_id": "synthetic", "expected_revision": 1}
+        if forget_operation == "memory":
+            parameters["action"] = "forget"
+        bridge.send(forget_operation, parameters)
+        qtbot.waitUntil(lambda: any(r["operation"] == forget_operation for r in results))
         assert bridge.privacy_epoch == 1
         facade.release.set()
         qtbot.waitUntil(lambda: bridge.pending_count == 0)

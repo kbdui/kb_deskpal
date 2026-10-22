@@ -8,6 +8,8 @@ if TYPE_CHECKING:
     from .service import ApplicationService
 
 from deskpal.agent.core import AgentCore
+from deskpal.agent.ports import CompanionPort
+from deskpal.companion import CompanionRuntime
 from deskpal.config import AppConfig, ConfigError, load_config
 from deskpal.execution_log import ExecutionLog, JsonlExecutionLog
 from deskpal.llm.ports import LLMProvider
@@ -51,7 +53,9 @@ def _create_core(config: AppConfig | None = None, *, planner: Planner | None = N
                  memory_evaluator: MemoryEvaluator | None = None,
                  tasks: TaskManager | None = None, journal: ExecutionJournalPort | None = None,
                  log: ExecutionLog | None = None, execution_guard: Callable[[str], None] | None = None,
-                 scheduling_ready: Callable[[SchedulingService], None] | None = None) -> AgentCore:
+                 scheduling_ready: Callable[[SchedulingService], None] | None = None,
+                 companion_runtime: CompanionPort | None = None,
+                 companion_unavailable: bool = False) -> AgentCore:
     settings = load_config() if config is None else config
     if not isinstance(settings, AppConfig):
         raise ConfigError("config must be an AppConfig")
@@ -69,6 +73,14 @@ def _create_core(config: AppConfig | None = None, *, planner: Planner | None = N
     sandbox.workspace_dir.mkdir(parents=True, exist_ok=True)
     execution_log = log if log is not None else JsonlExecutionLog(settings.storage.data_dir / "execution.jsonl")
     with ExitStack() as resources:
+        companion = companion_runtime
+        if companion is None and not companion_unavailable:
+            try:
+                # Low-level factory uses isolated, process-local expression state.
+                companion = CompanionRuntime(timezone=settings.proactive.timezone)
+                resources.callback(companion.close)
+            except Exception:
+                companion_unavailable = True
         repository = SQLiteMemoryRepository(settings.storage.data_dir / "memory.sqlite3")
         resources.callback(repository.close)
         startup_warnings: tuple[str, ...] = ()
@@ -116,7 +128,10 @@ def _create_core(config: AppConfig | None = None, *, planner: Planner | None = N
                          tools=tools, workspace_dir=sandbox.workspace_dir,
                          max_tool_steps=settings.agent.max_tool_steps, execution_log=execution_log,
                          on_close=lambda: owned.close(), memory_runtime=memory,
-                         journal=journal, execution_guard=execution_guard)
+                         journal=journal, execution_guard=execution_guard,
+                         companion_runtime=companion,
+                         companion_cloud=settings.llm.provider != "offline",
+                         companion_unavailable=companion_unavailable)
         # Transfer ownership only after every constructor/start has succeeded.
         owned = resources.pop_all()
         return agent
@@ -140,6 +155,14 @@ def create_application(config: AppConfig | None = None, *, planner: Planner | No
     with ExitStack() as resources:
         instance = InstanceLock(settings.storage.data_dir).acquire()
         resources.callback(instance.release)
+        companion: CompanionPort | None = None
+        companion_unavailable = False
+        try:
+            companion = CompanionRuntime(instance.data_dir / "companion.sqlite3", timezone=settings.proactive.timezone)
+            resources.callback(companion.close)
+        except Exception:
+            # Never overwrite a damaged store or prevent ordinary tool work.
+            companion_unavailable = True
         limits = settings.workflow
         store = WorkflowStore(instance.data_dir / "workflow.sqlite3", queue_capacity=limits.queue_capacity,
                               request_max_bytes=limits.request_max_bytes, plan_max_bytes=limits.plan_max_bytes,
@@ -153,7 +176,8 @@ def create_application(config: AppConfig | None = None, *, planner: Planner | No
                             embedding=embedding, memory_evaluator=memory_evaluator,
                             tasks=tasks, journal=journal, log=WorkflowExecutionLog(store),
                             execution_guard=lambda task_id: application[0].execution_guard(task_id),
-                            scheduling_ready=scheduling.append)
+                            scheduling_ready=scheduling.append,
+                            companion_runtime=companion, companion_unavailable=companion_unavailable)
         resources.callback(core.close)
         proposals = ProposalManager(store, goals, tasks, scheduling=scheduling[0])
         rules = LocalRuleEngine(store, goals, proposals, scheduling[0], settings.proactive)

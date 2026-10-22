@@ -2,6 +2,7 @@
 
 import copy
 from dataclasses import replace
+import json
 from threading import Event
 from concurrent.futures import ThreadPoolExecutor
 
@@ -161,13 +162,18 @@ def test_tool_plan_runs_in_order_and_reflects_independent_plain_text_request(mak
     assert result.status == TaskStatus.COMPLETED
     assert [tool.output for tool in result.tool_results] == ["first", "second"]
     assert [tool.call_id for tool in result.tool_results] == ["one", "two"]
-    assert result.response == "根据实际结果完成反思"
+    assert result.response == ("工具结果（记录事实）：\n1. echo：成功。first\n"
+                               "2. echo：成功。second\n补充说明：根据实际结果完成反思")
     assert len(llm.calls) == 1
     messages, tools = llm.calls[0]
     assert tools == ()
-    assert any(message.role == "system" and "[REFLECT]" in message.content for message in messages)
-    assert any(message.role == "user" and "first" in message.content and "second" in message.content
-               and "执行两个回显" in message.content for message in messages)
+    assert any(message.role == "system" and message.content.startswith("[EXPRESSION]") for message in messages)
+    data, = [json.loads(message.content) for message in messages if message.role == "user"]
+    assert data["request"] == "执行两个回显"
+    assert data["tool_results"] == [
+        {"success": True, "output": "first", "error": None, "tool_name": "echo", "call_id": "one"},
+        {"success": True, "output": "second", "error": None, "tool_name": "echo", "call_id": "two"},
+    ]
     assert all(message.role != "tool" and not message.tool_calls and message.tool_call_id is None for message in messages)
     assert memory.saved
     assert all(record.task_id == result.task_id for record in memory.saved)

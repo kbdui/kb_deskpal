@@ -2,6 +2,7 @@
 
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
+from hashlib import sha256
 import json
 import os
 from pathlib import Path
@@ -11,7 +12,10 @@ from tempfile import mkstemp
 from typing import Any
 from uuid import uuid4
 
+from deskpal.tasks.models import utc_now
+
 from .models import AuditEvent, DependencyRef, WorkflowBlocked
+from .migrations import SCHEMA_VERSION, migrate_schema_1
 
 
 def canonical(value: Any) -> str:
@@ -64,26 +68,52 @@ class WorkflowStore:
         self._conn.row_factory = sqlite3.Row
         try:
             self._conn.execute("PRAGMA foreign_keys=ON")
+            exists = self._conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='schema_version'").fetchone()
+            if exists:
+                versions = self._conn.execute("SELECT version FROM schema_version").fetchall()
+                if len(versions) != 1 or versions[0][0] not in {1, SCHEMA_VERSION}:
+                    raise ValueError("Unsupported workflow schema version")
+                if versions[0][0] == 1:
+                    self.backup(self.path.with_name(self.path.name + ".schema-1-" + uuid4().hex + ".backup"))
             self._conn.execute("PRAGMA journal_mode=WAL")
             self._conn.execute("PRAGMA synchronous=FULL")
             with self.transaction() as conn:
                 exists = conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='schema_version'").fetchone()
                 if exists:
                     rows = conn.execute("SELECT version FROM schema_version").fetchall()
-                    if len(rows) != 1 or rows[0][0] != 1:
+                    if len(rows) != 1 or rows[0][0] not in {1, SCHEMA_VERSION}:
                         raise ValueError("Unsupported workflow schema version")
+                    if rows[0][0] == 1:
+                        migrate_schema_1(conn)
                 else:
                     tables = conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").fetchall()
                     if tables:
                         raise ValueError("Workflow database has no recognized schema version")
                     for statement in _SCHEMA:
                         conn.execute(statement)
+                    migrate_schema_1(conn)
                 for statement in _PRESENTATION_INDEXES:
                     conn.execute(statement)
+                # A previous process cannot know whether a reserved request was
+                # sent. Its slot remains consumed and recovery never retries it.
+                conn.execute("UPDATE task_call_attempt SET status='unknown' WHERE status='reserved'")
         except BaseException:
             self._conn.close()
             self._closed = True
             raise
+
+    @contextmanager
+    def read_connection(self) -> Iterator[sqlite3.Connection]:
+        """Serialize a single read without acquiring SQLite's writer slot.
+
+        A nested read observes the owning transaction on this same connection.
+        This is a read projection only; sends, Started and publication still
+        verify privacy inside their existing write/publication boundaries.
+        """
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("WorkflowStore is closed")
+            yield self._conn
 
     @contextmanager
     def transaction(self) -> Iterator[sqlite3.Connection]:
@@ -155,7 +185,16 @@ class WorkflowStore:
             return tuple(DependencyRef(*row) for row in rows)
 
     def check_dependencies(self, conn: sqlite3.Connection, task_id: str) -> None:
+        self.check_privacy(conn, task_id)
         rows = conn.execute("SELECT d.*,v.revision AS current_revision,v.active,v.use_policy FROM dependency d LEFT JOIN dependency_version v ON d.kind=v.kind AND d.object_id=v.object_id WHERE d.task_id=?", (task_id,)).fetchall()
+        self._check_dependency_rows(conn, task_id, rows)
+
+    def check_context_dependencies(self, conn: sqlite3.Connection, task_id: str, purpose: str) -> None:
+        self.check_privacy(conn, task_id)
+        rows = conn.execute("SELECT d.*,v.revision AS current_revision,v.active,v.use_policy FROM context_dependency d LEFT JOIN dependency_version v ON d.kind=v.kind AND d.object_id=v.object_id WHERE d.task_id=? AND d.purpose=?", (task_id, purpose)).fetchall()
+        self._check_dependency_rows(conn, task_id, rows)
+
+    def _check_dependency_rows(self, conn: sqlite3.Connection, task_id: str, rows: list[sqlite3.Row]) -> None:
         task = conn.execute("SELECT use_policy,scrubbed FROM task WHERE id=?", (task_id,)).fetchone()
         if task is None:
             raise KeyError(task_id)
@@ -173,11 +212,89 @@ class WorkflowStore:
             if row["use_policy"] == "local_only" and task["use_policy"] == "cloud_allowed":
                 raise WorkflowBlocked("Task use policy exceeds its source policy")
 
+    def check_privacy(self, conn: sqlite3.Connection, task_id: str | None = None) -> None:
+        """Order new use/Started with the same transaction as privacy blocking."""
+        privacy = conn.execute("SELECT epoch,blocked FROM privacy_control WHERE id=1").fetchone()
+        assert privacy is not None
+        if privacy["blocked"]:
+            raise WorkflowBlocked("Privacy cleanup is pending")
+        if task_id is not None:
+            task = conn.execute("SELECT privacy_epoch FROM task WHERE id=?", (task_id,)).fetchone()
+            if task is None:
+                raise KeyError(task_id)
+            if task[0] != privacy["epoch"]:
+                raise WorkflowBlocked("Task privacy generation expired")
+            turn = conn.execute("SELECT privacy_epoch FROM turn_ref WHERE task_id=?", (task_id,)).fetchone()
+            if turn is not None and turn[0] != privacy["epoch"]:
+                raise WorkflowBlocked("Task privacy generation expired")
+
+    def record_terminal_effect(self, conn: sqlite3.Connection, task_id: str, status: str) -> None:
+        """Only durable, known tool outcomes qualify; text-only turns never do."""
+        if status not in {"Completed", "Failed"}:
+            return
+        task = conn.execute("SELECT revision,scrubbed FROM task WHERE id=?", (task_id,)).fetchone()
+        if task is None or task["scrubbed"]:
+            return
+        try:
+            self.check_dependencies(conn, task_id)
+        except WorkflowBlocked:
+            return
+        outcomes = conn.execute("SELECT step_index,status,result FROM attempt WHERE task_id=? ORDER BY step_index", (task_id,)).fetchall()
+        if not outcomes or any(row["step_index"] != index for index, row in enumerate(outcomes)):
+            return
+        plan_row = conn.execute("SELECT canonical_json,hash,scrubbed FROM immutableplan WHERE task_id=?", (task_id,)).fetchone()
+        if plan_row is None or plan_row["scrubbed"]:
+            return
+        # Do not infer a whole-task success from only a prefix of successful
+        # calls, even if a caller writes an otherwise legal terminal status.
+        if sha256(plan_row["canonical_json"].encode("utf-8")).hexdigest() != plan_row["hash"]:
+            return
+        try:
+            plan = json.loads(plan_row["canonical_json"])
+            calls = plan["steps"]
+        except (ValueError, KeyError, TypeError):
+            return
+        if not isinstance(calls, list) or len(outcomes) > len(calls) or status == "Completed" and len(outcomes) != len(calls):
+            return
+        success = failure = 0
+        for outcome in outcomes:
+            if outcome["status"] not in {"Succeeded", "Failed"} or outcome["result"] is None:
+                return
+            try:
+                result = json.loads(outcome["result"])
+            except (ValueError, TypeError):
+                return
+            if not isinstance(result, dict) or type(result.get("success")) is not bool:
+                return
+            if result["success"] != (outcome["status"] == "Succeeded"):
+                return
+            call = calls[outcome["step_index"]]
+            if not isinstance(call, dict) or result.get("tool_name") != call.get("name") or result.get("call_id") != call.get("call_id"):
+                return
+            success += int(result["success"])
+            failure += int(not result["success"])
+        if not outcomes or status == "Completed" and (not success or failure) or status == "Failed" and not failure:
+            return
+        epoch = conn.execute("SELECT epoch FROM privacy_control WHERE id=1").fetchone()[0]
+        if conn.execute("SELECT COUNT(*) FROM companion_effect_outbox").fetchone()[0] >= 4096:
+            self.record_event("companion_effect_skipped", task_id, {"reason": "projection_capacity"})
+            return
+        # The key survives policy upgrades and companion resets.
+        conn.execute("INSERT OR IGNORE INTO companion_effect_outbox(id,task_id,status,success,failure,epoch,terminal_revision,created_at) VALUES(?,?,?,?,?,?,?,?)",
+                     ("task:" + task_id, task_id, status, success, failure, epoch, task["revision"], utc_now().isoformat()))
+
     def add_validator(self, validator: Callable[[str, tuple[DependencyRef, ...]], None]) -> None:
         self._validators.append(validator)
 
     def validate_external(self, task_id: str) -> None:
         refs = self.dependencies(task_id)
+        for validator in tuple(self._validators):
+            validator(task_id, refs)
+
+    def validate_external_context(self, task_id: str, purpose: str) -> None:
+        with self.transaction() as conn:
+            rows = conn.execute("SELECT kind,object_id,revision FROM dependency WHERE task_id=? UNION SELECT kind,object_id,revision FROM context_dependency WHERE task_id=? AND purpose=?", (task_id, task_id, purpose)).fetchall()
+            refs = tuple(DependencyRef(*row) for row in rows)
         for validator in tuple(self._validators):
             validator(task_id, refs)
 

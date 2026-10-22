@@ -13,6 +13,8 @@ from PySide6.QtWidgets import (
 
 from .viewmodels import PendingRequest, RequestTracker, plain_json, tool_permissions
 from .views import CommandForm, PagedView
+from .companion_panel import CompanionPanel
+from .conversation_panel import ConversationPanel
 
 
 class MainWindow(QMainWindow):
@@ -28,6 +30,7 @@ class MainWindow(QMainWindow):
         self.lifecycle = "Initializing"
         self.privacy_barrier = False
         self.forget_state = ""
+        self._cleanup_completed_epoch = -1
         self.task_snapshot: dict[str, Any] = {}
         self.memory_snapshot: dict[str, Any] = {}
         self.proposal_snapshot: dict[str, Any] = {}
@@ -41,6 +44,8 @@ class MainWindow(QMainWindow):
         self._entity_id = ""
         self._chat_task_id = ""
         self._chat_result_revision = 0
+        self._chat_submit_context: dict[str, Any] = {}
+        self._chat_submit_text = ""
         self._geometry_fit_pending = False
         self._screen_signals_connected = False
         self._page_scrolls: list[QScrollArea] = []
@@ -73,6 +78,9 @@ class MainWindow(QMainWindow):
         self._build_management()
         self._build_proposals()
         self._build_settings()
+        self.companion_panel = CompanionPanel(bridge)
+        self._companion_index = self.tabs.count()
+        self._add_page(self.companion_panel, "人格与模拟情绪")
         self.diagnostics = QPlainTextEdit()
         self.diagnostics.setReadOnly(True)
         self.diagnostics.document().setMaximumBlockCount(500)
@@ -106,13 +114,15 @@ class MainWindow(QMainWindow):
     def _build_chat(self) -> None:
         self.chat_page = QWidget()
         layout = QVBoxLayout(self.chat_page)
-        hint = QLabel("◈ Deskpal\n每次输入作为独立请求处理。工具操作需在任务页审核原计划后授权。")
+        hint = QLabel("◈ Deskpal\n可显式新建有界会话。工具操作需在任务页审核原计划后授权。")
         hint.setWordWrap(True)
         layout.addWidget(hint)
-        self.chat_history = QPlainTextEdit()
-        self.chat_history.setReadOnly(True)
-        self.chat_history.document().setMaximumBlockCount(400)
-        layout.addWidget(self.chat_history)
+        self.conversation_panel = ConversationPanel(self.bridge)
+        self.conversation_panel.navigate_task.connect(lambda task_id: self.navigate_to("task", task_id))
+        self.conversation_panel.navigate_memory_candidates.connect(self._show_profile_candidates)
+        self.conversation_panel.conversation_changed.connect(self._conversation_changed)
+        self.chat_history = self.conversation_panel.history
+        layout.addWidget(self.conversation_panel)
         self.chat_input = QPlainTextEdit()
         self.chat_input.setObjectName("chat_input")
         self.chat_input.setPlaceholderText("输入请求（最多 20,000 字符）")
@@ -478,6 +488,8 @@ class MainWindow(QMainWindow):
         if state == "CleanupBlocked":
             self.privacy_barrier = True
             self.forget_state = "pending"
+            self.poll_timer.start()
+            self._send("cleanup_status", route="cleanup_status")
         if state == "Ready":
             self.poll_timer.start()
             self._poll()
@@ -495,10 +507,10 @@ class MainWindow(QMainWindow):
         route = route or operation
         if self.lifecycle == "Closed":
             return None
-        if self.lifecycle != "Ready" and operation not in {"diagnostics", "retry_cleanup"}:
+        if self.lifecycle != "Ready" and operation not in {"diagnostics", "retry_cleanup", "request_forget", "cleanup_status"}:
             self.notice.setText("当前仅允许诊断、清理重试和退出。")
             return None
-        if self.privacy_barrier and operation not in {"diagnostics", "retry_cleanup", "memory"}:
+        if self.privacy_barrier and operation not in {"diagnostics", "retry_cleanup", "memory", "request_forget", "cleanup_status"}:
             self.notice.setText("隐私屏障仍在生效；请按提示处理后主动重新加载。")
             return None
         existing = self.requests.existing(route)
@@ -541,7 +553,7 @@ class MainWindow(QMainWindow):
             return
         if not request.mutation and not self.requests.current(request):
             return
-        if self.lifecycle != "Ready" and request.operation not in {"diagnostics", "retry_cleanup"}:
+        if self.lifecycle != "Ready" and request.operation not in {"diagnostics", "retry_cleanup", "request_forget", "cleanup_status"}:
             return
         if not reply.get("ok"):
             error = reply.get("error", {})
@@ -571,13 +583,26 @@ class MainWindow(QMainWindow):
             self.diagnostics.setPlainText(plain_json(data))
         elif request.operation == "retry_cleanup":
             if data.get("cleanup_complete", data.get("complete")) is True:
+                self._cleanup_completed_epoch = current_epoch
                 self.privacy_barrier = False
                 self.forget_state = ""
                 self.notice.setText("清理已完成；可主动重新加载当前事实。")
             else:
                 self.notice.setText("清理尚未完成，正文继续遮蔽；可查看诊断并再次重试。")
+        elif request.operation == "cleanup_status":
+            self.diagnostics.setPlainText(plain_json(data))
+            if (data.get("complete") is True or data.get("cleanup_pending") is False
+                    or (data.get("status") == "Completed" and data.get("blocked") is not True)):
+                self._cleanup_completed_epoch = current_epoch
+                self.forget_state = "complete"
+                self.notice.setText("清理已完成；请主动重新加载当前事实。")
+            else:
+                self.notice.setText("遗忘已阻断后续使用，物理清理仍在 Pending；等待安全点或重试清理。")
         elif request.route == "mutation:memory":
-            if data.get("status") == "Pending" or data.get("blocked"):
+            if request.operation == "request_forget" and self._cleanup_completed_epoch >= current_epoch:
+                self.forget_state = "complete"
+                self.notice.setText("清理已完成；旧的 Pending 回执已忽略，请主动重新加载当前事实。")
+            elif data.get("status") in {"Pending", "AcceptedPending"} or data.get("blocked") or data.get("cleanup_pending"):
                 self.forget_state = "pending"
                 self.notice.setText("遗忘已提交，清理待完成；正文持续遮蔽，请重试清理。")
             else:
@@ -587,10 +612,15 @@ class MainWindow(QMainWindow):
             return
         elif request.mutation:
             if request.operation == "submit":
+                if self._chat_submit_context != self.conversation_panel.submission_parameters():
+                    self.notice.setText("请求已排队；会话已切换，可到任务页查看该请求。")
+                    return
                 self._chat_task_id = str(data.get("task_id", ""))
+                self.conversation_panel.track_task(self._chat_task_id)
                 self._chat_result_revision = 0
-                self._append_chat("您：" + self.chat_input.toPlainText() + "\n已排队：" + self._chat_task_id)
-                self.chat_input.clear()
+                self._append_chat("您：" + self._chat_submit_text + "\n已排队：" + self._chat_task_id)
+                if self.chat_input.toPlainText().strip() == self._chat_submit_text:
+                    self.chat_input.clear()
             elif request.operation == "cancel":
                 self.notice.setText("取消请求已记录；正在执行的同步工具可能仍需等待返回。")
             elif request.operation == "accept_proposal":
@@ -627,6 +657,8 @@ class MainWindow(QMainWindow):
 
     def _update_enabled(self) -> None:
         ready = self.lifecycle == "Ready" and not self.privacy_barrier
+        self.companion_panel.set_available(ready)
+        self.conversation_panel.set_available(ready)
         for index in range(self.tabs.count() - 1):
             self.tabs.setTabEnabled(index, ready)
         # A rejected/unsubmitted memory command permits only an explicit reload.
@@ -701,11 +733,28 @@ class MainWindow(QMainWindow):
         self.memories.offset = 0
         self.reload_page("memories", explicit=True)
 
+    def _show_profile_candidates(self) -> None:
+        """Navigate to the existing Memory review surface with a fresh candidate page."""
+        if self.lifecycle != "Ready" or self.privacy_barrier:
+            return
+        blocked = self.memory_filter.blockSignals(True)
+        self.memory_filter.setCurrentText("candidate")
+        self.memory_filter.blockSignals(blocked)
+        self.memories.offset = 0
+        self.memories.clear_sensitive()
+        tab_blocked = self.tabs.blockSignals(True)
+        self.tabs.setCurrentIndex(2)
+        self.tabs.blockSignals(tab_blocked)
+        self.reload_page("memories", explicit=True)
+
     def _proposal_filter_changed(self, _: str) -> None:
         self.proposals.offset = 0
         self.reload_page("proposals", explicit=True)
 
     def _poll(self) -> None:
+        if self.lifecycle == "CleanupBlocked":
+            self._send("cleanup_status", route="cleanup_status")
+            return
         if self.lifecycle != "Ready" or self.privacy_barrier:
             return
         name = self._active_page()
@@ -716,8 +765,17 @@ class MainWindow(QMainWindow):
                 self._send("task", {"task_id": task_id}, route="tasks:detail")
         elif self.tabs.currentIndex() == 5:
             self._send("settings", route="settings")
-        elif self.tabs.currentIndex() == 0 and self._chat_task_id:
-            self._send("task", {"task_id": self._chat_task_id}, route="chat:detail")
+        elif self.tabs.currentIndex() == self._companion_index:
+            self.companion_panel.poll()
+        elif self.tabs.currentIndex() == 0:
+            self.conversation_panel.poll()
+            if self._chat_task_id:
+                self._send("task", {"task_id": self._chat_task_id}, route="chat:detail")
+
+    def _conversation_changed(self) -> None:
+        self.requests.invalidate("chat:detail")
+        self._chat_task_id = ""
+        self._chat_result_revision = 0
 
     def _append_chat(self, text: str) -> None:
         combined = self.chat_history.toPlainText() + "\n" + text[:64000]
@@ -766,7 +824,10 @@ class MainWindow(QMainWindow):
         if not request or len(request) > 20000:
             self.notice.setText("请输入 1–20,000 字符的请求。")
             return
-        if self._send("submit", {"request": request, "use_policy": self.use_policy.currentText()},
+        self._chat_submit_context = self.conversation_panel.submission_parameters()
+        self._chat_submit_text = request
+        if self._send("submit", {"request": request, "use_policy": self.use_policy.currentText(),
+                                 **self._chat_submit_context},
                       route="mutation:submit", mutation=True):
             self.notice.setText("正在提交；收到入队回执后可在任务页查看。")
 
@@ -883,17 +944,24 @@ class MainWindow(QMainWindow):
         self.forget_state = "awaiting" if parameters["action"] == "forget" else "changing"
         self.clear_sensitive()
         self.notice.setText("正文已遮蔽，等待记忆操作回执。")
-        if not self._send("memory", parameters, route="mutation:memory", mutation=True):
+        operation = "request_forget" if parameters["action"] == "forget" else "memory"
+        if operation == "request_forget":
+            parameters = {key: value for key, value in parameters.items() if key != "action"}
+        if not self._send(operation, parameters, route="mutation:memory", mutation=True):
             self.forget_state = "unsubmitted"
             self.notice.setText("记忆操作未提交；可主动重新加载。")
         self._update_enabled()
 
     def clear_sensitive(self) -> None:
         self.requests.invalidate()
+        self.companion_panel.clear_sensitive()
+        self.conversation_panel.clear_sensitive()
         self.chat_history.clear()
         self.chat_input.clear()
         self._chat_task_id = ""
         self._chat_result_revision = 0
+        self._chat_submit_context = {}
+        self._chat_submit_text = ""
         self.notice.clear()
         for page in self.pages.values():
             page.clear_sensitive()

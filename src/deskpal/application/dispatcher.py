@@ -81,7 +81,8 @@ class SubmissionDispatcher:
 
     def submit(self, request: str, *, command_id: str, authorized_tools: frozenset[str],
                high_risk_authorized_tools: frozenset[str], dependencies: tuple[Any, ...] = (),
-               use_policy: str = "cloud_allowed") -> Task:
+               use_policy: str = "cloud_allowed",
+               register: Callable[[Task], None] | None = None) -> Task:
         with self._condition:
             self._accepting()
             self._prune_operations()
@@ -90,6 +91,8 @@ class SubmissionDispatcher:
                 with self.tasks.store.transaction():
                     task = self.tasks.submit(request, command_id=command_id,
                                              dependencies=dependencies, use_policy=use_policy)
+                    if register is not None:
+                        register(task)
                     # claim_next can commit while Task still says Created. Its
                     # popped grants belong solely to the active execution.
                     if task.status == TaskStatus.CREATED and task.id != self._active_id and task.id not in self._operations:
@@ -247,6 +250,18 @@ class SubmissionDispatcher:
                 self._condition.notify_all()
 
     def _work_until_stopped(self) -> None:
+        # Startup recovery may have retained or just created reliable terminal
+        # effects. Deliver them on this same worker before claiming new work,
+        # without holding the dispatcher control lock during cross-store I/O.
+        with self._condition:
+            if self._stop:
+                return
+        try:
+            self._on_idle()
+        except Exception:
+            # Optional local projection failures cannot authorize tool replay or
+            # turn a recoverable effect queue into an execution-worker failure.
+            pass
         while True:
             with self._condition:
                 if self._stop:

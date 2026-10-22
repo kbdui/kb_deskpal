@@ -214,7 +214,7 @@ class MemoryRetriever:
         """Incrementally encode missing current revision/manifest pairs only."""
         return self._build_index(only_missing=True)
 
-    def _build_index(self, *, only_missing: bool) -> tuple[str, ...]:
+    def _build_index(self, *, only_missing: bool, include_profiles: bool = True) -> tuple[str, ...]:
         if self.embedding is None:
             return ("semantic_disabled: lexical retrieval only",)
         warnings: list[str] = []
@@ -222,6 +222,8 @@ class MemoryRetriever:
             manifest = self.embedding.manifest
             existing = {(memory_id, revision) for memory_id, revision, _ in self.repository.embeddings(manifest)} if only_missing else set()
             items = self.repository.list_items(status=MemoryStatus.ACCEPTED)
+            if not include_profiles:
+                items = tuple(item for item in items if not item.draft.profile_key)
             for offset in range(0, len(items), 8):
                 batch = []
                 for item in items[offset:offset + 8]:
@@ -260,6 +262,19 @@ class MemoryRetriever:
         return tuple(dict.fromkeys(warnings))
 
     def retrieve(self, query: str, *, as_of: datetime | None = None) -> RetrievalBundle:
+        return self._retrieve(query, as_of=as_of, include_profiles=True)
+
+    def retrieve_for_planning(self, query: str) -> RetrievalBundle:
+        """Exclude expression profiles before ranking or consuming any budget.
+
+        Custom retrievers used by production must provide this independent
+        projection; filtering an already ranked result is insufficient because
+        profile records could have displaced ordinary factual evidence.
+        """
+        return self._retrieve(query, as_of=None, include_profiles=False)
+
+    def _retrieve(self, query: str, *, as_of: datetime | None,
+                  include_profiles: bool) -> RetrievalBundle:
         if not isinstance(query, str):
             raise MemoryError("Retrieval query must be text")
         if as_of is not None and (not isinstance(as_of, datetime) or as_of.utcoffset() is None):
@@ -273,6 +288,8 @@ class MemoryRetriever:
         # query-local data, never a cross-query cache: TTL, deletion and changes
         # made by another connection are observed again on every retrieval.
         accepted = self.repository.list_items(status=MemoryStatus.ACCEPTED)
+        if not include_profiles:
+            accepted = tuple(item for item in accepted if not item.draft.profile_key)
         indexed_rows: tuple[tuple[str, int, tuple[float, ...]], ...] = ()
         index_manifest: EmbeddingManifest | None = None
         if self.embedding is not None:
@@ -281,14 +298,19 @@ class MemoryRetriever:
                 indexed_rows = self.repository.embeddings(index_manifest)
                 existing = {(id_, revision) for id_, revision, _ in indexed_rows}
                 if any(_indexable(item, now) and (item.id, item.revision) not in existing for item in accepted):
-                    warnings.extend(self.ensure_index())
+                    warnings.extend(self.ensure_index() if include_profiles else
+                                    self._build_index(only_missing=True, include_profiles=False))
                     accepted = self.repository.list_items(status=MemoryStatus.ACCEPTED)
+                    if not include_profiles:
+                        accepted = tuple(item for item in accepted if not item.draft.profile_key)
                     indexed_rows = self.repository.embeddings(index_manifest)
             except Exception:
                 warnings.append("index_rebuild_failed: lexical retrieval remains available")
         items = {item.id: item for item in accepted
                  if _eligible(item, now, include_local=not self.cloud, as_of=as_of)}
-        profiles = _profile_ids(items) if as_of is None else set()
+        if not include_profiles:
+            indexed_rows = tuple(row for row in indexed_rows if row[0] in items)
+        profiles = _profile_ids(items) if include_profiles and as_of is None else set()
         lexical = [(item.id, _lexical(query, item.draft.content)) for item in items.values()
                    if _compatible(query, item.draft.content)]
         lexical = sorted(((id_, score) for id_, score in lexical if score >= 0.25),

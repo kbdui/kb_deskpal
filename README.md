@@ -2,7 +2,7 @@
 
 Windows 个人智能 Agent 桌宠项目。当前版本 **0.5.0rc1**：在既有持久任务、来源化记忆、目标与本地提议后端上，加入 Qt Widgets 主窗口、后台交互、准确授权、托盘与通知。Python 3.11+。实机验收缺项见 [V0.5 状态](docs/versions/v0.5/delivery.md)，不宣称全部版本门槛已通过。
 
-提供 GUI 与命令行入口；Live2D、人格情绪、后台云规划、完整多轮上下文仍属后续版本。架构见 [ARCHITECTURE.md](ARCHITECTURE.md)，GUI 用法见 [V0.5 操作指南](docs/versions/v0.5/operations.md)和[接口](docs/versions/v0.5/interfaces.md)，CLI 继续参考 [V0.4 操作指南](docs/versions/v0.4/operations.md)。
+提供 GUI 与命令行入口；Live2D、后台云规划和跨启动完整聊天档案仍属后续范围。V0.8 原人格/情绪实现的最小测试见[历史报告](docs/versions/v0.8/test-report.md)。2026-10-22 后续拟人化增量已实现至 H5：有界会话、可控表达、当前情境候选和并发遗忘，H6 材料完成后已按用户授权集中测试，**真实模型体验尚未验收通过**。实现见[开发记录](docs/versions/v0.8/humanization-development-status.md)，首败、修补、定向复测及限制见[本轮测试报告](docs/versions/v0.8/humanization-test-report.md)；历史测试不覆盖新代码。架构见 [ARCHITECTURE.md](ARCHITECTURE.md)，GUI 基础用法见 [V0.5 操作指南](docs/versions/v0.5/operations.md)和[接口](docs/versions/v0.5/interfaces.md)，CLI 继续参考 [V0.4 操作指南](docs/versions/v0.4/operations.md)。
 
 V0.5 [开工前评估](docs/planning/v0.5/environment-assessment.md)与[计划](docs/planning/v0.5/development-plan.md)保留为规划快照；实际证据见 [测试报告](docs/versions/v0.5/test-report.md)。
 
@@ -18,7 +18,7 @@ python -m pip install -r requirements-gui.txt -c constraints/windows-py312-gui.t
 python -m deskpal.gui --config config.toml
 ```
 
-加 --offline 可进行本次离线运行。GUI 默认 local_only，阻止整次云规划；使用 DeepSeek 时需主动选择 cloud_allowed。连续消息目前按独立请求处理。无 GUI 依赖仍可运行后端：
+加 --offline 可进行本次离线运行。GUI 默认 local_only，阻止整次云规划；使用 DeepSeek 时需主动选择 cloud_allowed。任务页按独立请求处理，会话页提供进程内有界多轮上下文。无 GUI 依赖仍可运行后端：
 
 ```powershell
 conda activate deskpal_env
@@ -85,6 +85,25 @@ python -m deskpal --memory forget --memory-id ID --revision REV
 
 遗忘先持久阻断，再删除 Memory 与明确派生工作副本；失败保持 Pending，启动先续办，完成前不展示/派发相关内容。独立 Goal/Calendar 不按相似文字删除；已写历史日志、备份、导出与外部/云端副本有独立保留范围。生产 JSONL 仅元数据，outbox 失败可重投同 event ID，绝不重放工具。
 
+## 本地人格与情绪设置（V0.8 开发中）
+
+人格与模拟情绪默认关闭；使用本地管理命令查看当前 `revision`，写操作必须携带该值。示例中的 `REV` 需替换为最近一次查询或修改回执中的整数。
+
+```powershell
+python -m deskpal --companion show
+python -m deskpal --companion configure --companion-parameters '{"expected_revision":REV,"enabled":true,"emotions_enabled":true,"preset":"warm"}'
+python -m deskpal --companion preference --companion-parameters '{"expected_revision":REV,"scope":"today","verbosity":"brief","humor_allowed":false}'
+python -m deskpal --companion cue --companion-parameters '{"expected_revision":REV,"mode":"focused","ttl_seconds":600}'
+python -m deskpal --companion reset --companion-parameters '{"expected_revision":REV,"target":"affect"}'
+python -m deskpal --companion rollback --companion-parameters '{"expected_revision":REV,"persona_version":1}'
+```
+
+预设为 `balanced/warm/concise`；风格仅接受 `formality/warmth/humor/verbosity/expressiveness/curiosity` 六项 0..1 数值。偏好作用域为 `session/today/persistent`，长度为 `brief/normal/detailed`；`today` 按配置的 `proactive.timezone` 到当地下一午夜结束。cue 为 `neutral/supportive/focused`，最多 1800 秒，会话偏好和 cue 不跨重启保存。所有管理命令强制离线，无需模型 key，不经过规划或执行工具；运行任务期间设置写操作会明确拒绝，可在任务结束后重试。
+
+已有工具结果的 Reflect 追加受限风格指令；当前请求中的明确表达要求优先。通常工具路径仍为一次 Planner + 一次 Reflect。禁用人格时无工具路径沿用 Planner 普通回复，仅一次请求；启用且有有效风格时最多增加一次无工具表达调用，Planner 草稿明确视为未验证的 assistant 输出，表达失败回原回复并附警告。`candidate_review` 的可选记忆评估调用按原设置执行。风险确认、失败、取消和待复核文字保持中性。云表达不接收本地互动偏好、cue 或任务情绪；工具权限、任务事实和状态独立于人格。
+
+生产状态在实例锁后保存到 `companion.sqlite3`，低层 `create_agent` 的人格状态只在内存中。可选人格读取、样式或情绪写入失败时回退中性，不阻断工具、不重复执行；损坏存储不会自动覆盖，管理写入会拒绝。遗忘先重置派生表达状态，重置失败则清理保持 Pending，重试或启动续办成功后才报告完成。任务情绪只接收已提交的 Completed/Failed 及最小结果摘要；不保存请求正文、工具参数或结果内容。
+
 ## 配置与数据
 
 `--config config.toml` 显式选择配置；优先级：进程环境变量 > 配置目录 .env > TOML > 默认值。相对路径以配置文件目录为准，未指定配置时以当前目录为准。.env 按字面解析且不修改全局环境；密钥禁止写 TOML 或 Git。
@@ -99,13 +118,14 @@ src/deskpal/
   workflow/      持久任务/计划/步骤、依赖、outbox、删除工作单
   goals/         Goal/Milestone/SourceBinding
   proactive/     本地提议与可靠事件消费
+  companion/     可选声明式人格、显式互动偏好与有限情绪模拟（V0.8待验收）
   tasks/ memory/ scheduling/ tools/ sandbox/ config/ execution_log/
 tests/
 docs/
 doc/             原始设计资料
 ```
 
-默认 data/ 内含 workflow.sqlite3、memory.sqlite3、scheduling.sqlite3、execution.jsonl；文件工具根为 workspace/。一个规范 data_dir 只允许一个生产实例。关闭超时会保留在用资源/锁，不强杀同步工具；程序退出期间无系统通知。
+默认 data/ 内含 workflow.sqlite3、memory.sqlite3、scheduling.sqlite3、companion.sqlite3、execution.jsonl；文件工具根为 workspace/。一个规范 data_dir 只允许一个生产实例。关闭超时会保留在用资源/锁，不强杀同步工具；程序退出期间无系统通知。
 
 生产集成使用 `create_application`；`create_agent` 保留 V0.3 同步进程内任务契约，用于低层嵌入与兼容测试，不提供 V0.4 持久恢复保证。Git 提交由用户处理。
 
