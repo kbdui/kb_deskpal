@@ -20,6 +20,7 @@ from .conversation_panel import ConversationPanel
 class MainWindow(QMainWindow):
     close_requested = Signal()
     privacy_cleared = Signal()
+    maintenance_requested = Signal()
 
     def __init__(self, bridge: Any, preferences: Any = None,
                  parent: QWidget | None = None) -> None:
@@ -64,6 +65,8 @@ class MainWindow(QMainWindow):
         self.diagnostics_button = QPushButton("诊断")
         self.retry_button = QPushButton("重试清理 / 关闭")
         self.exit_button = QPushButton("退出")
+        self.maintenance_button = QPushButton("配置与数据维护")
+        controls.addWidget(self.maintenance_button)
         controls.addWidget(self.diagnostics_button)
         controls.addWidget(self.retry_button)
         controls.addStretch()
@@ -88,6 +91,7 @@ class MainWindow(QMainWindow):
         self.diagnostics_button.clicked.connect(self.show_diagnostics)
         self.retry_button.clicked.connect(self.retry_cleanup)
         self.exit_button.clicked.connect(self.request_exit)
+        self.maintenance_button.clicked.connect(self.maintenance_requested.emit)
         self.tabs.currentChanged.connect(self._tab_changed)
         bridge.state_changed.connect(self.on_state_changed, Qt.ConnectionType.QueuedConnection)
         bridge.reply.connect(self.on_reply, Qt.ConnectionType.QueuedConnection)
@@ -540,6 +544,14 @@ class MainWindow(QMainWindow):
     def on_reply(self, reply: Any) -> None:
         if not isinstance(reply, dict):
             return
+        if reply.get("request_id") == "startup" and reply.get("operation") == "startup":
+            if self.lifecycle not in {"Closing", "Closed"} and not reply.get("ok"):
+                error = reply.get("error", {})
+                message = str(error.get("message", "启动失败。"))[:2000]
+                steps = error.get("next_steps", [])
+                guidance = "\n".join(str(step)[:500] for step in steps[:8]) if isinstance(steps, list) else ""
+                self.notice.setText(message + "\n" + guidance + "\n可打开“配置与数据维护”修正后重新启动。")
+            return
         request = self.requests.pending.pop(str(reply.get("request_id", "")), None)
         if request is None:
             return
@@ -656,6 +668,7 @@ class MainWindow(QMainWindow):
         self._update_enabled()
 
     def _update_enabled(self) -> None:
+        self.maintenance_button.setEnabled(self.lifecycle not in {"Closing", "Closed"})
         ready = self.lifecycle == "Ready" and not self.privacy_barrier
         self.companion_panel.set_available(ready)
         self.conversation_panel.set_available(ready)

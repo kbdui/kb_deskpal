@@ -5,6 +5,9 @@ provider = "offline"
 model = ""
 base_url = "https://api.openai.com/v1"
 api_key_env = "OPENAI_API_KEY"
+# Optional Windows Credential Manager reference written by the setup wizard.
+# Environment/.env credentials take precedence. Never put the secret in TOML.
+credential_ref = ""
 timeout_seconds = 30.0
 # Explicit opt-in for compatible Responses endpoints. JSON mode guarantees
 # JSON syntax only; host envelope and signal validation remain required.

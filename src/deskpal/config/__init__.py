@@ -25,6 +25,7 @@ class LLMConfig:
     timeout_seconds: float = 30.0
     api_key: str = field(default="", repr=False)
     expression_output_format: str = "prompt"
+    credential_ref: str = ""
 
     def __post_init__(self) -> None:
         if not isinstance(self.expression_output_format, str) or self.expression_output_format not in ("prompt", "json_object"):
@@ -256,8 +257,19 @@ def load_config(path: str | Path | None = None, *, environ: Mapping[str, str] | 
     if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", api_key_env) is None:
         raise ConfigError("llm.api_key_env must name a valid environment variable, not a credential")
     api_key = env.get(api_key_env, "") if provider == "openai" else ""
+    credential_ref = string("llm", "credential_ref", "", "DESKPAL_LLM_CREDENTIAL_REF")
+    if credential_ref:
+        from deskpal.credentials import WindowsCredentialStore
+        if not WindowsCredentialStore.valid_ref(credential_ref):
+            raise ConfigError("llm.credential_ref must name a Deskpal credential")
+        if provider == "openai" and not api_key.strip() and environ is None:
+            from deskpal.credentials import CredentialStoreError
+            try:
+                api_key = WindowsCredentialStore().read(credential_ref) or ""
+            except CredentialStoreError:
+                raise ConfigError("System credential storage is unavailable") from None
     if provider == "openai" and (not model or not api_key.strip()):
-        raise ConfigError("OpenAI mode requires an explicit model and an API key environment variable")
+        raise ConfigError("OpenAI mode requires an explicit model and an API key environment variable or system credential reference")
     if provider == "openai" and not base_url.startswith(("https://", "http://")):
         raise ConfigError("llm.base_url must be an HTTP(S) URL")
     poll_interval = positive_number(
@@ -285,7 +297,7 @@ def load_config(path: str | Path | None = None, *, environ: Mapping[str, str] | 
     return AppConfig(
         llm=LLMConfig(provider, model, base_url, api_key_env,
                       positive_number("llm", "timeout_seconds", 30.0, "DESKPAL_LLM_TIMEOUT_SECONDS"), api_key,
-                      expression_output_format),
+                      expression_output_format, credential_ref),
         sandbox=SandboxConfig(directory("sandbox", "workspace_dir", "workspace", "DESKPAL_WORKSPACE_DIR"),
                               positive_number("sandbox", "max_file_bytes", 1_048_576, "DESKPAL_MAX_FILE_BYTES", True)),
         storage=StorageConfig(directory("storage", "data_dir", "data", "DESKPAL_DATA_DIR")),

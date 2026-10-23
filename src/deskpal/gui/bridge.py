@@ -144,11 +144,11 @@ class ApplicationBridge(QObject):
                 blocked = bool(app.diagnostics().get("cleanup_pending"))
                 self._set_state("CleanupBlocked" if blocked else "Ready")
         except Exception as exc:
+            from deskpal.maintenance.service import safe_error
             self._set_state("StartupFailed" if not self._closing.is_set() else "Closing")
             self._deliver({"request_id": "startup", "operation": "startup", "generation": 0,
                              "privacy_epoch": self.privacy_epoch, "ok": False,
-                             "error": {"code": type(exc).__name__,
-                                       "message": "启动失败：检查配置、依赖及同数据目录的运行实例。"}})
+                             "error": safe_error(exc)})
         finally:
             self._initialized.set()
         self._loop(self._commands)

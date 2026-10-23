@@ -155,6 +155,8 @@ def create_application(config: AppConfig | None = None, *, planner: Planner | No
     with ExitStack() as resources:
         instance = InstanceLock(settings.storage.data_dir).acquire()
         resources.callback(instance.release)
+        from deskpal.maintenance.archives import assert_restore_ready
+        assert_restore_ready(instance.data_dir)
         companion: CompanionPort | None = None
         companion_unavailable = False
         try:

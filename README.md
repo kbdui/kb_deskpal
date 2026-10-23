@@ -1,5 +1,7 @@
 # Personal AI Agent Desktop Companion — V0.5 候选版
 
+2026-10-23：首次配置向导、可选 Windows 系统凭据、语义检索模型缓存管理、固定失败指引和四库备份/可续办恢复已完成本轮开发及集中自动化修补复测，**主环境去重 1,289 项通过、2 项权限跳过，兼容环境 169 项通过**；真实模型下载/实际推理及物理桌面交互未验收。见[测试记录](docs/versions/v0.9/test-report.md)、[开发记录](docs/versions/v0.9/development-status.md)、[操作说明](docs/versions/v0.9/operations.md)与[最小测试清单](docs/planning/v0.9/productization-minimal-test-plan.md)。隔离执行、细粒度授权和有限无人值守执行按用户决定移至正式版后；产品版本未调整，发布和稳定性门槛仍需单独验收。
+
 Windows 个人智能 Agent 桌宠项目。当前版本 **0.5.0rc1**：在既有持久任务、来源化记忆、目标与本地提议后端上，加入 Qt Widgets 主窗口、后台交互、准确授权、托盘与通知。Python 3.11+。实机验收缺项见 [V0.5 状态](docs/versions/v0.5/delivery.md)，不宣称全部版本门槛已通过。
 
 提供 GUI 与命令行入口；Live2D、后台云规划和跨启动完整聊天档案仍属后续范围。V0.8 原人格/情绪实现的最小测试见[历史报告](docs/versions/v0.8/test-report.md)。2026-10-22 后续拟人化增量已实现至 H5：有界会话、可控表达、当前情境候选和并发遗忘，H6 材料完成后已按用户授权集中测试，**真实模型体验尚未验收通过**。实现见[开发记录](docs/versions/v0.8/humanization-development-status.md)，首败、修补、定向复测及限制见[本轮测试报告](docs/versions/v0.8/humanization-test-report.md)；历史测试不覆盖新代码。架构见 [ARCHITECTURE.md](ARCHITECTURE.md)，GUI 基础用法见 [V0.5 操作指南](docs/versions/v0.5/operations.md)和[接口](docs/versions/v0.5/interfaces.md)，CLI 继续参考 [V0.4 操作指南](docs/versions/v0.4/operations.md)。
@@ -108,9 +110,9 @@ python -m deskpal --companion rollback --companion-parameters '{"expected_revisi
 
 ## 配置与数据
 
-`--config config.toml` 显式选择配置；优先级：进程环境变量 > 配置目录 .env > TOML > 默认值。相对路径以配置文件目录为准，未指定配置时以当前目录为准。.env 按字面解析且不修改全局环境；密钥禁止写 TOML 或 Git。
+`--config config.toml` 显式选择配置；优先级：进程环境变量 > 配置目录 .env > TOML > 默认值。相对路径以配置文件目录为准。.env 按字面解析且不修改全局环境；密钥禁止写 TOML 或 Git。GUI 缺配置进入向导，可用 `python -m deskpal.gui --setup` 主动进入。默认路径优先当前目录已有 `config.toml`，其次 Windows 用户配置目录；普通 CLI 无默认文件时保留原离线行为。完整路径和维护流程见[新增操作说明](docs/versions/v0.9/operations.md)。
 
-API 模式使用兼容 Responses 协议的 adapter，provider=openai，model/base_url/api_key_env 按实际服务配置，密钥填写本地 .env。请求、合资格记忆与必要工具结果会发给所配置服务；本地存储不等于本地模型推理。配置项见 [config.example.toml](config.example.toml)，历史协议范围见 [V0.3 接口](docs/versions/v0.3/interfaces.md)。
+API 模式使用兼容 Responses 协议的 adapter，provider=openai，model/base_url/api_key_env 按实际服务配置；密钥使用环境/.env 或向导写入 Windows 系统凭据，环境 key 优先。请求、合资格记忆与必要工具结果会发给所配置服务；本地存储不等于本地模型推理。配置项见 [config.example.toml](config.example.toml)，历史协议范围见 [V0.3 接口](docs/versions/v0.3/interfaces.md)。
 
 ```text
 src/deskpal/

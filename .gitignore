@@ -13,6 +13,9 @@ htmlcov/
 .env.*
 !.env.example
 config.toml
+*.toml.recovery-*
+.deskpal-config-*
+*.deskpal-backup.zip
 data/
 /doc/
 workspace/

@@ -5,7 +5,7 @@ from datetime import datetime
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from PySide6.QtCore import QObject, QSettings, QTimer, Slot
+from PySide6.QtCore import QObject, QSettings, QTimer, Signal, Slot
 from PySide6.QtWidgets import QApplication
 
 from deskpal.application.service import ApplicationService
@@ -20,6 +20,8 @@ from .window import MainWindow
 
 class DesktopHost(QObject):
     """Own the only backend until its Closed receipt, including a late startup."""
+
+    finished = Signal()
 
     def __init__(self, factory: Callable[[], ApplicationService], *,
                  preferences: GuiPreferences | None = None, quit_on_closed: bool = True,
@@ -120,6 +122,7 @@ class DesktopHost(QObject):
             app = QApplication.instance()
             if app is not None:
                 app.quit()
+        self.finished.emit()
 
     @Slot(int)
     def _privacy(self, epoch: int) -> None:

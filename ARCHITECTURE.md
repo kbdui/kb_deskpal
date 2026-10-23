@@ -1,5 +1,7 @@
 # Deskpal 架构
 
+2026-10-23 产品化增量：新增 Qt-free `maintenance`（配置、模型缓存、四库归档恢复）和 `credentials`。独立维护阶段不构造生产 Core；GUI `DesktopLauncher` 等待 Host/桌宠完整结束后才能进入维护，并等待维护 worker 真正退出再重开应用。配置采用文件 CAS 与原文保留；FastEmbed 持共享缓存 OS 租约，准备/清理持独占租约；备份与恢复使用既有 data_dir 实例锁。生产工厂在构造四库前检查恢复标记，避免初始化半成品。见[实际接口](docs/versions/v0.9/interfaces.md)、[开发记录](docs/versions/v0.9/development-status.md)及[集中测试记录](docs/versions/v0.9/test-report.md)。隔离执行/精细授权/无人值守执行已按用户决定延至正式版后，不扩大现有工具权限。
+
 2026-10-22：拟人化增量已完成 H0–H5 源码整合和 H6 验收准备，并获用户授权集中测试。新增进程内有界 conversation、独立 response、用途化模型网关和工作库 schema 2；规划与表达保留不同来源投影，遗忘控制入口先持久阻断再清理。云默认仍仅固定预设，显式字段许可与来源用途共同决定新增表达数据。当前实现、迁移和与原提案的调整见[开发记录](docs/versions/v0.8/humanization-development-status.md)，[最小验收](docs/planning/v0.8/humanization-minimal-test-plan.md)的首败、修补和实际限制见[本轮测试报告](docs/versions/v0.8/humanization-test-report.md)；真实模型体验未通过。下文 V0.8 最小版段落保留历史边界，不能将旧测试结论推广到本轮代码。
 
 V0.4 以“显式目标 → 本地提议 → 持久任务 → 计划确认 → 步骤账本 → 审查恢复”为主线。当前验收状态见 [V0.4 进度](docs/versions/v0.4/development-status.md)，实际接口见 [接口契约](docs/versions/v0.4/interfaces.md)。Python 3.11+，Windows 单机、单数据目录运行实例。
@@ -48,6 +50,7 @@ Core 依赖 DTO/Protocol，不访问 SQL、Goal 实现、调度私有连接或�
 | 模块 | 职责 |
 | --- | --- |
 | application | 生产工厂、实例锁、单 worker、CLI、管理/恢复/删除/关闭协调 |
+| maintenance / credentials | 独立离线配置与维护、固定失败引导、四库归档/恢复屏障、Windows 可选凭据；不依赖 GUI 或启动生产 Core |
 | gui | 可选 Qt Widgets、后台桥/宿主、版本化视图、遗忘清屏、偏好/托盘/本地通知；不反向成为领域依赖 |
 | presentation | Qt-free严格元数据DTO与固定状态/表情文字映射；GUI自行检查新鲜度和代际，不执行工具 |
 | companion | Qt-free声明式人格、显式偏好/cue、有限情绪/风格、独立持久化与重置；不拥有权限或事实权威，证据按V0.8最小报告划界 |

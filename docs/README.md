@@ -1,5 +1,7 @@
 # 文档导航
 
+2026-10-23 产品化补齐：首次配置/系统凭据、语义检索缓存、失败指引、协调四库备份恢复已完成本轮开发及集中自动化修补复测；**主环境去重 1,289 passed / 2 skipped / 0 failed，兼容环境 169 passed / 1 skipped，strict 145 文件通过**。真实模型下载/实际推理、物理桌面交互和 symlink 权限边界单列。阅读[测试记录](versions/v0.9/test-report.md)、[开发记录](versions/v0.9/development-status.md)、[接口](versions/v0.9/interfaces.md)、[操作说明](versions/v0.9/operations.md)、[开发计划](planning/v0.9/productization-development-plan.md)和[最小 P01–P08](planning/v0.9/productization-minimal-test-plan.md)。隔离执行/强制停止、精细授权及有限无人值守执行移至正式版后，旧实验不恢复。
+
 当前代码为 **0.5.0rc1**，加入 GUI 与后台交互；V0.4 持久后端继续保留。候选版实际范围与验收缺项见 [V0.5 状态](versions/v0.5/delivery.md)和[测试报告](versions/v0.5/test-report.md)；历史报告只说明当时证据，规划不是验收结果。
 
 **切换聊天：**V0.6 以[2026-10-19 14:57 暂停检查点](versions/v0.6/pause-checkpoint-2026-10-19-1457.md)和[执行环境架构重评](versions/v0.6/execution-environment-architecture-review-2026-10-19.md)为最新边界；阶段0仍未通过，尚未接入生产执行，不恢复封存实验。更早的[交接](handoffs/2026-10-17-v0.6.md)和恢复记录仅作历史参考。
@@ -114,9 +116,10 @@ Markdown 链接相对于当前文档；正文中的 `src/...`、`docs/...` 等�
 
 | 版本 | 计划与接口 | 测试证据 | 交付/环境 |
 | --- | --- | --- | --- |
+| V0.9 产品化补齐（未测试） | [计划](planning/v0.9/productization-development-plan.md)、[接口](versions/v0.9/interfaces.md) | [待执行最小清单](planning/v0.9/productization-minimal-test-plan.md)，本轮未运行测试 | [开发记录](versions/v0.9/development-status.md)、[操作说明](versions/v0.9/operations.md) |
 | V0.8 最小测试已执行 | [开发计划](planning/v0.8/development-plan.md)、[接口](versions/v0.8/interfaces.md) | [实际报告](versions/v0.8/test-report.md)、[最小计划](versions/v0.8/minimal-test-plan.md)，有明确边界 | [开发记录](versions/v0.8/development-status.md)、[运行说明](versions/v0.8/operations.md) |
 | V0.7 静态桌宠归档 | [开发计划](planning/v0.7/development-plan.md)、[验收边界](planning/v0.7/acceptance-boundaries.md) | [实际报告](versions/v0.7/test-report.md)；T08未整体通过 | [归档](versions/v0.7/delivery.md)、[后续测试](versions/v0.7/deferred-tests.md)、[环境评估](planning/v0.7/environment-assessment.md)；Live2D延至正式版后 |
-| V0.6 阶段0 | [开发计划](planning/v0.6/development-plan.md)、[验收边界](planning/v0.6/acceptance-boundaries.md) | 原型开发中，未通过完整隔离/自动规则验收 | [进度](versions/v0.6/development-status.md)、[工具迁移表](versions/v0.6/tool-migration.md)、[原评估](planning/v0.6/environment-assessment.md) |
+| V0.6 正式版后扩展 | [历史开发计划](planning/v0.6/development-plan.md)、[验收边界](planning/v0.6/acceptance-boundaries.md) | 原型暂停，未通过完整隔离/自动规则验收；本轮不恢复 | [进度](versions/v0.6/development-status.md)、[工具迁移表](versions/v0.6/tool-migration.md)、[原评估](planning/v0.6/environment-assessment.md) |
 | V0.5 rc1 | [接口](versions/v0.5/interfaces.md)、[操作指南](versions/v0.5/operations.md)、[验收边界](planning/v0.5/acceptance-boundaries.md) | [实际报告](versions/v0.5/test-report.md)、[Windows 实机记录](versions/v0.5/windows-checklist.md)、[稳定性调查](versions/v0.5/stability-investigation.md) | [候选状态](versions/v0.5/delivery.md)、[进度交接](versions/v0.5/development-status.md)、[原评估](planning/v0.5/environment-assessment.md) |
 | V0.4 | [实际接口](versions/v0.4/interfaces.md)、[操作指南](versions/v0.4/operations.md)、[原计划](planning/v0.4/development-plan.md) | [测试报告](versions/v0.4/test-report.md) | [交付](versions/v0.4/delivery.md)、[环境评估](planning/v0.4/environment-assessment.md) |
 | V0.3 | [实际接口](versions/v0.3/interfaces.md)、[原计划](planning/v0.3/development-plan.md) | [测试报告](versions/v0.3/test-report.md) | [交付](versions/v0.3/delivery.md) |

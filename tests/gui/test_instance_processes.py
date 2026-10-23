@@ -193,7 +193,7 @@ def test_gui_cli_process_competition_and_graceful_release(tmp_path, data_paths, 
             with running_child("gui", alias, tmp_path / "contender") as second:
                 second.wait_event("StartupFailed")
                 error = second.wait_event("StartupError")
-                assert error["code"] == "InstanceLockError"
+                assert error["code"] == "busy"
                 second.finish(gui=True)
         else:
             cli_probe(alias, tmp_path / "contender", expected=1)

@@ -1,5 +1,7 @@
 # 开发与扩展约定
 
+2026-10-23 产品化增量：本地配置/缓存/备份恢复维护独立于生产 Application 生命周期。修改这些入口先读[V0.9 实际接口](../versions/v0.9/interfaces.md)及[开发记录](../versions/v0.9/development-status.md)，保持 Qt-free CLI、秘密不出回执、实例/缓存锁和恢复标记屏障。开发与测试分开；用户已启动按[最小验收清单](../planning/v0.9/productization-minimal-test-plan.md)集中验证，实际结果与未验证边界见[测试记录](../versions/v0.9/test-report.md)。
+
 ## 开始修改前
 
 阅读根目录 `ARCHITECTURE.md`、[V0.5 接口](../versions/v0.5/interfaces.md)、[V0.4 持久后端接口](../versions/v0.4/interfaces.md)、[V0.3 记忆接口](../versions/v0.3/interfaces.md)与[V0.2 工具接口](../versions/v0.2/interfaces.md)。当前候选版范围和证据以 [V0.5 状态](../versions/v0.5/delivery.md)及[测试报告](../versions/v0.5/test-report.md)为准；`doc/` 与 planning 用于长期设计。

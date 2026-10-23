@@ -143,7 +143,12 @@ def _proposal_notice(agent: ApplicationService, shown: deque[str]) -> None:
 
 def main(argv: Sequence[str] | None = None) -> int:
     _utf8_streams()
-    parser = argparse.ArgumentParser(description="Deskpal V0.4 persistent local agent backend")
+    arguments = list(sys.argv[1:] if argv is None else argv)
+    if any(value == "--maintenance" or value.startswith("--maintenance=") for value in arguments):
+        from deskpal.maintenance.cli import main as maintenance_main
+        return maintenance_main(arguments)
+    parser = argparse.ArgumentParser(description="Deskpal persistent local agent backend",
+        epilog="Local setup/cache/backup: python -m deskpal --maintenance diagnostics --help")
     parser.add_argument("--config", metavar="PATH", help="TOML configuration file")
     request_mode = parser.add_mutually_exclusive_group()
     request_mode.add_argument("--request", metavar="TEXT", help="Run one request")
@@ -251,7 +256,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                             or args.interaction is not None or args.privacy is not None
                             or (args.conversation is not None and not args.conversation_cloud)
                             or (args.workflow is not None and args.workflow not in workflow_cli.EXECUTION_ACTIONS))
-        settings = load_config(args.config, provider_override="offline" if local_management else None)
+        config_path = args.config
+        if config_path is None:
+            from deskpal.maintenance.service import default_config_path
+            default_path = default_config_path()
+            if default_path.is_file():
+                config_path = str(default_path)
+        settings = load_config(config_path, provider_override="offline" if local_management else None)
         with create_application(settings, planner=direct_planner) as agent:
             if args.interaction is not None:
                 if args.interaction == "show":

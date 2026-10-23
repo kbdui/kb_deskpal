@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from .contracts import EmbeddingManifest, MemoryError
+from .cache_lock import CacheLease
 
 MODEL = "BAAI/bge-small-zh-v1.5"
 QUERY_PREFIX = "为这个句子生成表示以用于检索相关文章："
@@ -47,7 +48,9 @@ class FastEmbedProvider:
         cache = Path(cache_dir).expanduser().resolve()
         if not cache.is_dir():
             raise EmbeddingError("Embedding cache is missing; prepare model files explicitly")
+        self._lease = CacheLease(cache, exclusive=False)
         try:
+            self._lease.acquire()
             if importlib.metadata.version("fastembed") != "0.9.0":
                 raise EmbeddingError("This adapter requires FastEmbed 0.9.0")
             TextEmbedding = importlib.import_module("fastembed").TextEmbedding
@@ -78,8 +81,10 @@ class FastEmbedProvider:
             self._tokenizer.no_padding()
             self._closed = False
         except EmbeddingError:
+            self._lease.release()
             raise
         except Exception:
+            self._lease.release()
             raise EmbeddingError("Local embedding initialization failed; no model was downloaded") from None
 
     @staticmethod
@@ -136,6 +141,7 @@ class FastEmbedProvider:
         self._closed = True
         self._model = None
         self._tokenizer = None
+        self._lease.release()
 
 
 __all__ = ["FastEmbedProvider", "EmbeddingError"]

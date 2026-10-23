@@ -5,13 +5,11 @@ readable response, optionally a context manager. Such transports are trusted to
 preserve the default transport's prohibition on credential-bearing redirects.
 """
 
-import ipaddress
 import json
 import math
 import re
 import socket
 import urllib.error
-import urllib.parse
 import urllib.request
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import nullcontext
@@ -22,6 +20,7 @@ from deskpal.tools.models import ToolCall, ToolSpec
 
 from .errors import LLMError
 from .models import ChatMessage, LLMResponse
+from .url_policy import validate_base_url
 
 
 def _json_value(value: Any) -> None:
@@ -257,28 +256,7 @@ class OpenAILLMProvider:
 
     @staticmethod
     def _validate_url(value: Any) -> str:
-        try:
-            if not isinstance(value, str) or any(char.isspace() or ord(char) < 32 for char in value):
-                raise ValueError
-            parsed = urllib.parse.urlsplit(value)
-            if not parsed.hostname or parsed.username is not None or parsed.password is not None:
-                raise ValueError
-            if parsed.query or parsed.fragment or "%" in parsed.netloc or "\\" in value:
-                raise ValueError
-            if parsed.port is not None and not 1 <= parsed.port <= 65535:
-                raise ValueError
-            if parsed.scheme == "http":
-                try:
-                    loopback = ipaddress.ip_address(parsed.hostname).is_loopback
-                except ValueError:
-                    loopback = parsed.hostname.lower() == "localhost"
-                if not loopback:
-                    raise ValueError
-            elif parsed.scheme != "https":
-                raise ValueError
-            return value.rstrip("/")
-        except (ValueError, TypeError):
-            raise LLMError("base_url must be HTTPS (or loopback HTTP), without credentials, query or fragment") from None
+        return validate_base_url(value)
 
     def generate(self, prompt: str) -> str:
         if not _nonempty(prompt):

@@ -1,5 +1,7 @@
 # 中文 Embedding 安装与运行
 
+2026-10-23 新增维护入口：GUI“配置与数据维护”或 CLI `--maintenance cache_status/cache_verify/cache_prepare/cache_clear` 支持托管准备、明确下载许可、离线验证、带 revision 的自有资产清理及使用中租约保护，见[产品化操作说明](../versions/v0.9/operations.md)。新增维护流程已有 fake SDK、实际文件硬链接和 Windows 原生锁验证，见[测试记录](../versions/v0.9/test-report.md)；本次未执行真实模型下载和实际 CPU 推理，下文 2026-10-15 的 adapter 实测不能代替新增维护端到端证据。旧脚本产生的非托管缓存可验证，不能直接当作有清理资格的托管目录。
+
 更新：2026-10-15，对应 0.3.0。实际 adapter 已接入 **BAAI/bge-small-zh-v1.5 + FastEmbed 0.9.0 CPU**，真实推理已在 Windows Python 3.12 验证。Python 3.11 的离线回归不代表该环境的真实模型验收。完整效果、性能与发布门槛见 [V0.3 测试报告](../versions/v0.3/test-report.md)。
 
 ## 依赖与缓存是两步
