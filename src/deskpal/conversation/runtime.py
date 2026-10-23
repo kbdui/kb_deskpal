@@ -112,6 +112,14 @@ class ConversationRuntime:
 
     def freeze(self, conversation_id: str, epoch: int, before_sequence: int, *,
                cloud: bool, history_allowed: bool) -> dict[str, Any]:
+        """Freeze independent neutral planning and expression projections.
+
+        Expression history owns provenance: historical user references are not
+        new instructions or externally verified claims; assistant responses are
+        unconfirmed proposals with stable task/sequence draft identity. Attached
+        tool facts attest to host-recorded outcomes, not the truth of text in a
+        tool's output. Only the trusted publisher supplies structured facts.
+        """
         if type(before_sequence) is not int or before_sequence < 1:
             raise ValueError("A positive turn sequence is required")
         with self._lock:
@@ -140,11 +148,36 @@ class ConversationRuntime:
                                  if not (ref.kind == "dialogue_turn" and ref.id.endswith(":assistant"))]
                 source = {"kind": "dialogue_turn", "id": turn.task_id + ":user",
                           "revision": turn.sequence, "use_policy": turn.use_policy}
-                history_rounds.append((
+                assistant_source = {**source, "id": turn.task_id + ":assistant"}
+                # Provenance is generated from the host's immutable turn, never
+                # inferred from prose (including apparent user confirmation).
+                # A draft version identifies one published response, not a
+                # verified claim or authorization to execute its suggestions.
+                history_round = (
                     {"role": "user", "content": turn.request, "verified": False,
-                     "source_ref": source, "refs": refs},
+                     "source_kind": "historical_user_reference", "instruction": False,
+                     "externally_verified": False, "source_ref": source, "refs": refs},
                     {"role": "assistant", "content": turn.response, "verified": False,
-                     "source_ref": {**source, "id": turn.task_id + ":assistant"}, "refs": refs}))
+                     "source_kind": "assistant_proposal", "draft_id": assistant_source["id"],
+                     "draft_version": turn.sequence, "confirmed": False,
+                     "instruction": False, "externally_verified": False,
+                     "source_ref": assistant_source, "refs": refs,
+                     "tool_facts": [{"kind": "tool_fact", "verified": True,
+                                     "source_kind": "host_recorded_tool_outcome",
+                                     "external_content_verified": False,
+                                     "fact": json.loads(fact), "source_ref": assistant_source,
+                                     "refs": refs} for fact in turn.facts]})
+                # Expression provenance and tool outcomes consume the same
+                # bounded history budget. Omit only complete expression rounds;
+                # the existing neutral planning selection below is independent.
+                candidate_history = [message for pair in history_rounds for message in pair]
+                candidate_history.extend(history_round)
+                history_encoded = json.dumps(candidate_history, ensure_ascii=False,
+                                             allow_nan=False, sort_keys=True)
+                if len(history_encoded.encode("utf-8")) <= MAX_HISTORY_BYTES:
+                    history_rounds.append(history_round)
+                else:
+                    warnings.append("history_context_limit")
                 round_items: list[dict[str, Any]] = [
                     {"kind": "user_reference", "content": turn.request,
                      "instruction": False, "source_ref": source, "refs": planning_refs}]

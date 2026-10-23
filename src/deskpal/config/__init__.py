@@ -24,6 +24,11 @@ class LLMConfig:
     api_key_env: str = "OPENAI_API_KEY"
     timeout_seconds: float = 30.0
     api_key: str = field(default="", repr=False)
+    expression_output_format: str = "prompt"
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.expression_output_format, str) or self.expression_output_format not in ("prompt", "json_object"):
+            raise ConfigError("llm.expression_output_format must be prompt or json_object")
 
 
 @dataclass(frozen=True)
@@ -241,6 +246,9 @@ def load_config(path: str | Path | None = None, *, environ: Mapping[str, str] | 
     model = string("llm", "model", "", "DESKPAL_LLM_MODEL")
     base_url = string("llm", "base_url", "https://api.openai.com/v1", "DESKPAL_LLM_BASE_URL").rstrip("/")
     api_key_env = string("llm", "api_key_env", "OPENAI_API_KEY", "DESKPAL_LLM_API_KEY_ENV")
+    expression_output_format = string("llm", "expression_output_format", "prompt", "DESKPAL_LLM_EXPRESSION_OUTPUT_FORMAT")
+    if expression_output_format not in ("prompt", "json_object"):
+        raise ConfigError("llm.expression_output_format must be prompt or json_object")
     if provider not in {"offline", "openai"}:
         raise ConfigError("llm.provider must be offline or openai")
     if not api_key_env:
@@ -276,7 +284,8 @@ def load_config(path: str | Path | None = None, *, environ: Mapping[str, str] | 
         raise ConfigError("Memory evaluation must use <=60 seconds and <=8192 output tokens")
     return AppConfig(
         llm=LLMConfig(provider, model, base_url, api_key_env,
-                      positive_number("llm", "timeout_seconds", 30.0, "DESKPAL_LLM_TIMEOUT_SECONDS"), api_key),
+                      positive_number("llm", "timeout_seconds", 30.0, "DESKPAL_LLM_TIMEOUT_SECONDS"), api_key,
+                      expression_output_format),
         sandbox=SandboxConfig(directory("sandbox", "workspace_dir", "workspace", "DESKPAL_WORKSPACE_DIR"),
                               positive_number("sandbox", "max_file_bytes", 1_048_576, "DESKPAL_MAX_FILE_BYTES", True)),
         storage=StorageConfig(directory("storage", "data_dir", "data", "DESKPAL_DATA_DIR")),

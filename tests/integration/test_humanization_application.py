@@ -71,7 +71,7 @@ class HumanizationRecordingProvider:
             raise selected
         if isinstance(selected, LLMResponse):
             return selected
-        structured = '"reply_text" (nonempty string)' in system
+        structured = "OUTPUT PROTOCOL" in system
         return LLMResponse(selected if selected is not None else envelope() if structured else REPLY)
 
     def generate(self, prompt):
@@ -203,7 +203,7 @@ def test_hm02_multiturn_has_neutral_and_expression_projections_and_session_isola
         expression = json.loads(last_expression(wire)["messages"][-1]["content"])
         assert initial in planner and "tool_fact" in planner
         assert REPLY not in planner and "assistant_unverified" not in planner
-        assert any(item["content"] == first.response and item["source_kind"] == "assistant_unverified"
+        assert any(item["content"] == first.response and item["source_kind"] == "assistant_proposal"
                    for item in expression["history"])
         planning = app._humanization.context(second.task_id, "planning")
         presented = app._humanization.context(second.task_id, "expression")

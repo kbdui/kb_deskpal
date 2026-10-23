@@ -1,6 +1,10 @@
 # V0.8 运行说明
 
-2026-10-22：[拟人化增量开发记录](humanization-development-status.md)列出新增 GUI 会话与用途控制、CLI 参数及 schema 2 备份边界。源码实现至 H5，尚未启动或测试；下面原最小版说明和测试链接只作为基线参考。新增候选只在当前进程确认，跨启动不恢复聊天。
+2026-10-23：[拟人化增量开发记录](humanization-development-status.md)列出新增 GUI 会话与用途控制、CLI 参数及 schema 2 备份边界；已按用户授权测试，原始结果见[集中测试报告](humanization-test-report.md)，最新修补、真实模型失败和验收判断见[HM08 改进记录](hm08-improvement-report.md)。下面原最小版说明和测试链接只作为基线参考。新增候选只在当前进程确认，跨启动不恢复聊天。
+
+HM08 增加可选 `[llm] expression_output_format = "json_object"`（环境变量 `DESKPAL_LLM_EXPRESSION_OUTPUT_FORMAT`），默认仍为 `prompt`。仅经验证支持的 Responses 端点才显式选择该模式；它只用于 expression，Planner 和普通 chat/generate 格式保持。原生模式仍严格校验业务结构、来源和用途；失败不自动切换模式或补发请求。本次实际模型还出现过无可用输出，不能据此宣称端点稳定。工具摘要已足够时可没有额外补充段，这是正常展示；Provider 无输出仍属于失败回退，不等同合法空补充。
+
+本轮真实问题已按用户要求[记录并暂缓](hm08-deferred-issues.md)，不再追加请求。本机试验性 json_object 覆盖已移除，恢复 prompt 默认；其余配置值不变。该恢复不表示原提示模式已通过真实体验验收。
 
 状态：实现及最小自动化测试结果见[测试报告](test-report.md)，2026-10-21。保留现有安装/配置/启动方式与 `0.5.0rc1` 版本号，无新依赖；本版尚未完整验收。
 

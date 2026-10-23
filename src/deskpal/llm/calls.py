@@ -4,7 +4,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict
 import json
 from threading import RLock
-from typing import TypeVar
+from typing import TypeVar, cast
 from uuid import uuid4
 
 from deskpal.tools.models import ToolSpec
@@ -93,7 +93,21 @@ class _BoundProvider:
         self._purpose = purpose
         self._guard = guard
 
+    @property
+    def supports_json_output(self) -> bool:
+        provider = self._gateway._providers.get(self._purpose, self._gateway._provider)
+        return (self._purpose == "expression" and getattr(provider, "supports_json_output", False) is True
+                and callable(getattr(provider, "chat_json", None)))
+
+    def chat_json(self, messages: Sequence[ChatMessage]) -> LLMResponse:
+        if not self.supports_json_output:
+            raise LLMError("Native JSON output is not enabled for this model purpose")
+        return self._chat(messages, tools=(), json_output=True)
+
     def chat(self, messages: Sequence[ChatMessage], *, tools: Sequence[ToolSpec] = ()) -> LLMResponse:
+        return self._chat(messages, tools=tools, json_output=False)
+
+    def _chat(self, messages: Sequence[ChatMessage], *, tools: Sequence[ToolSpec], json_output: bool) -> LLMResponse:
         if self._purpose != "planning" and (tools or any(message.tool_calls or message.role == "tool" for message in messages)):
             raise LLMError("This model purpose cannot use tools")
         allowed_tools = tools if self._purpose == "planning" else ()
@@ -103,8 +117,22 @@ class _BoundProvider:
         if len(encoded.encode("utf-8")) > 131072:
             raise LLMError("Model input exceeds byte budget")
         provider = self._gateway._providers.get(self._purpose, self._gateway._provider)
+        def operation() -> LLMResponse:
+            response: object
+            if json_output:
+                # Optional method: the base Protocol and old mocks need not
+                # implement it. Validate both capability and returned DTO.
+                method = getattr(provider, "chat_json", None)
+                if self._purpose != "expression" or getattr(provider, "supports_json_output", False) is not True or not callable(method):
+                    raise LLMError("Native JSON output is not enabled for this model purpose")
+                response = cast(Callable[[Sequence[ChatMessage]], object], method)(messages)
+            else:
+                response = provider.chat(messages, tools=allowed_tools)
+            if not isinstance(response, LLMResponse):
+                raise LLMError("Model returned an invalid response")
+            return response
         response = self._gateway._invoke(self._task_id, self._purpose, self._guard,
-            lambda: provider.chat(messages, tools=allowed_tools))
+            operation)
         if self._purpose != "planning" and response.tool_calls:
             raise LLMError("This model purpose returned forbidden tool calls")
         return response

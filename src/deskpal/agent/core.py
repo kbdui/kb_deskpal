@@ -655,7 +655,13 @@ class AgentCore:
                         tool_results=tuple(_result_data(item) for item in results),
                         structured=bool(style) and self._interaction is not None)
                     self._boundary(task_id)
-                    if not composed.reply_text:
+                    # Only host-generated, bounded protocol paths/codes cross
+                    # this boundary; provider text and exception details do not.
+                    warnings.extend(
+                        f"response_diagnostic:{item.group}:{item.field}:{item.code}"
+                        for item in composed.diagnostics[:8]
+                    )
+                    if not composed.reply_text and (not results or composed.degraded_reason):
                         raise ValueError(composed.degraded_reason or "Empty expression response")
                     if self._companion_generation_current(companion_generation):
                         if results:

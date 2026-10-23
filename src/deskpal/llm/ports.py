@@ -10,3 +10,12 @@ class LLMProvider(Protocol):
 
     def generate(self, prompt: str) -> str: ...
 
+
+class NativeJSONProvider(LLMProvider, Protocol):
+    """Optional capability; existing Providers need only chat and generate."""
+
+    @property
+    def supports_json_output(self) -> bool: ...
+
+    def chat_json(self, messages: Sequence[ChatMessage]) -> LLMResponse: ...
+

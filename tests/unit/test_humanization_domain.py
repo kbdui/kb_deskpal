@@ -217,8 +217,12 @@ def test_hm02_reference_closures_are_128_per_item_and_512_per_context() -> None:
     frozen = freeze(runtime, session)
     assert len(frozen["refs"]) == 512
     assert "context_reference_limit" in frozen["warnings"]
-    assert [item["source_ref"]["id"] for item in frozen["history"] if item["role"] == "user"] == [
+    assert "history_context_limit" in frozen["warnings"]
+    assert len(json.dumps(frozen["history"], ensure_ascii=False).encode("utf-8")) <= 16384
+    assert [identity for kind, identity, _ in frozen["refs"]
+            if kind == "dialogue_turn" and identity.endswith(":user")] == [
         f"refs-{i}:user" for i in range(1, 5)]
+    assert len(frozen["history"]) % 2 == 0
     assert all(len(item["refs"]) == 128 for item in frozen["history"])
     before = runtime.snapshot(session["id"])
     publish(runtime, session, "too-many-refs", refs=[("m", str(n), 1) for n in range(127)])
@@ -247,7 +251,8 @@ def test_hm02_planning_caps_drop_whole_round_and_keep_user_plus_all_facts() -> N
     publish(runtime, byte_session, "large", request="x" * 15900, response="",
             refs=[("memory", f"source-{n}", 1) for n in range(20)])
     frozen = freeze(runtime, byte_session)
-    assert len(frozen["history"]) == 4
+    assert [item["content"] for item in frozen["history"]] == ["small", ""]
+    assert "history_context_limit" in frozen["warnings"]
     assert "planning_context_limit" in frozen["warnings"]
     assert len(frozen["planning_items"]) == 1
     assert frozen["planning_items"][0]["content"] == "small"

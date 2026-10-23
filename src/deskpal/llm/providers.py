@@ -238,6 +238,7 @@ class OpenAILLMProvider:
         if max_output_tokens is not None and (type(max_output_tokens) is not int or max_output_tokens <= 0):
             raise LLMError("max_output_tokens must be a positive integer")
         self.max_output_tokens = max_output_tokens
+        self._expression_output_format = values.expression_output_format
         if not _nonempty(self.model) or not _nonempty(self._api_key):
             raise LLMError("OpenAI provider requires a model and an API key")
         if any(char in self._api_key for char in "\r\n"):
@@ -287,8 +288,22 @@ class OpenAILLMProvider:
             raise LLMError("generate requires a text response without tool calls")
         return response.content
 
+    @property
+    def supports_json_output(self) -> bool:
+        return self._expression_output_format == "json_object"
+
+    def chat_json(self, messages: Sequence[ChatMessage]) -> LLMResponse:
+        if not self.supports_json_output:
+            raise LLMError("Native JSON output is not enabled")
+        return self._chat(messages, tools=(), json_output=True)
+
     def chat(self, messages: Sequence[ChatMessage], *, tools: Sequence[ToolSpec] = ()) -> LLMResponse:
+        return self._chat(messages, tools=tools, json_output=False)
+
+    def _chat(self, messages: Sequence[ChatMessage], *, tools: Sequence[ToolSpec], json_output: bool) -> LLMResponse:
         _validate_inputs(messages, tools)
+        if json_output and (tools or any(message.role == "tool" or message.tool_calls for message in messages)):
+            raise LLMError("Native JSON output cannot use tools")
         inputs: list[dict[str, Any]] = []
         for message in messages:
             if message.role == "tool":
@@ -302,11 +317,16 @@ class OpenAILLMProvider:
         payload: dict[str, Any] = {"model": self.model, "store": False, "input": inputs}
         if self.max_output_tokens is not None:
             payload["max_output_tokens"] = self.max_output_tokens
+        if json_output:
+            payload["text"] = {"format": {"type": "json_object"}}
         if tools:
             payload["tools"] = [{"type": "function", "name": spec.name, "description": spec.description,
                                  "parameters": dict(spec.parameters), "strict": False} for spec in tools]
         raw = self._request(_json_dump(payload).encode("utf-8"))
-        return self._parse_response(raw)
+        response = self._parse_response(raw)
+        if json_output and response.tool_calls:
+            raise LLMError("Native JSON output returned forbidden tool calls")
+        return response
 
     def _request(self, data: bytes) -> Any:
         try:

@@ -4,6 +4,8 @@
 
 设计依据：[总体方案](../../planning/v0.8/humanization-proposal.md)、[架构](../../planning/v0.8/humanization-architecture.md)、[实施顺序](../../planning/v0.8/humanization-delivery-plan.md)。H0–H6 全部完工后统一执行[HM01–HM08](../../planning/v0.8/humanization-minimal-test-plan.md)。桌宠表现没有新增实现，仍只保留规划中的提示契约。
 
+2026-10-23 后续 HM08 修补另见[改进计划](../../planning/v0.8/hm08-improvement-plan.md)及[实现/验证记录](hm08-improvement-report.md)：共享表达协议、范围证据、草稿来源、工具补充和原生 JSON 可选能力已纳入实现；下文保留 H0–H5 原交付边界，新的实际测试结果不覆盖旧首败。离线复测通过，真实调用失败及表达偏差按用户要求[暂缓](hm08-deferred-issues.md)，整体体验未验收。
+
 主 Agent 负责设计决策、跨模块协议、Core/Application 整合与源码审查；三个 6.1 Sol 高思考子 Agent 按限定文件分别实现持久基础、companion/response 和 conversation/GUI/CLI。没有分发产品设计，也没有运行测试或提交 Git。
 
 ## 1. 已实现的范围

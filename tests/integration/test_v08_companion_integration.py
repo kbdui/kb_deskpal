@@ -66,7 +66,7 @@ class RecordingProvider:
         if stage == "memory_evaluation":
             return LLMResponse('{"candidates": []}')
         if stage == "expression":
-            structured = '"reply_text" (nonempty string)' in system
+            structured = "OUTPUT PROTOCOL" in system
             body = json.dumps({"reply_text": EXPRESSION, "cues": [], "preference_candidates": []})
             return LLMResponse(body if structured else EXPRESSION)
         return LLMResponse("Explicit tools completed.")
@@ -302,7 +302,13 @@ def test_t03_cloud_expression_uses_only_fixed_preset_and_blocks_local_only_inten
         assert "当前短期表达模式" not in guidance
         assert "充分解释" not in guidance
         wire_data = json.dumps(payload, ensure_ascii=False)
-        assert "supportive" not in wire_data and "humor_allowed" not in wire_data
+        assert "supportive" not in wire_data
+        # The selected finite policy is the public fixed preset, not the
+        # conflicting local preference above. Full request equality with the
+        # pre-edit baseline remains the noninterference check.
+        assert payload["expression_policy"] == {
+            "verbosity": "normal", "humor_allowed": False, "followup_allowed": False,
+        }
         assert "persistent" not in wire_data and "reset_epoch" not in wire_data
         before = deepcopy(recorder.calls)
         blocked = run(app, "synthetic local-only intent", use_policy="local_only")

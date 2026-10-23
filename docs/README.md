@@ -26,6 +26,7 @@
 12. [2026-10-20 研究适配与测试取舍](planning/v0.7/research-and-test-scope-2026-10-20.md)：Coopanion/Cortico报告对V0.7的适用边界、推荐五张静态表情差分、状态防闪烁和精简T01–T08测试矩阵；不是已实现/已测试记录。
 13. [V0.8 开发计划](planning/v0.8/development-plan.md)、[验收边界](planning/v0.8/acceptance-boundaries.md)、[接口](versions/v0.8/interfaces.md)、[开发记录](versions/v0.8/development-status.md)、[最小测试报告](versions/v0.8/test-report.md)：默认关闭的声明式人格、有限情绪、显式偏好、后台管理与静态映射；测试范围与限制独立记录。
 14. [V0.8 拟人化优化提案](planning/v0.8/humanization-proposal.md)：多轮上下文、自然语言情境、稳定表达和可控偏好；[架构](planning/v0.8/humanization-architecture.md)与[实施计划](planning/v0.8/humanization-delivery-plan.md)保留设计依据，[开发记录](versions/v0.8/humanization-development-status.md)记录 H0–H6 材料。按[最小 HM01–HM08](planning/v0.8/humanization-minimal-test-plan.md)集中测试的实际结果见[本轮报告](versions/v0.8/humanization-test-report.md)；真实模型体验仍未验收通过。
+15. [HM08 改进与新测试计划](planning/v0.8/hm08-improvement-plan.md)、[实现与验证结果](versions/v0.8/hm08-improvement-report.md)：2026-10-23 按实际首败继续修补协议、范围、草稿事实和工具补充，加入显式原生 JSON 通道；离线复测通过，真实模型问题按用户要求列入[暂缓项](versions/v0.8/hm08-deferred-issues.md)，未整体验收。
 
 ## 分类与命名规则
 

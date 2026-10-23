@@ -6,6 +6,10 @@ model = ""
 base_url = "https://api.openai.com/v1"
 api_key_env = "OPENAI_API_KEY"
 timeout_seconds = 30.0
+# Explicit opt-in for compatible Responses endpoints. JSON mode guarantees
+# JSON syntax only; host envelope and signal validation remain required.
+# Planning and ordinary chat/generate retain their existing request format.
+expression_output_format = "prompt" # prompt | json_object
 
 [sandbox]
 workspace_dir = "workspace"

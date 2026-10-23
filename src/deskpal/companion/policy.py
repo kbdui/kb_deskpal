@@ -68,9 +68,14 @@ def instruction(
     if pref_allowed:
         # Deferred import avoids making the signal DTO depend on this policy.
         from .signals import ConstraintParser
-        for item in ConstraintParser().parse(request):
-            if constraints.get(item.key) is not False:
-                constraints[item.key] = item.value
+        parsed: dict[str, Any] = {}
+        priority = {"today": 0, "session": 1, "once": 2}
+        for item in sorted(ConstraintParser().parse(request), key=lambda item: priority[item.scope]):
+            if parsed.get(item.key) is not False:
+                parsed[item.key] = item.value
+        # The most specific current scope wins over broader defaults;
+        # already prepared host constraints retain their admission decision.
+        constraints = {**parsed, **constraints}
     merged = {**preferences, **constraints}
     verbosity = merged.get("verbosity", _verbosity(style["verbosity"]))
     if verbosity not in ("brief", "normal", "detailed"):
@@ -106,6 +111,10 @@ def instruction(
     result = f"表达风格：语气{tone}；篇幅{length}；{joke}；{vivid}；{curiosity}。当前用户明确的表达要求优先。"
     if mode in ("supportive", "focused", "celebratory"):
         result += " 当前短期表达模式：" + {"supportive": "支持", "focused": "专注", "celebratory": "轻度庆祝"}[mode] + "，不代表长期用户特征。"
+    result += "\n[EXPRESSION_POLICY]" + json.dumps(
+        {"verbosity": verbosity, "humor_allowed": humor, "followup_allowed": explore_allowed},
+        ensure_ascii=True, separators=(",", ":"),
+    )
     if custom and identity is not None:
         # Composer places this typed data in its user-data envelope, never in
         # the system instruction. No arbitrary role-card field exists.

@@ -1,6 +1,16 @@
 # V0.8 人格与情绪接口
 
-2026-10-22 后续增量：H0–H5 的[实际接口与开发记录](humanization-development-status.md)新增 conversation/interaction/request_forget 控制面、用途化模型调用和 schema 2；本轮未验证。下文保留原最小版接口：旧 snapshot 与七字段 presentation 形状仍兼容；record_outcome 现在仅对明确 tool_success 的可信工具结果奖励，并增加 use_policy/occurred_at；运行中受理遗忘使用新 request_forget，旧 memory 管理门禁不冒充该能力。
+2026-10-22 后续增量：H0–H5 的[实际接口与开发记录](humanization-development-status.md)新增 conversation/interaction/request_forget 控制面、用途化模型调用和 schema 2；集中测试与原 HM08 未通过项见[报告](humanization-test-report.md)，2026-10-23 的修补及新验证见[改进记录](hm08-improvement-report.md)。下文保留原最小版接口：旧 snapshot 与七字段 presentation 形状仍兼容；record_outcome 现在仅对明确 tool_success 的可信工具结果奖励，并增加 use_policy/occurred_at；运行中受理遗忘使用新 request_forget，旧 memory 管理门禁不冒充该能力。
+
+HM08 内部接口补充：`ResponseDraft` 保留原四个参数，追加默认空 tuple 的 `diagnostics: tuple[ResponseDiagnostic, ...]`；`ResponseDiagnostic(group, field, code)` 为冻结、无原文的固定分类，Core 最多转发八项到既有 warnings。`parse_envelope()` 顶层仍严格 JSON，cue 与 preference_candidates 独立组审核，同组非法/重复/冲突整体丢弃，合法正文和另一组可保留。`review_preference()` 提供带拒绝原因的共享审核，`validate_preference()` 原返回契约不变。
+
+`conversation.freeze().history` 的 user 条目增加主机确定的 historical_user_reference/instruction/externally_verified，assistant 条目增加 assistant_proposal、confirmed=false、draft_id/version 及结构化 host tool_facts；不从自由文本提取或升级可信事实。完整表达 JSON 另限 16KiB、整轮裁剪，原 planning_items 的语义和选择规则保持。字段只在获准 history 及完整来源闭包允许时外发，不新增云类别许可。
+
+表达策略另以有限 `expression_policy={verbosity, humor_allowed, followup_allowed}` 进入 Composer 数据区，先执行原用途过滤，再生成真实有效值；没有策略时为 null，不默认授予能力。verbosity 为 brief/normal/detailed，两个开关为严格 bool。当前请求与主机冻结约束优先，非法策略不发请求。
+
+Composer 根据主机传入的非空 `tool_results` 选择 `reply_role=tool_supplement`，否则为 `direct_answer`；这是输入数据，模型的三字段输出不能新增或改写角色。结构化补充模式表示主机另行展示权威工具摘要，允许 `reply_text=""` 正常弃答；直接回答及旧纯文本返回仍须非空。`parse_envelope(..., allow_empty_reply=False)` 默认保持旧契约，只有主机结构化工具模式显式启用。Core 对无降级的空工具补充只展示原摘要，仍可处理合法信号，不增加空补充标签或失败 warning；Provider 无输出、坏 envelope 和信号降级不能伪装成合法弃答。工具正文完整传入，不通过删字段或截断生成文字减少重复。
+
+LLM 配置可选 `expression_output_format="prompt"|"json_object"`，默认 prompt，环境覆盖为 `DESKPAL_LLM_EXPRESSION_OUTPUT_FORMAT`。兼容 Responses 端点经验证支持后才显式选择 json_object。可选 `NativeJSONProvider` 提供 `supports_json_output` 和 `chat_json(messages)`；原 Provider 无需实现。仅 expression 目的绑定可使用该能力，planning、memory_evaluation、普通 chat/generate 请求格式保持。原生 JSON 请求与 chat 共用根任务 expression 尝试额度、来源/隐私 guard、输入预算与工具禁令；失败不补发普通 chat，模型回包仍经严格业务 envelope 和信号审核。JSON mode 语法约束与端点兼容边界见[官方说明](https://developers.openai.com/api/docs/guides/structured-outputs?api-mode=responses)，不等同语义或本地 schema 正确。
 
 更新：2026-10-21。本文件描述代码契约；用户指定最小自动化测试及strict结果见[测试报告](test-report.md)，其中T07并发受理及两环境跳过有明确边界，不代表完整版本验收。规划见[开发计划](../../planning/v0.8/development-plan.md)，历史较宽建议见[测试清单](test-plan.md)。
 

@@ -4,6 +4,8 @@
 
 V0.4 以“显式目标 → 本地提议 → 持久任务 → 计划确认 → 步骤账本 → 审查恢复”为主线。当前验收状态见 [V0.4 进度](docs/versions/v0.4/development-status.md)，实际接口见 [接口契约](docs/versions/v0.4/interfaces.md)。Python 3.11+，Windows 单机、单数据目录运行实例。
 
+2026-10-23 HM08 改进：表达协议统一 schema/局部审核与固定诊断；会话表达投影保留未确认草稿来源并将全部元数据计入预算；偏好范围按证据分句校验。原生 JSON 为可选 expression 能力，与普通调用共享原任务额度和隐私屏障，默认 prompt；未增加执行权限或自动修复请求。[实现与验证记录](docs/versions/v0.8/hm08-improvement-report.md)保留真实调用失败，相关问题按用户要求[暂缓](docs/versions/v0.8/hm08-deferred-issues.md)，不能以离线通过宣称真实体验已验收。
+
 ## 调用方向
 
 V0.5 候选版新增 gui（Widgets、bridge、host、preferences、tray、notifications）和 application.desktop 的 Qt-free 查询/命令边界。界面不调用 Core/SQL，命令/查询/控制在后台分通道，仍复用唯一 Core worker。具体接口、隐私 epoch 与最终关闭所有权见 [V0.5 接口](docs/versions/v0.5/interfaces.md)；实机与长测状态以 [测试报告](docs/versions/v0.5/test-report.md)为准。
