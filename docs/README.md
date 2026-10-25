@@ -1,10 +1,29 @@
 # 文档导航
 
-2026-10-23 产品化补齐：首次配置/系统凭据、语义检索缓存、失败指引、协调四库备份恢复已完成本轮开发及集中自动化修补复测；**主环境去重 1,289 passed / 2 skipped / 0 failed，兼容环境 169 passed / 1 skipped，strict 145 文件通过**。真实模型下载/实际推理、物理桌面交互和 symlink 权限边界单列。阅读[测试记录](versions/v0.9/test-report.md)、[开发记录](versions/v0.9/development-status.md)、[接口](versions/v0.9/interfaces.md)、[操作说明](versions/v0.9/operations.md)、[开发计划](planning/v0.9/productization-development-plan.md)和[最小 P01–P08](planning/v0.9/productization-minimal-test-plan.md)。隔离执行/强制停止、精细授权及有限无人值守执行移至正式版后，旧实验不恢复。
+## 按读者查阅
+
+| 读者 | 入口 | 内容 |
+| --- | --- | --- |
+| 使用者 | [用户指南](user-guide/README.md) | 安装、配置、桌面与会话、任务授权、记忆隐私、目标提议、CLI、维护与排错 |
+| 开发者 | [开发者指南](developer-guide/README.md) | 文件架构、设计边界、请求生命周期、核心代码、GUI、存储维护、扩展和验证 |
+
+两套指南按 2026-10-23 当前实现整理，建议新读者从这里开始。下列 `versions/` 保存历史接口和实际证据，`planning/` 保存计划与设计快照；它们的目录编号不等于当前软件包版本。
+
+## 版本状态与历史资料
+
+2026-10-23 后续补验：[真实 BGE 托管链路](versions/v0.9/managed-embedding-live-report.md)已完成新下载、SHA-256 清单登记及新进程离线 CPU 推理；512 维有限归一化向量、重复 query 一致、网络尝试 0。模型已迁入 `data/models/bge-small-zh-v1.5` 并由本地配置启用，内置默认未改，权重不随 Git 分发；使用与实现分别见[用户维护指南](user-guide/maintenance.md)和[开发者存储指南](developer-guide/storage-and-maintenance.md)。下述原集中批次的 BGE 缺项已补齐，物理桌面交互仍未验收。
+
+2026-10-23 产品化补齐：首次配置/系统凭据、语义检索缓存、失败指引、协调四库备份恢复已完成开发及集中自动化修补复测；原集中批次为 **主环境去重 1,289 passed / 2 skipped / 0 failed，兼容环境 169 passed / 1 skipped，strict 145 文件通过**。后续 BGE 实测见上段；物理桌面交互和 symlink 权限边界继续保留。阅读[测试记录](versions/v0.9/test-report.md)、[开发记录](versions/v0.9/development-status.md)、[接口](versions/v0.9/interfaces.md)、[操作说明](versions/v0.9/operations.md)、[开发计划](planning/v0.9/productization-development-plan.md)和[最小 P01–P08](planning/v0.9/productization-minimal-test-plan.md)。隔离执行/强制停止、精细授权及有限无人值守执行移至正式版后，旧实验不恢复。
 
 当前代码为 **0.5.0rc1**，加入 GUI 与后台交互；V0.4 持久后端继续保留。候选版实际范围与验收缺项见 [V0.5 状态](versions/v0.5/delivery.md)和[测试报告](versions/v0.5/test-report.md)；历史报告只说明当时证据，规划不是验收结果。
 
-**切换聊天：**V0.6 以[2026-10-19 14:57 暂停检查点](versions/v0.6/pause-checkpoint-2026-10-19-1457.md)和[执行环境架构重评](versions/v0.6/execution-environment-architecture-review-2026-10-19.md)为最新边界；阶段0仍未通过，尚未接入生产执行，不恢复封存实验。更早的[交接](handoffs/2026-10-17-v0.6.md)和恢复记录仅作历史参考。
+**GUI 任务工作方式交接：**见[2026-10-24 交接](handoffs/2026-10-24-gui-refactor.md)，只传达 Agent 分工、模型与思考强度、开发/测试分阶段、整合审查及 Git 约定；不规定 GUI 如何重构。
+
+**2026-10-25 桌宠 GUI 重构设计：**从[设计总览](planning/gui-refactor/README.md)开始，按需阅读[产品与交互](planning/gui-refactor/product-design.md)、[页面与状态细则](planning/gui-refactor/page-and-state-spec.md)、[前后端技术方案](planning/gui-refactor/technical-plan.md)、[实施与验收计划](planning/gui-refactor/implementation-and-acceptance.md)。覆盖持久日常/专项会话、对话内授权、统一设置、桌宠缩放和小对话窗、提醒到期展示，包含用户确认的风格和交互选择。按用户最新要求，本次仅完成文档；未修改生产代码，未执行产品测试。
+
+同日第二轮修订：[默认云模型、设置密钥、头像/静态形象与工具插件扩展](planning/gui-refactor/settings-assets-and-tools.md)。界面统一“聊天”，会话栏仅聊天页出现，所有配置入口集中设置；新增 G16–G21 验收要求。生产功能仍处于设计阶段。
+
+**V0.6 切换聊天：**V0.6 以[2026-10-19 14:57 暂停检查点](versions/v0.6/pause-checkpoint-2026-10-19-1457.md)和[执行环境架构重评](versions/v0.6/execution-environment-architecture-review-2026-10-19.md)为最新边界；阶段0仍未通过，尚未接入生产执行，不恢复封存实验。更早的[交接](handoffs/2026-10-17-v0.6.md)和恢复记录仅作历史参考。
 
 2026-10-21：V0.7「静态图片桌宠表现层」已实现，按用户要求带未决项[归档](versions/v0.7/delivery.md)，未全部验收通过；Live2D 延至正式版后的更新。[验收边界](planning/v0.7/acceptance-boundaries.md)、[开发计划](planning/v0.7/development-plan.md)和[环境评估](planning/v0.7/environment-assessment.md)记录范围，[接口](versions/v0.7/interfaces.md)、[运行说明](versions/v0.7/operations.md)和[测试报告](versions/v0.7/test-report.md)记录实现及证据。[内存简析](versions/v0.7/memory-review-2026-10-21.md)与[后续测试清单](versions/v0.7/deferred-tests.md)保留收尾判断和未执行项。原 Live2D 提案/调研保留为历史；不改变0.5.0rc1版本或V0.6暂停状态。
 
@@ -35,6 +54,10 @@
 ```text
 docs/
   README.md                         文档入口
+  user-guide/                       当前用户指南，按使用任务拆分
+    README.md                       安装、操作与维护阅读入口
+  developer-guide/                  当前开发者指南，按实现主题拆分
+    README.md                       文件架构、代码与扩展阅读入口
   guides/
     development.md                  跨版本开发约定
     dependencies.md                 依赖分组、安装与维护

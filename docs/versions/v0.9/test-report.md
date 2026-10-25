@@ -1,5 +1,7 @@
 # 产品化补齐：集中测试记录
 
+后续补验：用户另行授权的[真实 BGE 托管准备与离线 CPU 链路](managed-embedding-live-report.md)已通过（真实新下载、清单复核、CPU 512 维向量、离线网络尝试 0）。以下“真实模型未验证”等描述保留为原集中批次当时的范围；后续证据以该补验报告为准，GUI 物理桌面及 symlink 权限边界继续保留。
+
 日期：2026-10-23。状态：**本轮集中自动化完成，首败已修补并复测；主环境去重 1,289 passed / 2 skipped / 0 failed，Python 3.11 兼容 169 passed / 1 skipped。** 原生 Windows 锁、专用随机假凭据和 strict 通过；真实模型下载/实际 CPU 推理、物理桌面交互及两个 symlink 创建用例未验收。依据[最小 P01–P08](../../planning/v0.9/productization-minimal-test-plan.md)，不宣称整个版本或发布验收通过，Git 由用户提交。
 
 ## 范围与证据

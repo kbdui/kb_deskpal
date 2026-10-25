@@ -1,5 +1,7 @@
 # Deskpal 架构
 
+按主题阅读当前实现，请从[开发者指南](docs/developer-guide/README.md)进入，其中包含[仓库文件导航](docs/developer-guide/repository-map.md)、[核心代码说明](docs/developer-guide/modules.md)和[请求生命周期](docs/developer-guide/request-lifecycle.md)。面向实际操作的说明见[用户指南](docs/user-guide/README.md)。
+
 2026-10-23 产品化增量：新增 Qt-free `maintenance`（配置、模型缓存、四库归档恢复）和 `credentials`。独立维护阶段不构造生产 Core；GUI `DesktopLauncher` 等待 Host/桌宠完整结束后才能进入维护，并等待维护 worker 真正退出再重开应用。配置采用文件 CAS 与原文保留；FastEmbed 持共享缓存 OS 租约，准备/清理持独占租约；备份与恢复使用既有 data_dir 实例锁。生产工厂在构造四库前检查恢复标记，避免初始化半成品。见[实际接口](docs/versions/v0.9/interfaces.md)、[开发记录](docs/versions/v0.9/development-status.md)及[集中测试记录](docs/versions/v0.9/test-report.md)。隔离执行/精细授权/无人值守执行已按用户决定延至正式版后，不扩大现有工具权限。
 
 2026-10-22：拟人化增量已完成 H0–H5 源码整合和 H6 验收准备，并获用户授权集中测试。新增进程内有界 conversation、独立 response、用途化模型网关和工作库 schema 2；规划与表达保留不同来源投影，遗忘控制入口先持久阻断再清理。云默认仍仅固定预设，显式字段许可与来源用途共同决定新增表达数据。当前实现、迁移和与原提案的调整见[开发记录](docs/versions/v0.8/humanization-development-status.md)，[最小验收](docs/planning/v0.8/humanization-minimal-test-plan.md)的首败、修补和实际限制见[本轮测试报告](docs/versions/v0.8/humanization-test-report.md)；真实模型体验未通过。下文 V0.8 最小版段落保留历史边界，不能将旧测试结论推广到本轮代码。

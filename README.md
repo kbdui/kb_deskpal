@@ -1,6 +1,18 @@
 # Personal AI Agent Desktop Companion — V0.5 候选版
 
-2026-10-23：首次配置向导、可选 Windows 系统凭据、语义检索模型缓存管理、固定失败指引和四库备份/可续办恢复已完成本轮开发及集中自动化修补复测，**主环境去重 1,289 项通过、2 项权限跳过，兼容环境 169 项通过**；真实模型下载/实际推理及物理桌面交互未验收。见[测试记录](docs/versions/v0.9/test-report.md)、[开发记录](docs/versions/v0.9/development-status.md)、[操作说明](docs/versions/v0.9/operations.md)与[最小测试清单](docs/planning/v0.9/productization-minimal-test-plan.md)。隔离执行、细粒度授权和有限无人值守执行按用户决定移至正式版后；产品版本未调整，发布和稳定性门槛仍需单独验收。
+## 使用与开发文档
+
+- **用户**：从[用户指南](docs/user-guide/README.md)开始，按安装、配置、桌面操作、任务授权、记忆隐私和数据维护分篇查阅。
+- **开发者**：从[开发者指南](docs/developer-guide/README.md)开始，查阅文件架构、核心代码、执行链路、GUI、存储、扩展和验证说明。
+- **版本与证据**：[文档总导航](docs/README.md)保留各版本接口、计划、测试和交付记录。
+
+两套指南按 2026-10-23 当前代码整理；下文版本状态保留实现与验收边界。
+
+## 当前状态
+
+后续补验已通过：[真实 BGE 下载、托管登记、新进程离线 CPU 推理](docs/versions/v0.9/managed-embedding-live-report.md)，512 维向量有效且归一化，离线网络尝试为 0。模型现位于 `data/models/bge-small-zh-v1.5`，本地 `config.toml` 已启用引用，使用 `deskpal_env` 无需再次下载；内置默认未改，真实配置和模型不随 Git 分发。使用见[用户维护指南](docs/user-guide/maintenance.md)，装配与验证见[开发者指南](docs/developer-guide/storage-and-maintenance.md)。GUI 物理桌面交互仍单独验收。
+
+2026-10-23：首次配置向导、可选 Windows 系统凭据、语义检索模型缓存管理、固定失败指引和四库备份/可续办恢复已完成开发及集中自动化修补复测，原集中批次为 **主环境去重 1,289 项通过、2 项权限跳过，兼容环境 169 项通过**；后续 BGE 实测见上段，物理桌面交互仍未验收。见[测试记录](docs/versions/v0.9/test-report.md)、[开发记录](docs/versions/v0.9/development-status.md)、[操作说明](docs/versions/v0.9/operations.md)与[最小测试清单](docs/planning/v0.9/productization-minimal-test-plan.md)。隔离执行、细粒度授权和有限无人值守执行按用户决定移至正式版后；产品版本未调整，发布和稳定性门槛仍需单独验收。
 
 Windows 个人智能 Agent 桌宠项目。当前版本 **0.5.0rc1**：在既有持久任务、来源化记忆、目标与本地提议后端上，加入 Qt Widgets 主窗口、后台交互、准确授权、托盘与通知。Python 3.11+。实机验收缺项见 [V0.5 状态](docs/versions/v0.5/delivery.md)，不宣称全部版本门槛已通过。
 

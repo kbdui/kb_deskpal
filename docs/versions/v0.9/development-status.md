@@ -1,5 +1,7 @@
 # 产品化补齐：开发记录
 
+后续补验：用户已另行授权并通过[真实 BGE 托管下载、离线加载与 CPU 向量生成](managed-embedding-live-report.md)。新增可复现诊断 `scripts/check_managed_embedding.py`，未改生产 API；下文原交接阶段的“未验证真实模型”范围由此补充，GUI 物理桌面和发布验收仍独立保留。
+
 日期：2026-10-23。状态：**源码整合和集中自动化修补复测完成；主环境 1,289 passed / 2 skipped / 0 failed，兼容环境 169 passed / 1 skipped，strict 145 文件通过。** 真实模型/物理桌面与符号链接权限边界见[测试记录](test-report.md)，不宣称完整版本验收。产品版本仍为 `0.5.0rc1`，Git 由用户提交。
 
 ## 本轮范围

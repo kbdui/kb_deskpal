@@ -1,12 +1,21 @@
 # 中文 Embedding 安装与运行
 
-2026-10-23 新增维护入口：GUI“配置与数据维护”或 CLI `--maintenance cache_status/cache_verify/cache_prepare/cache_clear` 支持托管准备、明确下载许可、离线验证、带 revision 的自有资产清理及使用中租约保护，见[产品化操作说明](../versions/v0.9/operations.md)。新增维护流程已有 fake SDK、实际文件硬链接和 Windows 原生锁验证，见[测试记录](../versions/v0.9/test-report.md)；本次未执行真实模型下载和实际 CPU 推理，下文 2026-10-15 的 adapter 实测不能代替新增维护端到端证据。旧脚本产生的非托管缓存可验证，不能直接当作有清理资格的托管目录。
+2026-10-23 新增维护入口：GUI“配置与数据维护”或 CLI `--maintenance cache_status/cache_verify/cache_prepare/cache_clear` 支持托管准备、明确下载许可、离线验证、带 revision 的自有资产清理及使用中租约保护，见[产品化操作说明](../versions/v0.9/operations.md)。继 fake SDK、硬链接及 Windows 原生锁测试后，已补齐[真实托管 BGE 链路](../versions/v0.9/managed-embedding-live-report.md)：从新缓存下载约 95 MB 模型、发布清单并复核 SHA-256、新进程离线 CPU 生成 512 维归一化向量，网络尝试为零。此证据不包含 GUI 物理桌面交互。旧脚本产生的非托管缓存可验证，不能直接当作有清理资格的托管目录。
 
 更新：2026-10-15，对应 0.3.0。实际 adapter 已接入 **BAAI/bge-small-zh-v1.5 + FastEmbed 0.9.0 CPU**，真实推理已在 Windows Python 3.12 验证。Python 3.11 的离线回归不代表该环境的真实模型验收。完整效果、性能与发布门槛见 [V0.3 测试报告](../versions/v0.3/test-report.md)。
 
 ## 依赖与缓存是两步
 
-模型用于向量检索，不是聊天 LLM。运行使用 ONNX Runtime CPU，无需 PyTorch/CUDA、独立 Qdrant 服务；默认 embedding 关闭，基础 CLI/记忆不需要安装此组。
+模型用于向量检索，不是聊天 LLM。运行使用 ONNX Runtime CPU，无需 PyTorch/CUDA、独立 Qdrant 服务。内置默认与公开样例仍关闭 embedding；当前工作区的本地 `config.toml` 已启用 `fastembed` 并引用 `data/models/bge-small-zh-v1.5`，原 `data/models/fastembed` 旧缓存保留。这些模型权重和真实配置不随 Git 分发。
+
+当前模型已从诊断目录迁入应用目录并通过[新路径验证](../versions/v0.9/managed-embedding-live-report.md)。已有环境使用 `conda activate deskpal_env`，无需重新下载；先完全退出同 data_dir 的应用，再运行：
+
+```powershell
+python -m deskpal --config config.toml --maintenance cache_status
+python -m deskpal --config config.toml --maintenance cache_verify
+```
+
+以下安装步骤供新环境使用。沿用当前启用 BGE 的配置时必须具备 embedding 依赖；只安装基础或 GUI 分组不会安装它，缺依赖时回退词法检索。
 
 ```powershell
 conda activate deskpal_env
@@ -17,7 +26,11 @@ python -m pip check
 
 [Windows CPython 3.12 约束](../../constraints/windows-py312.txt)记录 44 项观察版本，涵盖项目开发/截图/embedding、tzdata 和构建工具；不是带哈希锁，也不保证跨平台或 Python 3.11 相同解析。其他目标环境需重新核验，见[依赖指南](dependencies.md)。模型权重独立于 pip 安装。
 
-首次准备模型需要操作者明确允许联网运行下载脚本：
+新机器没有模型时，可经 GUI 维护或 `--maintenance cache_prepare` 明确允许下载，先保存一个空/不存在的缓存路径，见[用户维护步骤](../user-guide/maintenance.md)。已有托管模型使用 `cache_verify`，不要重复准备非空目录。
+
+开发者重新验证托管维护完整链路可运行 `python scripts/check_managed_embedding.py --root <不存在的专用目录> --allow-download`（父目录须已存在）；此脚本会下载真实模型并生成独立证据，不自动修改应用配置。模型仍留在该诊断 root 时，使用同一 root 加 `--offline` 可只复查。本次模型已搬出旧 `live-escalated`，不能再用旧 root 复查；也不要把应用缓存路径直接用作诊断 `--root`。脚本不读个人配置/凭据、不安装依赖，详见[真实链路报告](../versions/v0.9/managed-embedding-live-report.md)。
+
+下列旧脚本只验证 adapter，不生成托管清单；无缓存时默认允许下载：
 
 ```powershell
 python scripts/check_embedding.py
@@ -29,7 +42,7 @@ python scripts/check_embedding.py
 python scripts/check_embedding.py --offline
 ```
 
-`--offline` 仅允许缓存。本轮模型来自已有缓存，无须再次下载。运行应用的 `FastEmbedProvider` **始终** `local_files_only=True`；没有缓存或缺依赖时返回警告并走词法，不静默下载。另在新进程拦截 socket connect/connect_ex/create_connection，真实模型加载、512维查询、SQLite检索/删除通过，network_attempts=0；这不是物理断网抓包审计，详见版本测试报告。
+旧脚本的 `--offline` 仅允许缓存，默认路径仍为旧 `data/models/fastembed`；若检查当前应用资产，须再加 `--cache-dir data/models/bge-small-zh-v1.5`，完整托管校验优先使用维护入口。运行应用的 `FastEmbedProvider` **始终** `local_files_only=True`；没有缓存或缺依赖时返回警告并走词法，不静默下载。历史 V0.3 的新进程真实推理、检索/删除证据见对应版本报告；当前托管链路与迁移后验证另见上方报告，网络 guard 证据均不等同物理断网抓包。
 
 ## 启用与维护
 
@@ -37,12 +50,12 @@ python scripts/check_embedding.py --offline
 [memory]
 mode = "explicit_only"
 embedding_provider = "fastembed"
-model_cache_dir = "data/models/fastembed"
+model_cache_dir = "data/models/bge-small-zh-v1.5"
 semantic_threshold = 0.55
 max_context_bytes = 8000
 ```
 
-model_cache_dir 按配置文件所在目录解析。启动使用 CPUExecutionProvider、默认四线程、512 维与小批量，无多进程模型池。首次检索可增量构建缺失的当前 revision 索引；也可显式执行：
+以上与当前本地启用值一致；合并到已有 `[memory]` 表，不要重复声明表头。`model_cache_dir` 按配置文件所在目录解析，代码未改内置默认路径。启动使用 CPUExecutionProvider、默认四线程、512 维与小批量，无多进程模型池。首次检索可增量构建缺失的当前 revision 索引；也可显式执行：
 
 ```powershell
 python -m deskpal --config config.toml --memory rebuild-index
