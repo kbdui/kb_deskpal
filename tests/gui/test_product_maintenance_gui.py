@@ -35,6 +35,12 @@ class ControlledBridge(QObject):
         self.calls.append((request_id, operation, dict(parameters or {}), generation))
         return request_id
 
+    def send_sensitive(self, operation, parameters, *, credential_secret=None, generation=0):
+        payload = dict(parameters)
+        if credential_secret is not None:
+            payload["credential_secret"] = credential_secret
+        return self.send(operation, payload, generation=generation)
+
     def complete(self, data):
         request_id, operation, _, generation = self.calls[-1]
         self.busy = False
@@ -329,10 +335,31 @@ def test_authoritative_start_gate_can_reject_otherwise_valid_config(qtbot):
     window.open()
     bridge.complete(status(can_start=False))
     assert not window.start_button.isEnabled()
+    assert not window.browse_button.isEnabled()
     window._start()
     assert len(bridge.calls) == 1
     window.close()
     bridge.stopped.emit()
+
+
+def test_secret_is_cleared_when_leaving_model_section(qtbot):
+    bridge = ControlledBridge()
+    window = MaintenanceWindow(bridge)
+    qtbot.addWidget(window)
+    window.secret.setText("synthetic-test-secret")
+    window.tabs.setCurrentIndex(1)
+    assert window.secret.text() == ""
+    assert not window.show_secret.isChecked()
+    window.close()
+    bridge.stopped.emit()
+
+
+def test_generic_maintenance_channel_rejects_secret_fields(qtbot, tmp_path):
+    bridge = MaintenanceBridge(tmp_path / "synthetic.toml")
+    with pytest.raises(ValueError, match="dedicated sensitive"):
+        bridge.send("setup_save", {"credential_secret": "synthetic-test-secret"})
+    assert not bridge.busy and bridge._thread is None
+    bridge.shutdown()
 
 
 @pytest.mark.parametrize("provider_override", [None, "offline"])

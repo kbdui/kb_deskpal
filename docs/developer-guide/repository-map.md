@@ -56,7 +56,7 @@ kb_deskpal/
 - 授权后行为不符：`agent/core.py`、`workflow/journal.py`、`tools/manager.py`、`sandbox/workspace.py`。
 - 重启后任务状态异常：`workflow/journal.py`、`application/service.py`、`application/dispatcher.py`。
 - 记忆、历史或风格数据出云范围：`application/interaction.py`、`application/privacy.py`、`llm/calls.py`、`memory/contracts.py`。
-- GUI 旧回调覆盖新状态：`gui/bridge.py`、`gui/viewmodels.py`、`gui/conversation_state.py`、`gui/companion_state.py`。
+- GUI 旧回调覆盖新状态：`gui/bridge.py`、`gui/channel.py`、`gui/chat.py`、`gui/interaction_state.py`、`gui/companion_state.py`。
 - 配置/备份/缓存故障：`maintenance/setup.py`、`maintenance/archives.py`、`maintenance/cache.py`、`memory/cache_lock.py`。
 
 继续阅读[架构与设计边界](architecture.md)和[模块代码说明](modules.md)。

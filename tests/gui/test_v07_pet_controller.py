@@ -12,6 +12,7 @@ from deskpal.gui.preferences import GuiPreferences
 
 class Bridge(QObject):
     reply = Signal(object)
+    image_reply = Signal(object)
     state_changed = Signal(str)
     privacy_changed = Signal(int)
     state = "Ready"
@@ -21,6 +22,9 @@ class Bridge(QObject):
         super().__init__()
         self.calls = []
         self.full = False
+
+    def send_image(self, operation, parameters, generation=0):
+        return self.send(operation, parameters, generation=generation)
 
     def send(self, operation, parameters, *, generation=0):
         if self.full:
@@ -102,8 +106,8 @@ def test_t02_baseline_dedup_restore_freshness_and_priority(qtbot, tmp_path):
         clock[0] += 4
         pet._expire()
         assert pet.status == "Unknown"
-        # Both v0.8 reads are permitted; submit, confirm and tool execution are not.
-        assert {item[1] for item in bridge.calls} == {"presentation", "companion"}
+        # Presentation/companion metadata and appearance profiles are read-only; no submission or tool execution.
+        assert {item[1] for item in bridge.calls} == {"presentation", "companion", "appearance_snapshot"}
         assert all(parameters == {} for _, _, parameters, _ in bridge.calls)
     finally:
         dispose(qtbot, pet)
@@ -168,7 +172,7 @@ def test_t02_hidden_inflight_receipt_clears_without_reviving_old_generation(qtbo
         prefs.set_pet_enabled(True)
         qtbot.waitUntil(lambda: pet.settled)
         pet.poll_timer.stop()
-        old_receipt, _, _, old_generation = bridge.calls[-1]
+        old_receipt, _, _, old_generation = next(call for call in bridge.calls if call[0] == pet._request)
         prefs.set_pet_visible(False)
         prefs.set_pet_visible(True)
         pet.poll_timer.stop()
@@ -177,7 +181,7 @@ def test_t02_hidden_inflight_receipt_clears_without_reviving_old_generation(qtbo
         assert pet._request is None and pet.status == "Unknown"
         pet.poll()
         assert pet._request != old_receipt
-        assert bridge.calls[-1][3] != old_generation
+        assert next(call[3] for call in bridge.calls if call[0] == pet._request) != old_generation
         deliver(pet, bridge, "Running", sequence=2, revision=2)
         assert pet.status == "Running"
     finally:

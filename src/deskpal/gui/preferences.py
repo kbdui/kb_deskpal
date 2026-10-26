@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+
 from PySide6.QtCore import QObject, QSettings, Signal
 
 
@@ -24,6 +26,7 @@ class GuiPreferences(QObject):
         "pet_x": "pet/x",
         "pet_y": "pet/y",
         "pet_screen": "pet/screen",
+        "pet_scale": "pet/scale",
     }
 
     def __init__(self, settings: QSettings | None = None, parent: QObject | None = None):
@@ -109,6 +112,29 @@ class GuiPreferences(QObject):
     @property
     def pet_click_through(self) -> bool:
         return self._bool("pet_click_through", False)
+
+    @property
+    def pet_scale(self) -> float:
+        raw = self._value("pet_scale", 1.0)
+        if isinstance(raw, bool) or not isinstance(raw, (str, int, float)):
+            return 1.0
+        try:
+            value = float(raw)
+        except (TypeError, ValueError, OverflowError):
+            return 1.0
+        return value if math.isfinite(value) and .6 <= value <= 1.6 else 1.0
+
+    def set_pet_scale(self, value: float) -> bool:
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return False
+        try:
+            normalized = float(value)
+        except (ValueError, OverflowError):
+            return False
+        if not math.isfinite(normalized) or not .6 <= normalized <= 1.6:
+            return False
+        self._set("pet_scale", round(normalized, 3))
+        return True
 
     def _set_pet_bool(self, key: str, value: bool) -> bool:
         if not isinstance(value, bool):

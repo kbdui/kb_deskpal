@@ -1,10 +1,10 @@
 # 数据维护
 
-GUI 从“配置与数据维护”进入独立维护阶段；会先等待应用、桌宠和工作线程完全退出。CLI 的 `--maintenance` 不构造生产 Core，也不需要 Qt。
+GUI 从“设置 → 数据与高级”进入独立维护阶段；会先等待应用、桌宠、小窗和工作线程完全退出。CLI 的 `--maintenance` 不构造生产 Core，也不需要 Qt。
 
 ## 本地数据放在哪里
 
-默认数据目录下有 `workflow.sqlite3`、`memory.sqlite3`、`scheduling.sqlite3`、`companion.sqlite3` 和 `execution.jsonl`。工具文件在工作区目录；GUI 偏好通过 QSettings 保存；配置、`.env`、凭据和模型缓存各有独立位置。
+默认数据目录下有 `workflow.sqlite3`、`memory.sqlite3`、`scheduling.sqlite3`、`companion.sqlite3`、托管静态图片 `assets/` 和 `execution.jsonl`。工具文件在工作区；GUI 偏好通过 QSettings 保存；配置、`.env`、凭据和模型缓存各有独立位置。
 
 备份前先正常启动一次应用再退出，初始化工作库。同一数据目录正被 GUI/CLI 使用时会拒绝维护，不要绕过实例锁复制运行中的单个数据库。
 
@@ -54,7 +54,9 @@ python -m deskpal --maintenance backup_create --config config.toml --maintenance
 
 | 备份包含 | 需要另行保存 |
 | --- | --- |
-| workflow、memory、scheduling、companion 四库和 manifest；旧数据无 companion 时明确记录缺失 | 工作区原文件、TOML、`.env`、系统凭据、模型缓存、JSONL 日志、GUI 偏好 |
+| workflow、memory、scheduling、companion 四库、当前头像/桌宠托管 PNG 和 manifest；旧数据无 companion 时明确记录缺失 | 工作区原文件、TOML、`.env`、系统凭据、模型缓存、JSONL 日志、GUI 偏好 |
+
+本轮源码使用格式 2，图片与数据库在同一静止点保存，恢复先校验全部引用再允许启动；仍可读取旧格式 1 四库归档，旧归档没有图片时回退内置默认。跨机器恢复需要重新配置密钥。本轮格式演进待集中测试，旧格式历史测试结论不覆盖它。
 
 归档未加密、未签名，包含私人记忆、任务、来源和删除工作单。完整性 hash 不能证明归档来源可信，恢复时只选择可信归档。
 

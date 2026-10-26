@@ -134,13 +134,15 @@ class NotificationController(QObject):
         entity_id = item.get("entity_id", item.get("id"))
         revision = item.get("revision")
         status = item.get("status")
-        if kind not in {"task", "proposal"} or not isinstance(entity_id, str) or not entity_id:
+        if kind not in {"task", "proposal", "reminder"} or not isinstance(entity_id, str) or not entity_id:
             return None
         if len(entity_id) > 512 or isinstance(revision, bool) or not isinstance(revision, int) or revision < 0:
             return None
         if kind == "task" and status not in self._TASK_STATUSES:
             return None
         if kind == "proposal" and status != "Pending":
+            return None
+        if kind == "reminder" and status not in {"due", "missed"}:
             return None
         return kind, entity_id, revision
 

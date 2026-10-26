@@ -13,8 +13,11 @@ from uuid import uuid4
 
 from deskpal.agent.core import AgentCore
 from deskpal.agent.models import AgentResult
+from deskpal.assets import AssetDecoder, AssetService
+from deskpal.assets.models import AssetPreview
 from deskpal.config import AppConfig
 from deskpal.conversation.runtime import ConversationRuntime
+from deskpal.conversation.repository import ConversationRepository
 from deskpal.execution_log import ExecutionLog
 from deskpal.goals import GoalManager
 from deskpal.memory.contracts import DeletionReceipt, MemoryItem, MemoryRuntime, MemoryStatus
@@ -32,6 +35,10 @@ from .dispatcher import SubmissionDispatcher
 from .effects import CompanionEffects
 from .interaction import InteractionCoordinator
 from .privacy import PrivacyCoordinator
+from .conversation_service import ConversationService
+from .reminders import ReminderInbox, ReminderPump
+from .task_review import TaskReviewService, required_permissions
+from .tool_catalog import ToolCatalog
 
 
 class ApplicationService:
@@ -44,6 +51,7 @@ class ApplicationService:
         if runtime is None:
             raise ValueError("A persistent application requires MemoryRuntime")
         self.config, self.core, self.store = config, core, store
+        self.assets = AssetService(store, config.storage.data_dir)
         self.tasks, self.journal = tasks, journal
         self.scheduling, self.goals, self.proposals, self.rules = scheduling, goals, proposals, rules
         self.tools, self.memory = core.tools, core.memory
@@ -65,11 +73,13 @@ class ApplicationService:
         self._cleanup_lock = RLock()
         self._humanization = HumanizationStore(store)
         self._privacy = PrivacyCoordinator(self._humanization, journal)
-        self._conversations = ConversationRuntime()
+        self._conversation_repository = ConversationRepository(store)
+        self._conversation_repository.ensure_default()
+        self._conversations = ConversationRuntime(repository=self._conversation_repository)
         self._interaction = InteractionCoordinator(persistence=self._humanization,
             privacy=self._privacy, conversations=self._conversations, tasks=tasks,
             memory=runtime, companion=core.companion_runtime, provider=core.llm,
-            cloud=config.llm.provider != "offline")
+            cloud=config.llm.is_cloud)
         self._effects = CompanionEffects(self._humanization, self._privacy, core.companion_runtime,
             should_stop=lambda: self._closing or self._cleanup_pending)
         core.attach_interaction(self._interaction)
@@ -77,6 +87,16 @@ class ApplicationService:
         journal.add_validator(proposals.validate_task)
         self._dispatcher = SubmissionDispatcher(core, tasks, journal,
             guard=self.execution_guard, on_idle=self._maintenance)
+        self._conversation_service = ConversationService(self._conversation_repository,
+            self._conversations, tasks, self._privacy, self._dispatcher, core.revoke_pending,
+            self._interaction.discard_tasks)
+        self._task_review = TaskReviewService(self)
+        self._tool_catalog = ToolCatalog(self.tools)
+        self._reminders = ReminderInbox(store, scheduling)
+        self._reminder_pump = ReminderPump(self._reminders)
+        observe = getattr(self.tools, "set_result_observer", None)
+        if callable(observe):
+            observe(self._reminders.register_result)
         # Resume deletion before recovery can expose a persisted request/plan.
         self._cleanup_pending = False
         self._retry_deletions()
@@ -88,12 +108,14 @@ class ApplicationService:
         if self._started or self._cleanup_pending:
             return
         try:
+            self._reminder_pump.start()
             if self.config.proactive.enabled:
                 self._rule_thread = Thread(target=self._poll_rules, name="deskpal-proposals", daemon=True)
                 self._rule_thread.start()
             self._dispatcher.start()
             self._started = True
         except BaseException:
+            self._reminder_pump.shutdown(self.config.workflow.shutdown_timeout_seconds)
             self._rule_stop.set()
             if self._rule_thread is not None and self._rule_thread.is_alive():
                 self._rule_thread.join()
@@ -106,6 +128,126 @@ class ApplicationService:
     def _open(self) -> None:
         if self._closed or self._closing:
             raise RuntimeError("Application is closed or closing")
+
+    def configure_asset_decoder(self, decoder: AssetDecoder) -> None:
+        """Inject the optional codec from the GUI initialization worker."""
+        self._open()
+        self.assets.set_decoder(decoder)
+
+    def appearance_snapshot(self) -> dict[str, Any]:
+        self._ready()
+        return {"profiles": [asdict(profile) for profile in self.assets.snapshot()]}
+
+    def asset_import_prepare(self, path: str, slot: str, generation: int) -> Any:
+        self._ready()
+        if not isinstance(path, str) or not path:
+            raise ValueError("A local image path is required")
+        return self.assets.prepare(Path(path), slot, generation=generation)
+
+    def appearance_apply(self, slot: str, token: str, expected_revision: int, generation: int,
+                         display_mode: str = "contain", crop: tuple[float, float, float, float] | None = None) -> Any:
+        self._ready()
+        return self.assets.apply(slot, token, expected_revision, generation=generation,
+                                 display_mode=display_mode, crop=crop)
+
+    def appearance_reset(self, slot: str, expected_revision: int) -> Any:
+        self._ready()
+        return self.assets.reset(slot, expected_revision)
+
+    def asset_import_discard(self, token: str) -> dict[str, Any]:
+        self._ready()
+        return {"discarded": self.assets.discard(token)}
+
+    def asset_collect(self, limit: int = 32) -> Any:
+        self._ready()
+        return self.assets.collect(limit=limit)
+
+    def asset_preview(self, **parameters: Any) -> AssetPreview:
+        """Private local image channel; bytes never enter DesktopFacade JSON."""
+        self._ready()
+        return self.assets.preview(**parameters)
+
+    def task_review(self, task_id: str) -> dict[str, Any]:
+        self._ready()
+        return self._task_review.review(task_id)
+
+    def task_page(self, *, offset: int = 0, limit: int = 50) -> dict[str, Any]:
+        """Bounded human-readable cards, without materializing Task bodies."""
+        self._ready()
+        with self.store.read_connection() as connection:
+            self.store.check_privacy(connection)
+            result = self.tasks.page_summaries(offset=offset, limit=limit)
+            for item in result["items"]:
+                row = connection.execute("SELECT CASE WHEN t.scrubbed=1 THEN '已清理任务' ELSE substr(t.request,1,120) END AS title,r.conversation_id FROM task t LEFT JOIN turn_ref r ON r.task_id=t.id WHERE t.id=?", (item["id"],)).fetchone()
+                assert row is not None
+                item.update(title=row["title"], conversation_id=row["conversation_id"])
+            return result
+
+    def task_updates(self, task_ids: list[str], known_revisions: dict[str, int] | None = None) -> dict[str, Any]:
+        self._ready()
+        return self._task_review.updates(task_ids, known_revisions)
+
+    def tools_catalog(self, **parameters: Any) -> dict[str, Any]:
+        self._ready()
+        return self._tool_catalog.catalog(**parameters)
+
+    def tool_detail(self, id: str, catalog_revision: str | None = None) -> dict[str, Any]:
+        self._ready()
+        return self._tool_catalog.detail(id, catalog_revision=catalog_revision)
+
+    def plugins_catalog(self) -> dict[str, Any]:
+        self._ready()
+        return self._tool_catalog.plugins()
+
+    def reminder_feed(self, *, cursor: str | None = None, limit: int = 50, unread: bool = False) -> dict[str, Any]:
+        self._ready()
+        return self._reminders.feed(cursor=cursor, limit=limit, unread=unread)
+
+    def reminder_detail(self, id: str) -> dict[str, Any]:
+        self._ready()
+        return self._reminders.detail(id)
+
+    def reminder_ack(self, id: str, command_id: str) -> dict[str, Any]:
+        self._ready()
+        return self._reminders.ack(id, command_id)
+
+    def schedule_items(self, *, source: str = "all", offset: int = 0,
+                       limit: int = 50, status: str = "all") -> dict[str, Any]:
+        self._ready()
+        result = self.scheduling.page_items(source=source, offset=offset, limit=limit, status=status)
+        with self.store.read_connection() as connection:
+            self.store.check_privacy(connection)
+            for item in result["items"]:
+                row = connection.execute("SELECT t.scrubbed FROM desktop_resource_link r JOIN task t ON t.id=r.task_id WHERE r.source=? AND r.source_id=? AND r.store_id=? AND r.generation=?",
+                    (item["source"], item["source_id"], result["store_id"], result["generation"])).fetchone()
+                if row is not None and row[0]:
+                    item.update(title="已清理来源的日程" if item["source"] == "calendar" else "已清理来源的计时器",
+                        label="", redacted=True)
+        return {"schema_version": 1, **result}
+
+    def command_status(self, command_id: str) -> dict[str, Any]:
+        self._ready()
+        if not isinstance(command_id, str) or not command_id.strip() or len(command_id) > 200:
+            raise ValueError("A bounded command identity is required")
+        with self.store.read_connection() as connection:
+            self.store.check_privacy(connection)
+            command = connection.execute("SELECT task_id FROM command WHERE id=?", (command_id,)).fetchone()
+            receipt = connection.execute("SELECT * FROM conversation_receipt WHERE command_id=?", (command_id,)).fetchone()
+            if command is not None and receipt is not None and not (receipt["operation"] == "submit" and receipt["result_identity"] == command["task_id"]):
+                raise WorkflowBlocked("Command identity has conflicting operation namespaces")
+            if command is not None:
+                task = connection.execute("SELECT id,status,revision FROM task WHERE id=?", (command["task_id"],)).fetchone()
+                assert task is not None
+                return {"schema_version": 1, "command_id": command_id, "known": True, "accepted": True,
+                    "namespace": "workflow", "task_id": task["id"], "status": task["status"], "revision": task["revision"],
+                    "current_process_execution_authority": False}
+            if receipt is not None:
+                operation = receipt["operation"]
+                return {"schema_version": 1, "command_id": command_id, "known": True, "accepted": True,
+                    "namespace": "conversation", "operation": operation, "conversation_id": receipt["conversation_id"],
+                    "result_identity": receipt["result_identity"], "current_process_execution_authority": False}
+            return {"schema_version": 1, "command_id": command_id, "known": False, "accepted": False,
+                    "current_process_execution_authority": False}
 
     def _ready(self) -> None:
         self._open()
@@ -122,7 +264,7 @@ class ApplicationService:
         # release resources from under a tool still completing its current call.
         if self._cleanup_pending or self.journal.pending_deletions():
             raise WorkflowBlocked("Memory cleanup is pending")
-        if self.config.llm.provider != "offline" and self.tasks.task_use_policy(task_id) == "local_only":
+        if self.config.llm.is_cloud and self.tasks.task_use_policy(task_id) == "local_only":
             raise WorkflowBlocked("This source is local_only; cloud planning requires a new source version")
         snapshot = self.journal.get_plan(task_id)
         if snapshot is not None:
@@ -130,14 +272,33 @@ class ApplicationService:
 
     def submit(self, request: str, *, command_id: str | None = None,
                authorized_tools: Iterable[str] = (), high_risk_authorized_tools: Iterable[str] = (),
-               dependencies: tuple[Any, ...] = (), use_policy: str = "cloud_allowed",
+               dependencies: tuple[Any, ...] = (), use_policy: str | None = None,
                conversation_id: str | None = None,
-               expected_conversation_epoch: int | None = None) -> Task:
+               expected_conversation_epoch: int | None = None,
+               expected_context_epoch: int | None = None) -> Task:
         self._ready()
+        if not self.config.llm.ready:
+            raise WorkflowBlocked("模型连接尚未配置，请在设置 → 模型与连接中完成配置。")
+        resolved_policy = ("cloud_allowed" if self.config.llm.request_use_default else "local_only") if use_policy is None else use_policy
+        if expected_context_epoch is not None:
+            if expected_conversation_epoch is not None and expected_conversation_epoch != expected_context_epoch:
+                raise ValueError("Conflicting conversation context epochs")
+            expected_conversation_epoch = expected_context_epoch
         if (conversation_id is None) != (expected_conversation_epoch is None):
             raise ValueError("Conversation identity and expected epoch must be supplied together")
 
+        submission_command = str(uuid4()) if command_id is None else command_id
+
         def register(task: Task) -> None:
+            with self.store.read_connection() as connection:
+                receipt = connection.execute("SELECT operation,result_identity FROM conversation_receipt WHERE command_id=?", (submission_command,)).fetchone()
+                if receipt is not None and (receipt["operation"] != "submit" or receipt["result_identity"] != task.id):
+                    raise ValueError("Command ID already belongs to another application operation")
+            if conversation_id is not None:
+                assert expected_conversation_epoch is not None
+                self._conversation_repository.bind(task.id, conversation_id,
+                    expected_conversation_epoch, command_id=submission_command)
+                return
             prior = self._humanization.turn(task.id)
             identity = conversation_id or "single:" + task.id
             epoch = expected_conversation_epoch if expected_conversation_epoch is not None else 0
@@ -145,16 +306,16 @@ class ApplicationService:
                 if prior["conversation_id"] != identity or prior["epoch"] != epoch:
                     raise ValueError("Command retry cannot change its conversation")
                 return
-            sequence = self._conversations.reserve(identity, epoch) if conversation_id is not None else 1
+            sequence = 1
             self._humanization.bind_turn(task.id, identity, epoch, sequence)
             for role in ("user", "assistant"):
                 self.store.set_dependency_version("dialogue_turn", task.id + ":" + role,
-                    sequence, use_policy=use_policy)
+                    sequence, use_policy=resolved_policy)
 
-        return self._dispatcher.submit(request, command_id=str(uuid4()) if command_id is None else command_id,
+        return self._dispatcher.submit(request, command_id=submission_command,
             authorized_tools=AgentCore._authorization(authorized_tools),
             high_risk_authorized_tools=AgentCore._authorization(high_risk_authorized_tools),
-            dependencies=dependencies, use_policy=use_policy, register=register)
+            dependencies=dependencies, use_policy=resolved_policy, register=register)
 
     def run(self, request: str, *, authorized_tools: Iterable[str] = (),
             high_risk_authorized_tools: Iterable[str] = ()) -> AgentResult:
@@ -236,6 +397,52 @@ class ApplicationService:
     def conversation_open(self) -> dict[str, Any]:
         self._ready()
         return self._conversations.open()
+
+    def conversation_ensure_default(self, command_id: str | None = None) -> dict[str, Any]:
+        self._ready()
+        return self._conversation_repository.ensure_default(command_id)
+
+    def conversation_list(self, *, cursor: str | None = None, limit: int = 50,
+                          archived: bool = False) -> dict[str, Any]:
+        self._ready()
+        return self._conversation_repository.page(cursor=cursor, limit=limit, archived=archived)
+
+    def conversation_create(self, title: str, command_id: str) -> dict[str, Any]:
+        self._ready()
+        return self._conversation_repository.create(title, command_id)
+
+    def conversation_update(self, id: str, expected_revision: int, command_id: str, *,
+                            title: str | None = None, archived: bool | None = None) -> dict[str, Any]:
+        self._ready()
+        return self._conversation_repository.update(id, expected_revision, command_id, title=title, archived=archived)
+
+    def conversation_timeline(self, id: str, *, before: int | None = None,
+                              after: int | None = None, limit: int = 50,
+                              known_revision: int | None = None) -> dict[str, Any]:
+        self._ready()
+        return self._conversation_repository.timeline(id, before=before, after=after,
+            limit=limit, known_revision=known_revision)
+
+    def conversation_item(self, id: str, item_id: str, *, offset: int = 0,
+                          limit: int = 32768) -> dict[str, Any]:
+        self._ready()
+        return self._conversation_repository.detail(id, item_id, offset=offset, limit=limit)
+
+    def conversation_task_location(self, id: str, task_id: str) -> dict[str, Any]:
+        self._ready()
+        return self._conversation_repository.task_location(id, task_id)
+
+    def conversation_clear(self, id: str, expected_revision: int, command_id: str) -> dict[str, Any]:
+        self._ready()
+        return self._conversation_service.cleanup(id, expected_revision, command_id, delete=False)
+
+    def conversation_delete(self, id: str, expected_revision: int, command_id: str) -> dict[str, Any]:
+        self._ready()
+        return self._conversation_service.cleanup(id, expected_revision, command_id, delete=True)
+
+    def conversation_cleanup_status(self, job_id: str) -> dict[str, Any]:
+        self._ready()
+        return self._conversation_repository.cleanup_status(job_id)
 
     def conversation_snapshot(self, conversation_id: str) -> dict[str, Any]:
         self._ready()
@@ -363,26 +570,35 @@ class ApplicationService:
 
     def confirm_task(self, task_id: str, *, authorized_tools: Iterable[str] = (),
                      high_risk_authorized_tools: Iterable[str] = (),
-                     plan_hash: str | None = None) -> AgentResult:
+                     plan_hash: str | None = None, expected_revision: int | None = None) -> AgentResult:
         self.enqueue_confirmation(task_id, authorized_tools=authorized_tools,
-            high_risk_authorized_tools=high_risk_authorized_tools, plan_hash=plan_hash)
+            high_risk_authorized_tools=high_risk_authorized_tools, plan_hash=plan_hash,
+            expected_revision=expected_revision)
         return self.wait(task_id)
 
     def enqueue_confirmation(self, task_id: str, *, authorized_tools: Iterable[str] = (),
                              high_risk_authorized_tools: Iterable[str] = (),
-                             plan_hash: str | None = None, command_id: str | None = None) -> Task:
+                             plan_hash: str | None = None, command_id: str | None = None,
+                             expected_revision: int | None = None) -> Task:
         """Validate and queue grants; return without waiting for the unique worker."""
         self._ready()
         authorization = AgentCore._authorization(authorized_tools)
         high_risk = AgentCore._authorization(high_risk_authorized_tools)
-        if command_id is not None and (not isinstance(command_id, str) or not command_id.strip()):
-            raise ValueError("Confirmation command_id must be non-empty")
+        if not isinstance(task_id, str) or not task_id or len(task_id) > 200:
+            raise ValueError("Invalid task identity")
+        if command_id is not None and (not isinstance(command_id, str) or not command_id.strip() or len(command_id) > 200):
+            raise ValueError("Confirmation command_id must be bounded and non-empty")
+        if expected_revision is not None and (type(expected_revision) is not int or expected_revision < 1):
+            raise ValueError("Confirmation requires a positive task revision")
         with self._confirmation_lock:
             expected = plan_hash if plan_hash is not None else self._reviewed.get(task_id)
             fingerprint = sha256(canonical({"operation": "confirm", "task_id": task_id,
-                "plan_hash": expected, "ordinary": sorted(authorization), "high_risk": sorted(high_risk)}).encode()).hexdigest()
+                "plan_hash": expected, "expected_revision": expected_revision,
+                "ordinary": sorted(authorization), "high_risk": sorted(high_risk)}).encode()).hexdigest()
             if command_id is not None:
                 with self.store.transaction() as conn:
+                    if conn.execute("SELECT 1 FROM conversation_receipt WHERE command_id=?", (command_id,)).fetchone() is not None:
+                        raise ValueError("Command ID already belongs to another application operation")
                     previous = conn.execute("SELECT payload_hash,task_id FROM command WHERE id=?", (command_id,)).fetchone()
                     if previous is not None:
                         if previous["payload_hash"] != fingerprint or previous["task_id"] != task_id:
@@ -390,36 +606,61 @@ class ApplicationService:
                         task = self.tasks.get(task_id)
                         assert task is not None
                         return task
-            return self._enqueue_confirmation(task_id, authorization, high_risk, expected, command_id, fingerprint)
+            return self._enqueue_confirmation(task_id, authorization, high_risk, expected, command_id, fingerprint, expected_revision)
 
     def _enqueue_confirmation(self, task_id: str, authorization: frozenset[str], high_risk: frozenset[str],
-                              expected: str | None, command_id: str | None, fingerprint: str) -> Task:
-        with self._dispatcher.management():
+                              expected: str | None, command_id: str | None, fingerprint: str,
+                              expected_revision: int | None) -> Task:
+        with self._dispatcher.control():
+            # Queued/active acceptance is process authority, never reconstructed
+            # from a receipt. A second command cannot replace those grants.
+            if self._dispatcher.confirmation_state(task_id)["state"] == "accepted":
+                raise WorkflowBlocked("This exact plan is already queued or executing")
             snapshot = self.journal.get_plan(task_id)
             if snapshot is None:
                 raise WorkflowBlocked("No intact persisted plan")
             self._verify_snapshot(snapshot)
             if expected != snapshot.hash:
                 raise WorkflowBlocked("Review the exact persisted plan and provide its plan hash")
-            task = self.tasks.get(task_id)
-            if task is None:
-                raise KeyError(task_id)
-            if task.status == TaskStatus.NEEDS_REVIEW:
-                task = self.journal.resume_unstarted(task_id)
-            self.journal.check_task(task_id)
-            if self.journal.attempts(task_id):
-                raise WorkflowBlocked("Previously attempted plans cannot be resumed; create only the remaining intent")
-            # Preserve V0.3 grants for the same exact plan in this process.
-            # Recovered snapshots always start with empty grants.
-            if task_id not in self._live_pending:
-                self.core.restore_pending(task_id, snapshot.plan, snapshot.memory_refs)
-                self._live_pending.add(task_id)
+            ordinary_required, high_required = required_permissions(snapshot)
+            if authorization - ordinary_required or high_risk - high_required:
+                raise ValueError("Tool grants must match the exact persisted plan and permission levels")
+            old_ordinary, old_high = self.core.pending_grants(task_id)
+            if ordinary_required - (authorization | old_ordinary) or high_required - (high_risk | old_high):
+                raise WorkflowBlocked("Explicit grants for every required plan tool are required")
+            self.store.validate_external(task_id)
             # Match submit/worker lock order: dispatcher control, then SQLite.
-            with self._dispatcher._condition, self.store.transaction() as conn:
-                self.store.record_event("plan_confirmation", task_id, {"plan_hash": snapshot.hash})
-                if command_id is not None:
-                    conn.execute("INSERT INTO command VALUES(?,?,?)", (command_id, fingerprint, task_id))
-                self._dispatcher.confirm(task_id, authorization, high_risk)
+            queued = False
+            try:
+                with self.store.transaction() as conn:
+                    if command_id is not None and (conn.execute("SELECT 1 FROM conversation_receipt WHERE command_id=?", (command_id,)).fetchone() is not None or conn.execute("SELECT 1 FROM command WHERE id=?", (command_id,)).fetchone() is not None):
+                        raise ValueError("Command identity was concurrently used by another operation")
+                    self.store.check_privacy(conn, task_id)
+                    task = self.tasks.get(task_id)
+                    if task is None:
+                        raise KeyError(task_id)
+                    if expected_revision is not None and task.revision != expected_revision:
+                        raise WorkflowBlocked("Task revision changed; refresh the exact plan before confirming")
+                    if task.status not in {TaskStatus.WAITING, TaskStatus.NEEDS_REVIEW} or task.cancel_requested:
+                        raise WorkflowBlocked("Only an unstarted plan awaiting review may be confirmed")
+                    if self.journal.attempts(task_id):
+                        raise WorkflowBlocked("Previously attempted plans cannot be resumed; create only the remaining intent")
+                    self.store.check_dependencies(conn, task_id)
+                    if task.status == TaskStatus.NEEDS_REVIEW:
+                        # External authorities were checked before entering this
+                        # transaction. Re-entering journal.resume_unstarted here
+                        # would validate them while holding the workflow lock.
+                        task = self.tasks.resume(task_id)
+                    self.store.record_event("plan_confirmation", task_id, {"plan_hash": snapshot.hash})
+                    if command_id is not None:
+                        conn.execute("INSERT INTO command VALUES(?,?,?)", (command_id, fingerprint, task_id))
+                    self._dispatcher.confirm(task_id, authorization, high_risk,
+                                             _external_validated=True)
+                    queued = True
+            except BaseException:
+                if queued:
+                    self._dispatcher.clear_cached((task_id,))
+                raise
             return task
 
     def cancel_task(self, task_id: str) -> Task:
@@ -575,6 +816,7 @@ class ApplicationService:
         """Existing worker startup/idle boundary, without an active Core call."""
         if self._closing:
             return
+        self._conversation_service.drain()
         if self._cleanup_pending or self.journal.pending_deletions():
             try:
                 self.retry_cleanup()
@@ -602,6 +844,7 @@ class ApplicationService:
         return {"closing": self._closing, "cleanup_pending": self._cleanup_pending,
                 "pending_deletions": len(self.journal.pending_deletions()),
                 "pending_audit_page": len(self.store.pending_audit()), "proposal_error": self._rule_error,
+                "reminders": self._reminders.diagnostics(),
                 "dispatcher": self._dispatcher.diagnostics()}
 
     def begin_shutdown(self) -> None:
@@ -616,6 +859,7 @@ class ApplicationService:
             self._shutdown_started = True
             self._closing = True
             self._rule_stop.set()
+            self._reminder_pump.stop()
             self._dispatcher.stop_accepting()
 
     def close(self, timeout: float | None = None) -> bool:
@@ -627,6 +871,8 @@ class ApplicationService:
                 raise ValueError("Shutdown timeout must be finite and non-negative")
             deadline = monotonic() + seconds
             self.begin_shutdown()
+            if not self._reminder_pump.shutdown(max(0.0, deadline - monotonic())):
+                return False
             if self._rule_thread is not None:
                 self._rule_thread.join(max(0.0, deadline - monotonic()))
                 if self._rule_thread.is_alive():

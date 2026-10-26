@@ -195,6 +195,8 @@ class PersistentTaskManager:
                 status = TaskStatus.CANCELLED
             conn.execute("UPDATE task SET status=?,result=?,error=?,revision=revision+1,updated_at=? WHERE id=?",
                          (status.value, saved, error, utc_now().isoformat(), task_id))
+            from deskpal.conversation.projection import publish_task_state
+            publish_task_state(self.store, conn, task_id, status.value, json.loads(saved), error)
             self.store.record_terminal_effect(conn, task_id, status.value)
             self.store.record_event("task_status_changed", task_id, {"previous_status": current.status.value, "status": status.value})
             if status in {TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED}:
@@ -334,8 +336,15 @@ class PersistentTaskManager:
             self.finish_submission(task_id, "Blocked")
             return result
 
-    def requeue(self, task_id: str) -> Task:
-        self.store.validate_external(task_id)
+    def requeue(self, task_id: str, *, _external_validated: bool = False) -> Task:
+        """Queue after source validation, then recheck same-store safety gates.
+
+        Only Application's confirmation transaction may supply the internal
+        flag, after checking external authorities outside that transaction.
+        Direct callers retain the external validation by default.
+        """
+        if not _external_validated:
+            self.store.validate_external(task_id)
         with self.store.transaction() as conn:
             task = self.get(task_id)
             if task is None:
@@ -372,6 +381,17 @@ class PersistentTaskManager:
 
     def scrub(self, task_id: str) -> Task:
         with self.store.transaction() as conn:
+            now = utc_now().isoformat()
+            conversations = tuple(row[0] for row in conn.execute("SELECT DISTINCT conversation_id FROM conversation_item WHERE task_id=?", (task_id,)))
+            conn.execute("UPDATE conversation_item SET body='',redacted_at=?,revision=revision+1 WHERE task_id=? AND redacted_at IS NULL", (now, task_id))
+            conn.execute("DELETE FROM conversation_item_source WHERE item_id IN (SELECT id FROM conversation_item WHERE task_id=?)", (task_id,))
+            conn.execute("UPDATE conversation_turn SET refs='[]',facts='[]',published=0 WHERE task_id=?", (task_id,))
+            conn.execute("UPDATE desktop_reminder_inbox SET label='',delivery_state='redacted' WHERE task_id=?", (task_id,))
+            conn.execute("UPDATE desktop_resource_link SET conversation_id=NULL WHERE task_id=?", (task_id,))
+            for identity in conversations:
+                # Titles may have been derived from content by a caller. Erase
+                # conservatively rather than trying to infer title provenance.
+                conn.execute("UPDATE conversation SET title=CASE WHEN kind='default' THEN '日常聊天' ELSE '已清空的会话' END,revision=revision+1,timeline_revision=timeline_revision+1,updated_at=? WHERE id=?", (now, identity))
             conn.execute("UPDATE task SET request='[forgotten]',result=NULL,error=NULL,scrubbed=1,revision=revision+1 WHERE id=?", (task_id,))
             conn.execute("UPDATE immutableplan SET canonical_json='{}',scrubbed=1 WHERE task_id=?", (task_id,))
             conn.execute("UPDATE attempt SET result=NULL,review_evidence=NULL WHERE task_id=?", (task_id,))

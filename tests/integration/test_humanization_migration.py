@@ -13,7 +13,7 @@ import pytest
 
 from deskpal.application import create_application
 from deskpal.companion import CompanionRuntime, CompanionStorageError
-from deskpal.config import AppConfig, SandboxConfig, StorageConfig
+from deskpal.config import AppConfig, LLMConfig, SandboxConfig, StorageConfig
 from deskpal.tasks.models import TaskStatus
 from deskpal.workflow import ExecutionJournal, PersistentTaskManager, WorkflowStore
 
@@ -124,7 +124,7 @@ def test_hm07_real_schema_one_upgrade_preserves_waiting_hash_history_budget_and_
             assert review["task"].status == TaskStatus.WAITING
             assert PersistentTaskManager(store).get(TASK_ID).request == "synthetic request"
             assert read_rows(workflow_path, "SELECT privacy_epoch FROM task") == [(0,)]
-            assert read_rows(workflow_path, "SELECT version FROM schema_version") == [(2,)]
+            assert read_rows(workflow_path, "SELECT version FROM schema_version") == [(3,)]
         finally:
             store.close()
         runtime = CompanionRuntime(companion_path, wall_clock=lambda: NOW, monotonic_clock=lambda: 100.0)
@@ -157,7 +157,8 @@ def test_hm07_workflow_upgraded_companion_failure_keeps_original_and_recovers(le
         assert_legacy_plan(store, canonical_plan, digest)
     finally:
         store.close()
-    config = AppConfig(storage=StorageConfig(data), sandbox=SandboxConfig(tmp_path / "workspace"))
+    config = AppConfig(llm=LLMConfig(provider="offline"), storage=StorageConfig(data),
+                       sandbox=SandboxConfig(tmp_path / "workspace"))
     original = repository.migrate_interaction
     # A fixed startup clock isolates migration preservation from the separately
     # tested clock-anomaly policy, which legitimately rebases old budget dates.
@@ -165,7 +166,7 @@ def test_hm07_workflow_upgraded_companion_failure_keeps_original_and_recovers(le
         *args, **kwargs, wall_clock=lambda: NOW, monotonic_clock=lambda: 100.0))
 
     def fail_interaction(connection, path, **parameters):
-        assert read_rows(workflow_path, "SELECT version FROM schema_version") == [(2,)]
+        assert read_rows(workflow_path, "SELECT version FROM schema_version") == [(3,)]
         raise sqlite3.OperationalError("synthetic companion migration failure")
 
     with monkeypatch.context() as injected:

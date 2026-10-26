@@ -20,7 +20,7 @@ from deskpal.tools.models import ToolCall, ToolSpec
 
 from .errors import LLMError
 from .models import ChatMessage, LLMResponse
-from .url_policy import validate_base_url
+from .url_policy import validate_base_url, validate_connection_url
 
 
 def _json_value(value: Any) -> None:
@@ -202,6 +202,24 @@ def _default_transport(request: urllib.request.Request, *, timeout: float) -> An
     return urllib.request.build_opener(_NoRedirect()).open(request, timeout=timeout)
 
 
+def _local_transport(request: urllib.request.Request, *, timeout: float) -> Any:
+    # No environment proxies and no redirects, including loopback redirects.
+    return urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect()).open(request, timeout=timeout)
+
+
+class UnavailableLLMProvider:
+    """Permit local browsing without pretending a configured model responded."""
+
+    is_cloud = False
+    available = False
+
+    def generate(self, prompt: str) -> str:
+        raise LLMError("模型连接尚未配置，请在设置 → 模型与连接中完成配置。")
+
+    def chat(self, messages: Sequence[ChatMessage], *, tools: Sequence[ToolSpec] = ()) -> LLMResponse:
+        raise LLMError("模型连接尚未配置，请在设置 → 模型与连接中完成配置。")
+
+
 class OpenAILLMProvider:
     """Responses adapter. Credentials are provided explicitly, never read here.
 
@@ -230,6 +248,7 @@ class OpenAILLMProvider:
         if config is not None and not isinstance(config, LLMConfig):
             raise LLMError("config must be an LLMConfig")
         values = config or LLMConfig()
+        self.is_cloud = values.is_cloud
         self.model = values.model if model is None else model
         self._api_key = values.api_key if api_key is None else api_key
         selected_url = values.base_url if base_url is None else base_url
@@ -238,7 +257,7 @@ class OpenAILLMProvider:
             raise LLMError("max_output_tokens must be a positive integer")
         self.max_output_tokens = max_output_tokens
         self._expression_output_format = values.expression_output_format
-        if not _nonempty(self.model) or not _nonempty(self._api_key):
+        if not _nonempty(self.model) or (values.credential_mode != "none" and not _nonempty(self._api_key)):
             raise LLMError("OpenAI provider requires a model and an API key")
         if any(char in self._api_key for char in "\r\n"):
             raise LLMError("Invalid API credential format")
@@ -251,8 +270,8 @@ class OpenAILLMProvider:
             raise LLMError("timeout_seconds must be a positive finite number") from None
         if transport is not None and not callable(transport):
             raise LLMError("transport must be callable")
-        self._transport = transport or _default_transport
-        self._url = self._validate_url(selected_url) + "/responses"
+        self._transport = transport or (_local_transport if values.execution_location == "local" else _default_transport)
+        self._url = validate_connection_url(selected_url, values.execution_location) + "/responses"
 
     @staticmethod
     def _validate_url(value: Any) -> str:
@@ -308,11 +327,13 @@ class OpenAILLMProvider:
 
     def _request(self, data: bytes) -> Any:
         try:
-            request = urllib.request.Request(self._url, data=data, method="POST", headers={
-                "Authorization": "Bearer " + self._api_key,
+            headers = {
                 "Content-Type": "application/json",
                 "Accept": "application/json",
-            })
+            }
+            if self._api_key:
+                headers["Authorization"] = "Bearer " + self._api_key
+            request = urllib.request.Request(self._url, data=data, method="POST", headers=headers)
             response = self._transport(request, timeout=self.timeout_seconds)
             context = response if hasattr(response, "__enter__") else nullcontext(response)
             with context as stream:

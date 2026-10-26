@@ -108,6 +108,38 @@ class DesktopFacade:
 
     def _execute(self, operation: str, args: dict[str, Any]) -> Any:
         app = self.app
+        desktop_operations: dict[str, Callable[..., Any]] = {
+            "task_review": app.task_review, "task_updates": app.task_updates,
+            "command_status": app.command_status,
+            "reminder_feed": app.reminder_feed, "reminder_detail": app.reminder_detail,
+            "reminder_ack": app.reminder_ack,
+            "schedule_items": app.schedule_items,
+            "tools_catalog": app.tools_catalog, "tool_detail": app.tool_detail,
+            "plugins_catalog": app.plugins_catalog,
+            "appearance_snapshot": app.appearance_snapshot, "asset_import_prepare": app.asset_import_prepare,
+            "appearance_apply": app.appearance_apply, "appearance_reset": app.appearance_reset,
+            "asset_import_discard": app.asset_import_discard, "asset_collect": app.asset_collect,
+        }
+        if operation in desktop_operations:
+            if operation == "reminder_ack":
+                self._command(args)
+            return desktop_operations[operation](**args)
+        conversation_operations: dict[str, Callable[..., Any]] = {
+            "conversation_ensure_default": app.conversation_ensure_default,
+            "conversation_list": app.conversation_list,
+            "conversation_create": app.conversation_create,
+            "conversation_update": app.conversation_update,
+            "conversation_timeline": app.conversation_timeline,
+            "conversation_item": app.conversation_item,
+            "conversation_task_location": app.conversation_task_location,
+            "conversation_clear": app.conversation_clear,
+            "conversation_delete": app.conversation_delete,
+            "conversation_cleanup_status": app.conversation_cleanup_status,
+        }
+        if operation in conversation_operations:
+            if operation in {"conversation_create", "conversation_update", "conversation_clear", "conversation_delete"}:
+                self._command(args)
+            return conversation_operations[operation](**args)
         if operation == "conversation_open":
             args.pop("command_id", None)
             if args:
@@ -150,16 +182,19 @@ class DesktopFacade:
             return app.presentation_snapshot()
         if operation == "tasks":
             offset, limit = self._page(args)
-            return app.tasks.page_summaries(offset=offset, limit=limit, **args)
+            return app.task_page(offset=offset, limit=limit, **args)
         if operation == "task":
             return app.review_task(**args)
         if operation == "submit":
             self._command(args)
-            if set(args) - {"request", "command_id", "use_policy", "conversation_id", "expected_conversation_epoch"}:
+            if set(args) - {"request", "command_id", "use_policy", "conversation_id", "expected_conversation_epoch", "expected_context_epoch"}:
                 raise ValueError("Unsupported submission parameter")
-            return self._receipt(app.submit(**args))
+            task = app.submit(**args)
+            return {**self._receipt(task), **app._conversation_repository.submission(task.id)}
         if operation == "confirm":
             self._command(args)
+            if type(args.get("expected_revision")) is not int or args["expected_revision"] < 1:
+                raise ValueError("Explicit positive task revision is required")
             if not isinstance(args.get("plan_hash"), str) or not args["plan_hash"]:
                 raise ValueError("Explicit plan hash is required")
             ordinary, high = args.pop("ordinary_tools", []), args.pop("high_risk_tools", [])
@@ -191,6 +226,11 @@ class DesktopFacade:
         if operation == "settings":
             config = app.config
             return {"provider": config.llm.provider, "model": config.llm.model,
+                "revision": config.configuration_revision, "active_revision": config.configuration_revision,
+                "llm_ready": config.llm.ready, "configured": config.llm.ready,
+                "execution_location": config.llm.execution_location, "protocol": config.llm.protocol,
+                "credential_mode": config.llm.credential_mode, "credential_source": config.llm.credential_source,
+                "request_use_default": config.llm.request_use_default,
                 "memory_mode": config.memory.mode, "embedding_provider": config.memory.embedding_provider,
                 "workspace_dir": str(config.sandbox.workspace_dir), "data_dir": str(config.storage.data_dir),
                 "queue_capacity": config.workflow.queue_capacity, "timezone": config.proactive.timezone,
@@ -302,6 +342,8 @@ class DesktopFacade:
                 candidates.append(("task", str(row["task_id"])))
             if row["event"] in {"proposal_created", "proposal_changed"} and row["proposal_id"]:
                 candidates.append(("proposal", str(row["proposal_id"])))
+            if row["event"] == "desktop_reminder_due" and row["proposal_id"]:
+                candidates.append(("reminder", str(row["proposal_id"])))
             for kind, entity_id in candidates:
                 if (kind, entity_id) in seen:
                     continue
@@ -331,4 +373,9 @@ class DesktopFacade:
                 return {"kind": kind, "entity_id": entity_id, "revision": proposal.revision,
                     "status": proposal.status.value}
             return None
+        if kind == "reminder":
+            try:
+                return self.app._reminders.notification(entity_id)
+            except (KeyError, WorkflowBlocked):
+                return None
         raise ValueError("Unknown notification kind")

@@ -7,9 +7,11 @@
 | 使用者 | [用户指南](user-guide/README.md) | 安装、配置、桌面与会话、任务授权、记忆隐私、目标提议、CLI、维护与排错 |
 | 开发者 | [开发者指南](developer-guide/README.md) | 文件架构、设计边界、请求生命周期、核心代码、GUI、存储维护、扩展和验证 |
 
-两套指南按 2026-10-23 当前实现整理，建议新读者从这里开始。下列 `versions/` 保存历史接口和实际证据，`planning/` 保存计划与设计快照；它们的目录编号不等于当前软件包版本。
+两套指南最初按 2026-10-23 实现整理，GUI 相关内容已于 2026-10-26 随本轮开发更新，建议新读者从这里开始。下列 `versions/` 保存历史接口和实际证据，`planning/` 保存计划与设计快照；它们的目录编号不等于当前软件包版本。
 
 ## 版本状态与历史资料
+
+2026-10-26 GUI 重构 D1–D5 源码已整合，旧 GUI 实现已退役。本轮自动化首败、修补与结果见[测试记录](planning/gui-refactor/test-report.md)，实机交互按用户决定后续自行检查，见[操作要点](planning/gui-refactor/manual-checklist.md)。另见[开发范围](planning/gui-refactor/development-status.md)、[源码接口](developer-guide/gui-refactor.md)与[桌面用法](user-guide/desktop.md)。历史版本通过数只属于原测试批次。
 
 2026-10-23 后续补验：[真实 BGE 托管链路](versions/v0.9/managed-embedding-live-report.md)已完成新下载、SHA-256 清单登记及新进程离线 CPU 推理；512 维有限归一化向量、重复 query 一致、网络尝试 0。模型已迁入 `data/models/bge-small-zh-v1.5` 并由本地配置启用，内置默认未改，权重不随 Git 分发；使用与实现分别见[用户维护指南](user-guide/maintenance.md)和[开发者存储指南](developer-guide/storage-and-maintenance.md)。下述原集中批次的 BGE 缺项已补齐，物理桌面交互仍未验收。
 
@@ -19,7 +21,7 @@
 
 **GUI 任务工作方式交接：**见[2026-10-24 交接](handoffs/2026-10-24-gui-refactor.md)，只传达 Agent 分工、模型与思考强度、开发/测试分阶段、整合审查及 Git 约定；不规定 GUI 如何重构。
 
-**2026-10-25 桌宠 GUI 重构设计：**从[设计总览](planning/gui-refactor/README.md)开始，按需阅读[产品与交互](planning/gui-refactor/product-design.md)、[页面与状态细则](planning/gui-refactor/page-and-state-spec.md)、[前后端技术方案](planning/gui-refactor/technical-plan.md)、[实施与验收计划](planning/gui-refactor/implementation-and-acceptance.md)。覆盖持久日常/专项会话、对话内授权、统一设置、桌宠缩放和小对话窗、提醒到期展示，包含用户确认的风格和交互选择。按用户最新要求，本次仅完成文档；未修改生产代码，未执行产品测试。
+**2026-10-25 桌宠 GUI 重构设计：**从[设计总览](planning/gui-refactor/README.md)开始，按需阅读[产品与交互](planning/gui-refactor/product-design.md)、[页面与状态细则](planning/gui-refactor/page-and-state-spec.md)、[前后端技术方案](planning/gui-refactor/technical-plan.md)、[实施与验收计划](planning/gui-refactor/implementation-and-acceptance.md)。D0 文档先行后，用户已授权 D1–D5；实际实现、2026-10-26 旧 GUI 退役与未执行测试见[开发记录](planning/gui-refactor/development-status.md)。
 
 同日第二轮修订：[默认云模型、设置密钥、头像/静态形象与工具插件扩展](planning/gui-refactor/settings-assets-and-tools.md)。界面统一“聊天”，会话栏仅聊天页出现，所有配置入口集中设置；新增 G16–G21 验收要求。生产功能仍处于设计阶段。
 

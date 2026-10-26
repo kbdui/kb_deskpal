@@ -16,11 +16,13 @@ import sqlite3
 import stat
 import struct
 import tempfile
-from typing import Any, BinaryIO, IO
+from typing import Any, BinaryIO, IO, cast
 import zipfile
 import zlib
 
 from deskpal.application.instance import InstanceLock, InstanceLockError
+from deskpal.assets.models import AssetError
+from deskpal.assets.service import MAX_ASSETS, MAX_FILE_BYTES, MAX_EDGE, recover_imports, valid_asset_id
 from .errors import MaintenanceError
 
 
@@ -29,12 +31,13 @@ MARKER = ".restore-in-progress.json"
 STAGE = ".restore-stage"
 MAX_DATABASE_BYTES = 512 * 1024 * 1024
 MAX_TOTAL_BYTES = 1024 * 1024 * 1024
-MAX_MANIFEST_BYTES = 16384
+MAX_MANIFEST_BYTES = 65536
 CHUNK = 1024 * 1024
 SCOPE = "four_sqlite_stores_only"
+ASSET_SCOPE = "four_sqlite_stores_and_managed_assets"
 EXCLUSIONS = ["workspace_files", "configuration", ".env", "credentials", "model_cache", "logs"]
 # Frozen, recognized on-disk versions. Reading these never performs a migration.
-VERSIONS = {DATABASES[0]: {1, 2}, DATABASES[1]: {1, 2}, DATABASES[2]: {1}, DATABASES[3]: {1, 2}}
+VERSIONS = {DATABASES[0]: {1, 2, 3}, DATABASES[1]: {1, 2}, DATABASES[2]: {1}, DATABASES[3]: {1, 2}}
 _TABLES = {
     DATABASES[0]: {"schema_version", "task", "submission", "immutableplan", "attempt", "audit_outbox", "deletionjob", "memory_block"},
     DATABASES[1]: {"memory_meta", "memory_sources", "memory_revisions", "memory_heads", "memory_tombstones"},
@@ -159,7 +162,13 @@ def _schema(connection: sqlite3.Connection, name: str) -> int:
         required = {"memories"}
     if not required <= tables:
         raise MaintenanceError("archive_schema_unsupported")
-    if name == DATABASES[0] and version == 2 and not {"privacy_control", "context_snapshot", "task_call_attempt", "companion_effect_outbox"} <= tables:
+    if name == DATABASES[0] and version >= 2 and not {"privacy_control", "context_snapshot", "task_call_attempt", "companion_effect_outbox"} <= tables:
+        raise MaintenanceError("archive_schema_unsupported")
+    if name == DATABASES[0] and version == 3 and not {
+        "conversation", "conversation_item", "conversation_item_source", "conversation_receipt",
+        "conversation_turn", "conversation_cleanup", "asset", "appearance_profile",
+        "desktop_reminder_cursor", "desktop_reminder_inbox", "desktop_resource_link",
+    } <= tables:
         raise MaintenanceError("archive_schema_unsupported")
     if name == DATABASES[3] and version == 2 and not {"interaction_settings", "command_receipts"} <= tables:
         raise MaintenanceError("archive_schema_unsupported")
@@ -175,17 +184,22 @@ def _entry(path: Path, name: str) -> dict[str, Any]:
     return {"name": name, "present": True, "bytes": size, "sha256": _digest(path), "schema_version": version}
 
 
-def _manifest(entries: list[dict[str, Any]]) -> dict[str, Any]:
-    return {"format_version": 1, "scope": SCOPE, "exclusions": EXCLUSIONS.copy(), "databases": entries,
+def _manifest(entries: list[dict[str, Any]], assets: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    result: dict[str, Any] = {"format_version": 1, "scope": SCOPE, "exclusions": EXCLUSIONS.copy(), "databases": entries,
             "contains_sensitive_data": True, "hashes_prove_authenticity": False,
             "rollback_may_restore_forgotten_data": True}
+    if assets is not None:
+        result.update(format_version=2, scope=ASSET_SCOPE, assets=assets)
+    return result
 
 
 def _validate_manifest(value: Any) -> dict[str, Any]:
-    if not isinstance(value, dict) or set(value) != set(_manifest([])):
+    if not isinstance(value, dict):
         raise MaintenanceError("archive_invalid")
-    fixed = _manifest([])
-    for key in fixed.keys() - {"databases"}:
+    fixed = _manifest([], [] if value.get("format_version") == 2 else None)
+    if set(value) != set(fixed):
+        raise MaintenanceError("archive_invalid")
+    for key in fixed.keys() - {"databases", "assets"}:
         if type(value[key]) is not type(fixed[key]) or value[key] != fixed[key]:
             raise MaintenanceError("archive_invalid")
     entries = value["databases"]
@@ -206,10 +220,126 @@ def _validate_manifest(value: Any) -> dict[str, Any]:
             raise MaintenanceError("archive_invalid")
         if type(version) is not int or version not in VERSIONS[name]:
             raise MaintenanceError("archive_schema_unsupported")
+        if value["format_version"] == 1 and name == DATABASES[0] and version >= 3:
+            raise MaintenanceError("archive_schema_unsupported")
         total += size
+    if "assets" in fixed:
+        assets = value["assets"]
+        if not isinstance(assets, list) or len(assets) > MAX_ASSETS:
+            raise MaintenanceError("archive_limit_exceeded")
+        names: set[str] = set()
+        for entry in assets:
+            if not isinstance(entry, dict) or set(entry) != {"name", "bytes", "sha256", "width", "height", "media_type"}:
+                raise MaintenanceError("archive_invalid")
+            name = entry["name"]
+            if not _asset_name(name) or name in names or entry["media_type"] != "image/png":
+                raise MaintenanceError("archive_invalid")
+            names.add(name)
+            if type(entry["bytes"]) is not int or not 0 < entry["bytes"] <= MAX_FILE_BYTES:
+                raise MaintenanceError("archive_limit_exceeded")
+            if any(type(entry[key]) is not int or not 1 <= entry[key] <= MAX_EDGE for key in ("width", "height")):
+                raise MaintenanceError("archive_limit_exceeded")
+            digest = entry["sha256"]
+            if not isinstance(digest, str) or len(digest) != 64 or any(c not in "0123456789abcdef" for c in digest):
+                raise MaintenanceError("archive_invalid")
+            total += entry["bytes"]
     if total > MAX_TOTAL_BYTES:
         raise MaintenanceError("archive_limit_exceeded")
     return value
+
+
+def _asset_name(name: Any) -> bool:
+    return isinstance(name, str) and name.startswith("assets/") and name.endswith(".png") and valid_asset_id(name[7:-4])
+
+
+def _entries(manifest: dict[str, Any]) -> list[dict[str, Any]]:
+    # Manifests are constructed locally or checked by _validate_manifest.
+    databases = cast(list[dict[str, Any]], manifest["databases"])
+    assets = cast(list[dict[str, Any]], manifest.get("assets", []))
+    return [entry for entry in databases if entry["present"]] + assets
+
+
+def _asset_entry(path: Path, name: str) -> dict[str, Any]:
+    if not _asset_name(name):
+        raise MaintenanceError("archive_invalid")
+    _regular(path)
+    size = path.stat().st_size
+    if not 0 < size <= MAX_FILE_BYTES:
+        raise MaintenanceError("archive_limit_exceeded")
+    with path.open("rb") as source:
+        raw = source.read(MAX_FILE_BYTES + 1)
+    if len(raw) != size or raw[:8] != b"\x89PNG\r\n\x1a\n":
+        raise MaintenanceError("archive_invalid")
+    offset = 8
+    width = height = 0
+    data = bytearray()
+    ended = False
+    chunks = 0
+    while offset + 12 <= size:
+        chunks += 1
+        if chunks > 2048:
+            raise MaintenanceError("archive_limit_exceeded")
+        count = struct.unpack_from(">I", raw, offset)[0]
+        if count > size - offset - 12:
+            raise MaintenanceError("archive_invalid")
+        kind = raw[offset + 4:offset + 8]
+        content = raw[offset + 8:offset + 8 + count]
+        crc = struct.unpack_from(">I", raw, offset + 8 + count)[0]
+        if zlib.crc32(kind + content) & 0xFFFFFFFF != crc:
+            raise MaintenanceError("archive_invalid")
+        if kind == b"IHDR" and offset == 8 and count == 13:
+            width, height, depth, color, compression, filtering, interlace = struct.unpack(">IIBBBBB", content)
+            if not 1 <= width <= MAX_EDGE or not 1 <= height <= MAX_EDGE or (depth, color, compression, filtering, interlace) != (8, 6, 0, 0, 0):
+                raise MaintenanceError("archive_invalid")
+        elif kind == b"IDAT" and width and not ended:
+            data.extend(content)
+        elif kind == b"IEND" and count == 0 and data:
+            ended = True
+        elif kind != b"pHYs" or count != 9 or not width or ended:
+            # Only canonical fresh-RGBA encoder chunks; no EXIF/text or APNG.
+            raise MaintenanceError("archive_invalid")
+        offset += count + 12
+        if ended:
+            break
+    if not ended or offset != size:
+        raise MaintenanceError("archive_invalid")
+    expected = height * (1 + 4 * width)
+    decoder = zlib.decompressobj()
+    pixels = decoder.decompress(data, expected + 1)
+    if len(pixels) != expected or not decoder.eof or decoder.unused_data or decoder.unconsumed_tail:
+        raise MaintenanceError("archive_invalid")
+    if any(pixels[y * (1 + 4 * width)] > 4 for y in range(height)):
+        raise MaintenanceError("archive_invalid")
+    return {"name": name, "bytes": size, "sha256": sha256(raw).hexdigest(), "width": width, "height": height, "media_type": "image/png"}
+
+
+def _file_entry(path: Path, name: str) -> dict[str, Any]:
+    return _asset_entry(path, name) if _asset_name(name) else _entry(path, name)
+
+
+def _asset_references(workflow: Path) -> list[dict[str, Any]]:
+    with _reader(workflow, snapshot=True) as connection:
+        version = _schema(connection, DATABASES[0])
+        if version < 3:
+            return []
+        # Only live profile references belong to the logical snapshot. A
+        # garbage-collection crash may leave unreferenced rows without files;
+        # they are never appearance authority and must not block a backup.
+        rows = connection.execute("SELECT id,bytes,sha256,width,height,media_type,revision,provenance FROM asset WHERE id IN (SELECT asset_id FROM appearance_profile WHERE asset_id IS NOT NULL) ORDER BY id LIMIT ?", (MAX_ASSETS + 1,)).fetchall()
+        if len(rows) > MAX_ASSETS:
+            raise MaintenanceError("archive_limit_exceeded")
+        assets: list[dict[str, Any]] = []
+        ids: set[str] = set()
+        for asset_id, size, digest, width, height, media, revision, provenance in rows:
+            if not valid_asset_id(asset_id) or type(revision) is not int or revision < 1 or provenance != "user_import":
+                raise MaintenanceError("archive_invalid")
+            ids.add(asset_id)
+            assets.append({"name": "assets/" + asset_id + ".png", "bytes": size, "sha256": digest, "width": width, "height": height, "media_type": media})
+        profiles = connection.execute("SELECT slot,asset_id FROM appearance_profile LIMIT 8").fetchall()
+        from deskpal.assets.schema import SLOTS
+        if {row[0] for row in profiles} != set(SLOTS) or len(profiles) != len(SLOTS) or any(asset_id is not None and asset_id not in ids for _, asset_id in profiles):
+            raise MaintenanceError("archive_invalid")
+        return assets
 
 
 def _copy_bounded(source: IO[bytes], target: BinaryIO, size: int) -> str:
@@ -240,21 +370,21 @@ def _inspect(archive: Path, stage: Path) -> dict[str, Any]:
     if offset < 0 or len(tail) - offset < 22:
         raise MaintenanceError("archive_invalid")
     _, disk, directory_disk, disk_count, count, directory_bytes, _, comment_bytes = struct.unpack("<4s4H2LH", tail[offset:offset + 22])
-    if disk or directory_disk or disk_count != count or count > 5 or directory_bytes > MAX_MANIFEST_BYTES or len(tail) - offset != 22 + comment_bytes:
+    if disk or directory_disk or disk_count != count or count > MAX_ASSETS + 5 or directory_bytes > MAX_MANIFEST_BYTES or len(tail) - offset != 22 + comment_bytes:
         raise MaintenanceError("archive_invalid")
     digest = _digest(archive)
     with zipfile.ZipFile(archive) as bundle:
         infos = bundle.infolist()
         names = [entry.filename for entry in infos]
-        if len(infos) > 5 or len({name.casefold() for name in names}) != len(names):
+        if len(infos) > MAX_ASSETS + 5 or len({name.casefold() for name in names}) != len(names):
             raise MaintenanceError("archive_invalid")
-        if "manifest.json" not in names or not set(names) <= {"manifest.json", *DATABASES}:
+        if "manifest.json" not in names or any(name not in {"manifest.json", *DATABASES} and not _asset_name(name) for name in names):
             raise MaintenanceError("archive_invalid")
         for info in infos:
             mode = (info.external_attr >> 16) & 0xFFFF
             if info.orig_filename != info.filename or info.extra or info.flag_bits & 1 or info.is_dir() or (stat.S_IFMT(mode) not in (0, stat.S_IFREG)) or info.compress_type not in (zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED):
                 raise MaintenanceError("archive_invalid")
-            limit = MAX_MANIFEST_BYTES if info.filename == "manifest.json" else MAX_DATABASE_BYTES
+            limit = MAX_MANIFEST_BYTES if info.filename == "manifest.json" else (MAX_FILE_BYTES if _asset_name(info.filename) else MAX_DATABASE_BYTES)
             if info.file_size > limit:
                 raise MaintenanceError("archive_limit_exceeded")
         with bundle.open("manifest.json") as source:
@@ -262,24 +392,26 @@ def _inspect(archive: Path, stage: Path) -> dict[str, Any]:
         if len(raw) > MAX_MANIFEST_BYTES:
             raise MaintenanceError("archive_limit_exceeded")
         manifest = _validate_manifest(_decode(raw))
-        expected = {"manifest.json"} | {entry["name"] for entry in manifest["databases"] if entry["present"]}
+        expected = {"manifest.json"} | {entry["name"] for entry in _entries(manifest)}
         if set(names) != expected:
             raise MaintenanceError("archive_invalid")
-        for entry in manifest["databases"]:
-            if not entry["present"]:
-                continue
+        for entry in _entries(manifest):
             name = entry["name"]
             if bundle.getinfo(name).file_size != entry["bytes"]:
                 raise MaintenanceError("archive_invalid")
             path = stage / name
+            if _asset_name(name):
+                path.parent.mkdir(mode=0o700, exist_ok=True)
             with bundle.open(name) as source, path.open("xb") as target:
                 actual = _copy_bounded(source, target, entry["bytes"])
-            if actual != entry["sha256"] or _entry(path, name) != entry:
+            if actual != entry["sha256"] or _file_entry(path, name) != entry:
                 raise MaintenanceError("archive_invalid")
+        if _asset_references(stage / DATABASES[0]) != manifest.get("assets", []):
+            raise MaintenanceError("archive_invalid")
     # Detect changes to the archive between fingerprinting and extraction.
     if _digest(archive) != digest:
         raise MaintenanceError("archive_invalid")
-    return {"format_version": 1, "archive_path": str(archive), "archive_sha256": digest, "manifest": manifest}
+    return {"format_version": manifest["format_version"], "archive_path": str(archive), "archive_sha256": digest, "manifest": manifest}
 
 
 def inspect_backup(archive: Path) -> dict[str, Any]:
@@ -311,6 +443,10 @@ def create_backup(data_dir: Path, destination: Path, *, acknowledge_sensitive_da
             raise MaintenanceError("archive_path_unsafe")
         with _lock(source), tempfile.TemporaryDirectory(prefix=".deskpal-backup-", dir=target.parent) as directory:
             assert_restore_ready(source)
+            try:
+                recover_imports(source)
+            except AssetError:
+                raise MaintenanceError("archive_invalid") from None
             stage = Path(directory)
             entries: list[dict[str, Any]] = []
             for name in DATABASES:
@@ -337,24 +473,38 @@ def create_backup(data_dir: Path, destination: Path, *, acknowledge_sensitive_da
                 entries.append(_entry(stage / name, name))
                 if sum(entry["bytes"] for entry in entries) > MAX_TOTAL_BYTES:
                     raise MaintenanceError("archive_limit_exceeded")
-            manifest = _validate_manifest(_manifest(entries))
+            assets = _asset_references(stage / DATABASES[0])
+            for entry in assets:
+                path = source / entry["name"]
+                if _asset_entry(path, entry["name"]) != entry:
+                    raise MaintenanceError("archive_invalid")
+                staged = stage / entry["name"]
+                staged.parent.mkdir(mode=0o700, exist_ok=True)
+                with path.open("rb") as input_file, staged.open("xb") as output_file:
+                    if _copy_bounded(input_file, output_file, entry["bytes"]) != entry["sha256"]:
+                        raise MaintenanceError("archive_invalid")
+                if _asset_entry(staged, entry["name"]) != entry:
+                    raise MaintenanceError("archive_invalid")
+            manifest = _validate_manifest(_manifest(entries, assets))
             temporary = stage / "archive.zip"
             with zipfile.ZipFile(temporary, "x", compression=zipfile.ZIP_STORED, allowZip64=False) as bundle:
                 bundle.writestr("manifest.json", _json(manifest))
-                for entry in entries:
-                    if entry["present"]:
-                        bundle.write(stage / entry["name"], entry["name"])
+                for entry in _entries(manifest):
+                    bundle.write(stage / entry["name"], entry["name"])
             with temporary.open("r+b") as file:
                 os.fsync(file.fileno())
             digest = _digest(temporary)
             os.link(temporary, target)  # Atomic create-only publication; never replace.
             _sync_directory(target.parent)
-        return {"format_version": 1, "archive_path": str(target), "archive_sha256": digest, "manifest": manifest}
+        return {"format_version": 2, "archive_path": str(target), "archive_sha256": digest, "manifest": manifest}
 
 
 def _marker(receipt: dict[str, Any], published: list[str]) -> dict[str, Any]:
-    return {"format_version": 1, "archive_sha256": receipt["archive_sha256"],
-            "databases": receipt["manifest"]["databases"], "phase": "publishing", "published": published}
+    result: dict[str, Any] = {"format_version": receipt["format_version"], "archive_sha256": receipt["archive_sha256"],
+                             "databases": receipt["manifest"]["databases"], "phase": "publishing", "published": published}
+    if receipt["format_version"] == 2:
+        result["assets"] = receipt["manifest"]["assets"]
+    return result
 
 
 def _write_marker(target: Path, value: dict[str, Any], *, initial: bool = False) -> None:
@@ -374,24 +524,37 @@ def _write_marker(target: Path, value: dict[str, Any], *, initial: bool = False)
 
 
 def _inventory(target: Path, receipt: dict[str, Any]) -> None:
-    entries = receipt["manifest"]["databases"]
-    present = {entry["name"]: entry for entry in entries if entry["present"]}
-    allowed = {".instance.lock", MARKER, MARKER + ".tmp", STAGE, *present}
-    for path in target.iterdir():
-        if path.name not in allowed:
+    present = {entry["name"]: entry for entry in _entries(receipt["manifest"])}
+    for name, path in _owned_leaves(target, present):
+        _regular(path)
+        if name in present and _file_entry(path, name) != present[name]:
             raise MaintenanceError("restore_conflict")
-        if path.name == STAGE:
+
+
+def _owned_leaves(target: Path, present: dict[str, dict[str, Any]]) -> list[tuple[str, Path]]:
+    """Finite restore-owned names; directories are never archive inputs."""
+    allowed = {".instance.lock", MARKER, MARKER + ".tmp", *present}
+    allowed.update(STAGE + "/" + name for name in present)
+    allowed.update(STAGE + "/" + name + ".part" for name in present)
+    directories = {STAGE}
+    if any(_asset_name(name) for name in present):
+        directories.update({"assets", STAGE + "/assets"})
+    pending = [("", target)]
+    result: list[tuple[str, Path]] = []
+    while pending:
+        prefix, directory = pending.pop()
+        for path in directory.iterdir():
+            name = prefix + path.name
             _safe(path)
-            if not path.is_dir():
+            if name in directories and path.is_dir():
+                pending.append((name + "/", path))
+            elif name in allowed:
+                result.append((name, path))
+            else:
                 raise MaintenanceError("restore_conflict")
-            for item in path.iterdir():
-                if item.name not in present and item.name not in {name + ".part" for name in present}:
-                    raise MaintenanceError("restore_conflict")
-                _regular(item)
-        else:
-            _regular(path)
-            if path.name in present and _entry(path, path.name) != present[path.name]:
+            if len(result) > 2 * (MAX_ASSETS + 4) + 3:
                 raise MaintenanceError("restore_conflict")
+    return result
 
 
 def _finish_interrupted_links(target: Path, receipt: dict[str, Any]) -> None:
@@ -400,27 +563,14 @@ def _finish_interrupted_links(target: Path, receipt: dict[str, Any]) -> None:
     Two hardlinks are accepted only when both are the precise owned stage and
     destination of the same entry; external hardlinks remain forbidden.
     """
-    present = {entry["name"]: entry for entry in receipt["manifest"]["databases"] if entry["present"]}
-    allowed = {".instance.lock", MARKER, MARKER + ".tmp", STAGE, *present}
+    present = {entry["name"]: entry for entry in _entries(receipt["manifest"])}
     # Check unknown paths and published bytes before touching staging links.
-    for path in target.iterdir():
-        _safe(path)
-        if path.name not in allowed:
-            raise MaintenanceError("restore_conflict")
-        if path.name == STAGE:
-            if not path.is_dir():
-                raise MaintenanceError("restore_conflict")
-            for item in path.iterdir():
-                _safe(item)
-                if item.name not in present and item.name not in {name + ".part" for name in present}:
-                    raise MaintenanceError("restore_conflict")
-        elif path.name in present:
-            entry = present[path.name]
+    for name, path in _owned_leaves(target, present):
+        if name in present:
+            entry = present[name]
             if not path.is_file() or path.stat().st_size != entry["bytes"] or _digest(path) != entry["sha256"]:
                 raise MaintenanceError("restore_conflict")
-    for entry in receipt["manifest"]["databases"]:
-        if not entry["present"]:
-            continue
+    for entry in _entries(receipt["manifest"]):
         destination, staged = target / entry["name"], target / STAGE / entry["name"]
         if not os.path.lexists(destination) or not os.path.lexists(staged):
             continue
@@ -492,7 +642,7 @@ def restore_backup(archive: Path, target_dir: Path, *, acknowledge_data_rollback
             if not isinstance(marker, dict) or set(marker) != set(baseline) or any(_json(marker[key]) != _json(baseline[key]) for key in baseline.keys() - {"published"}):
                 raise MaintenanceError("restore_conflict")
             published = marker["published"]
-            expected_names = {entry["name"] for entry in receipt["manifest"]["databases"] if entry["present"]}
+            expected_names = {entry["name"] for entry in _entries(receipt["manifest"])}
             if not isinstance(published, list) or any(not isinstance(name, str) or name not in expected_names for name in published) or len(published) != len(set(published)):
                 raise MaintenanceError("restore_conflict")
             if any(not (target / name).is_file() for name in published):
@@ -519,11 +669,13 @@ def restore_backup(archive: Path, target_dir: Path, *, acknowledge_data_rollback
         _inventory(target, receipt)
         stage = target / STAGE
         stage.mkdir(mode=0o700, exist_ok=True)
-        for entry in receipt["manifest"]["databases"]:
-            if not entry["present"] or (target / entry["name"]).exists():
+        for entry in _entries(receipt["manifest"]):
+            if (target / entry["name"]).exists():
                 continue
             name = entry["name"]
             staged, part = stage / name, stage / (name + ".part")
+            if _asset_name(name):
+                staged.parent.mkdir(mode=0o700, exist_ok=True)
             # Only fixed, marker-owned private staging files can be rebuilt.
             for path in (staged, part):
                 if os.path.lexists(path):
@@ -536,25 +688,28 @@ def restore_backup(archive: Path, target_dir: Path, *, acknowledge_data_rollback
         _sync_directory(stage)
         hook("staged")
         published = []
-        for entry in receipt["manifest"]["databases"]:
-            if not entry["present"]:
-                continue
+        for entry in _entries(receipt["manifest"]):
             name = entry["name"]
             destination = target / name
+            if _asset_name(name):
+                destination.parent.mkdir(mode=0o700, exist_ok=True)
             if not destination.exists():
                 os.link(stage / name, destination)
                 (stage / name).unlink()
                 _sync_directory(target)
-            if _entry(destination, name) != entry:
+            if _file_entry(destination, name) != entry:
                 raise MaintenanceError("restore_conflict")
             published.append(name)
             hook("published:" + name)
             _write_marker(target, _marker(receipt, published))
         _inventory(target, receipt)
         # Remove only known staging files. No recursive removal of a target.
-        for item in stage.iterdir():
-            _regular(item)
-            item.unlink()
+        for name, item in _owned_leaves(target, {entry["name"]: entry for entry in _entries(receipt["manifest"])}):
+            if name.startswith(STAGE + "/"):
+                _regular(item)
+                item.unlink()
+        if (stage / "assets").exists():
+            (stage / "assets").rmdir()
         stage.rmdir()
         hook("before_marker_clear")
         _inventory(target, receipt)
@@ -571,4 +726,5 @@ def restore_backup(archive: Path, target_dir: Path, *, acknowledge_data_rollback
                     pass
             raise MaintenanceError("restore_pending") from None
         return {**receipt, "status": "restored", "target_dir": str(target),
-                "startup_review_required": True, "privacy_deletion_completed": False}
+                "startup_review_required": True, "privacy_deletion_completed": False,
+                "appearance_defaults_required": receipt["format_version"] == 1}

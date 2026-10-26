@@ -16,7 +16,7 @@ python -m deskpal --config config.toml --request "time" --json
 python -m deskpal --config config.toml --conversation interactive
 ```
 
-普通交互的每次输入独立；`--conversation interactive` 显式启用进程内会话。会话默认限制云用途，主动允许当前会话请求出云时加 `--conversation-cloud`；来源和历史类别许可仍生效。
+普通交互的每次输入独立；`--conversation interactive` 为当前终端交互新建独立会话并使用有界上下文。生产服务现保存其目录与聊天，关闭只释放近期缓存，不删除存档；下次 CLI 启动仍新建会话，已有存档可从 GUI 专项列表查看。CLI 会话默认限制云用途，明确允许本次交互输入出云时加 `--conversation-cloud`；来源和类别许可仍生效。
 
 普通 `--request` 按配置 provider 运行。CLI 没有普通 `--offline` 参数，离线演示需使用 `provider = "offline"` 的配置。GUI 的 `--offline` 仅属于 GUI 启动入口。
 

@@ -192,3 +192,19 @@ def test_setup_accepts_same_loopback_and_https_policy_as_provider(tmp_path: Path
     assert state["config_valid"] is True
     assert validate_base_url(address + "/") == address
     assert OpenAILLMProvider._validate_url(address + "/") == address
+
+
+@pytest.mark.parametrize("mode", ["explicit_only", "candidate_review", "paused"])
+def test_memory_mode_is_validated_saved_and_requires_restart(tmp_path: Path, mode: str) -> None:
+    service = SetupService(tmp_path / "deskpal.toml")
+    result = service.save({"provider": "offline", "memory_mode": mode}, expected_revision="missing")
+    assert result["values"]["memory_mode"] == mode
+    assert result["requires_restart"] is True
+    assert tomllib.loads(service.config_path.read_text(encoding="utf-8"))["memory"]["mode"] == mode
+    current = service.config_path.read_bytes()
+    with pytest.raises(MaintenanceError):
+        service.save({"memory_mode": "write_without_review"}, expected_revision=result["revision"])
+    assert service.config_path.read_bytes() == current
+    with pytest.raises(MaintenanceError):
+        service.save({"memory_mode": mode}, expected_revision="missing")
+    assert service.config_path.read_bytes() == current

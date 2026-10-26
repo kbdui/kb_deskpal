@@ -182,12 +182,14 @@ def test_offline_startup_override_needs_no_credential_and_preserves_cloud_file(c
     original = config_path.read_bytes()
     ordinary = service.MaintenanceService(config_path).execute("setup_status", {})
     assert ordinary["config_valid"] is True
-    assert ordinary["can_start"] is False
+    assert ordinary["can_start"] is True
+    assert ordinary["llm_ready"] is False and ordinary["configured"] is False
     assert ordinary["credential_present"] is False
     assert "credential_missing" in {issue["code"] for issue in ordinary["issues"]}
     overridden = service.MaintenanceService(config_path, provider_override="offline").execute("setup_status", {})
     assert overridden["config_valid"] is True
     assert overridden["can_start"] is True
+    assert overridden["llm_ready"] is True and overridden["configured"] is True
     assert overridden["effective"]["provider"] == "offline"
     assert overridden["values"]["provider"] == "openai"
     assert overridden["effective"]["model"] == "synthetic-cloud-model"

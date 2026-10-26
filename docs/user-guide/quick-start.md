@@ -35,7 +35,7 @@ python -m deskpal.gui
 python -m deskpal.gui --setup --config E:/Deskpal/config.toml
 ```
 
-在向导中选择 `offline`，检查工作区、数据目录和缓存目录后保存，再启动应用。离线演示无需 API key。数据目录与工作区应独立，缓存允许使用默认的数据目录子目录。目录和密钥说明见[配置与模型连接](configuration.md)。
+新安装默认云模型，在设置中填写服务、模型名和密钥，保存并生效后开始聊天；也可先浏览本地内容。若要执行下文固定命令演示，在高级模式明确选择“离线演示”再保存，无需 API key。数据目录与工作区应独立。详见[配置与模型连接](configuration.md)。本轮 GUI 重构尚待集中测试，实际开发状态见[记录](../planning/gui-refactor/development-status.md)。
 
 已有配置的用户可用下列命令临时离线运行，文件中的 provider 不会被改写：
 
@@ -45,10 +45,10 @@ python -m deskpal.gui --config config.toml --offline
 
 ## 3. 执行第一个任务
 
-1. 在对话输入区域选择独立请求，输入 `time` 并提交。离线演示会规划读取当前时间。
+1. 在“日常聊天”输入 `time` 并发送。下列固定命令以明确选择离线演示为前提。
 2. 输入 `write hello.txt 你好，Deskpal`。
-3. 到任务页选择该任务，核对工具 `write_text`、路径、内容、权限和计划 hash。
-4. 明确勾选普通工具授权并确认。文件写入配置的工作区，默认是 `workspace/hello.txt`。
+3. 在原聊天审核卡核对“写入文本”的路径、内容、作用范围和权限；技术详情保留计划 hash。
+4. 点击明确允许本计划普通操作的按钮，随后查看真实执行结果。文件写入工作区，默认 `workspace/hello.txt`。
 5. 输入 `read hello.txt`，检查返回的工具结果。
 
 写文件请求停在 `Waiting` 是正常确认流程。不要仅根据聊天中的文字判断执行成功，以任务状态和步骤结果为准。

@@ -1,6 +1,6 @@
 # Deskpal 陪伴桌宠重构设计
 
-日期：2026-10-25。状态：设计阶段，尚未实现或验收；按用户最新要求，本次只完成文档，不进入编码。
+设计日期：2026-10-25。本文为 D0 产品基线；实际源码范围见[开发记录](development-status.md)，T1 自动化结果与实机未验证边界见[测试记录](test-report.md)。设计条目本身不代表验收通过。
 
 本轮按用户最后明确要求先编写设计文档。总体任务包括前端和必要的后端改造；后续开发按本设计推进，不能将换肤或隐藏 JSON 当作重构完成。本文件说明产品与交互，[技术方案](technical-plan.md)说明状态、接口与迁移，[实施与验收](implementation-and-acceptance.md)说明交付顺序和验证标准。
 
@@ -47,7 +47,7 @@ Deskpal 是一个有持续人格、能记住用户认可的信息、陪伴日常
 | --- | --- | --- | --- |
 | 1 | 桌宠大小不可调、点击及右键不足 | [pet_window.py](../../../src/deskpal/gui/pet_window.py) 固定 `CANVAS=240`；左键只发导航信号，未定义右键菜单 | 设置内缩放/恢复位置；点击小窗，右键仅提供窗口动作。按第二轮要求取消右键配置 |
 | 2 | 定时任务需要自己寻找授权再返回 | [window.py](../../../src/deskpal/gui/window.py) `_show_chat_result` 提示去任务页，聊天没有授权组件 | 对话内任务卡、原地授权、状态更新、返回定位 |
-| 3 | 返回后新建会话消失 | [conversation/runtime.py](../../../src/deskpal/conversation/runtime.py) 仅进程内、最多 4 个、闲置 1800 秒淘汰；[conversation_panel.py](../../../src/deskpal/gui/conversation_panel.py) 用快照覆盖文本，Conflict/NotFound 移除会话，隐私清理清空列表 | 持久会话目录与时间线；页面切换不清理领域状态。具体此次消失由哪个路径触发，仍待复现 |
+| 3 | 返回后新建会话消失 | 原 conversation/runtime 与旧 conversation_panel 用进程内最多4个、闲置1800秒的窗口和快照覆盖文本；Conflict/NotFound 移除会话，隐私清理清空列表。旧页面本轮已按用户要求退役，新实现见[chat.py](../../../src/deskpal/gui/chat.py) | 持久会话目录与时间线；页面切换不清理领域状态。具体此次消失由哪个旧路径触发，仍待复现 |
 | 4 | 授权展示 JSON、条目以难懂编码命名 | [views.py](../../../src/deskpal/gui/views.py) `show_detail` 直接输出 JSON，列表使用 ID/status/revision；授权复选框直接用工具名 | 中文标题、字段卡、作用对象和风险说明，技术信息折叠 |
 | 5 | 滚轮误修改选项 | 各面板使用原生 ComboBox/SpinBox，没有统一防滚轮更改策略 | 全局控件规范，滚轮只滚动容器和展开列表视口，不提交选项变更 |
 | 6 | 设置分散 | `ConversationPanel`、`CompanionPanel`、`MainWindow._build_settings` 分别管理互动、人格、桌面等 | 单一设置中心，按用户目的分组 |

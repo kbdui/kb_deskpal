@@ -57,6 +57,7 @@ def test_confirmation_receipt_returns_while_tool_blocks_and_duplicate_never_reex
         assert review["plan"]["tool_specs"]
         monkeypatch.setattr(app.tools, "execute", blocked)
         parameters = {"task_id": task["task_id"], "plan_hash": review["plan"]["hash"],
+            "expected_revision": review["task"]["revision"],
             "ordinary_tools": ["write_text"], "high_risk_tools": [], "command_id": "confirm"}
         receipt = facade.execute("confirm", parameters)
         assert receipt["accepted"] and entered.wait(5)
@@ -81,9 +82,14 @@ def test_no_implicit_grants_and_bad_plan_never_queues(config):
         assert app.wait(task.id, 5).status == TaskStatus.WAITING
         facade = DesktopFacade(app)
         snapshot = app.journal.get_plan(task.id)
+        revision = app.tasks.get(task.id).revision
         with pytest.raises(WorkflowBlocked):
-            facade.execute("confirm", {"task_id": task.id, "plan_hash": "stale", "command_id": "wrong"})
-        facade.execute("confirm", {"task_id": task.id, "plan_hash": snapshot.hash, "command_id": "empty"})
+            facade.execute("confirm", {"task_id": task.id, "plan_hash": "stale",
+                "expected_revision": revision, "command_id": "wrong"})
+        with pytest.raises(WorkflowBlocked):
+            facade.execute("confirm", {"task_id": task.id, "plan_hash": snapshot.hash,
+                "expected_revision": revision, "command_id": "empty"})
+        assert not app.command_status("empty")["accepted"]
         assert app.wait(task.id, 5).status == TaskStatus.WAITING
         assert not (config.sandbox.workspace_dir / "demo.txt").exists()
         assert not app.journal.attempts(task.id)

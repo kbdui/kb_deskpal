@@ -61,6 +61,9 @@ class SubmissionDispatcher:
         self._stop = False
         self._paused = False
         self._active_id: str | None = None
+        self._active_confirmation = False
+        self._active_grants: tuple[frozenset[str], frozenset[str]] = (frozenset(), frozenset())
+        self._control_revision = 0
         self._operations: dict[str, tuple[bool, frozenset[str], frozenset[str]]] = {}
         self._results: OrderedDict[str, AgentResult] = OrderedDict()
         self._thread = Thread(target=self._work, name="deskpal-workflow", daemon=True)
@@ -99,6 +102,7 @@ class SubmissionDispatcher:
                         if len(self._operations) >= self.tasks.store.queue_capacity:
                             raise QueueFull("In-memory submission metadata is full")
                         self._operations[task.id] = (False, authorized_tools, high_risk_authorized_tools)
+                        self._control_revision += 1
                         registered = task.id
             except BaseException:
                 if registered is not None:
@@ -109,23 +113,53 @@ class SubmissionDispatcher:
             self._condition.notify_all()
             return task
 
-    def confirm(self, task_id: str, authorization: frozenset[str], high_risk: frozenset[str]) -> None:
+    def confirm(self, task_id: str, authorization: frozenset[str], high_risk: frozenset[str],
+                *, _external_validated: bool = False) -> None:
         with self._condition:
             self._accepting()
             self._prune_operations()
             if task_id not in self._operations and len(self._operations) >= self.tasks.store.queue_capacity:
                 raise QueueFull("In-memory submission metadata is full")
-            self.tasks.requeue(task_id)
+            self.tasks.requeue(task_id, _external_validated=_external_validated)
             self._results.pop(task_id, None)
             self._operations[task_id] = (True, authorization, high_risk)
+            self._control_revision += 1
             self._condition.notify_all()
 
     def wake(self) -> None:
         with self._condition:
             self._condition.notify_all()
 
+    @contextmanager
+    def control(self) -> Iterator[None]:
+        """Public short boundary: dispatcher control precedes workflow writes."""
+        with self._condition:
+            self._accepting()
+            yield
+
+    @contextmanager
+    def snapshot_control(self) -> Iterator[None]:
+        """Read queue/task facts together, including after a worker failure."""
+        with self._condition:
+            yield
+
+    def confirmation_state(self, task_id: str) -> dict[str, Any]:
+        """Detached current-process queue facts, never historical authorization."""
+        with self._condition:
+            operation = self._operations.get(task_id)
+            active = self._active_id == task_id
+            queued = operation is not None and operation[0]
+            confirming = active and self._active_confirmation
+            grants = self._active_grants if active else ((operation[1], operation[2]) if operation else (frozenset(), frozenset()))
+            return {"state": "accepted" if queued or confirming else "none",
+                    "revision": self._control_revision,
+                    "queued": queued, "active": confirming,
+                    "ordinary_tools": sorted(grants[0]), "high_risk_tools": sorted(grants[1]),
+                    "current_process_execution_authority": bool((active or operation is not None) and (grants[0] or grants[1]))}
+
     def clear_cached(self, task_ids: Iterable[str] | None = None) -> None:
         with self._condition:
+            self._control_revision += 1
             if task_ids is None:
                 self._results.clear()
             for task_id in (() if task_ids is None else tuple(task_ids)):
@@ -211,6 +245,7 @@ class SubmissionDispatcher:
                 self._failure = (stage, type(error).__name__)
             self._stop = True
             self._operations.clear()
+            self._control_revision += 1
             self._condition.notify_all()
 
     def _prune_operations(self) -> None:
@@ -220,6 +255,7 @@ class SubmissionDispatcher:
             task = self.tasks.get(task_id)
             if task_id == self._active_id or task is None or task.status not in {TaskStatus.CREATED, TaskStatus.WAITING}:
                 self._operations.pop(task_id, None)
+                self._control_revision += 1
 
     def _interrupted(self, task_id: str, error: Exception) -> tuple[AgentResult, bool]:
         attempts = self.journal.attempts(task_id)
@@ -247,6 +283,9 @@ class SubmissionDispatcher:
         finally:
             with self._condition:
                 self._active_id = None
+                self._active_confirmation = False
+                self._active_grants = (frozenset(), frozenset())
+                self._control_revision += 1
                 self._condition.notify_all()
 
     def _work_until_stopped(self) -> None:
@@ -280,10 +319,20 @@ class SubmissionDispatcher:
                 self._active_id = task.id
                 confirm, authorization, high_risk = self._operations.pop(
                     task.id, (False, frozenset(), frozenset()))
+                self._active_confirmation = confirm
+                self._active_grants = (authorization, high_risk)
+                self._control_revision += 1
             try:
                 self._stage = "execution"
                 self._guard(task.id)
                 if confirm:
+                    if not self.core.has_pending_plan(task.id):
+                        snapshot = self.journal.get_plan(task.id)
+                        if snapshot is None or self.journal.attempts(task.id):
+                            raise WorkflowBlocked("No intact unstarted plan remains for confirmation")
+                        # Only the sole execution worker restores Core state;
+                        # acceptance can queue safely while another task runs.
+                        self.core.restore_pending(task.id, snapshot.plan, snapshot.memory_refs)
                     result = self.core.confirm_task(task.id, authorized_tools=authorization,
                                                    high_risk_authorized_tools=high_risk)
                 else:
@@ -311,6 +360,9 @@ class SubmissionDispatcher:
                 while len(self._results) > 128:
                     self._results.popitem(last=False)
                 self._active_id = None
+                self._active_confirmation = False
+                self._active_grants = (frozenset(), frozenset())
+                self._control_revision += 1
                 self._condition.notify_all()
             try:
                 self._on_idle()

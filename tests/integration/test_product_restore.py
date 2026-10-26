@@ -10,7 +10,7 @@ import pytest
 
 from deskpal.application.factory import create_application
 from deskpal.companion import CompanionRuntime
-from deskpal.config import AppConfig, SandboxConfig, StorageConfig
+from deskpal.config import AppConfig, LLMConfig, SandboxConfig, StorageConfig
 from deskpal.maintenance.archives import create_backup, restore_backup, MARKER
 from deskpal.maintenance.errors import MaintenanceError
 from deskpal.memory.repository import SQLiteMemoryRepository
@@ -78,7 +78,8 @@ def test_restore_preserves_plan_hash_privacy_identity_and_startup_does_not_repla
     with sqlite3.connect(target / "workflow.sqlite3") as connection:
         assert connection.execute("SELECT id,event FROM audit_outbox ORDER BY sequence").fetchall() == outbox
     planner = NeverPlanner()
-    config = AppConfig(storage=StorageConfig(target), sandbox=SandboxConfig(tmp_path / "workspace"))
+    config = AppConfig(llm=LLMConfig(provider="offline"), storage=StorageConfig(target),
+                       sandbox=SandboxConfig(tmp_path / "workspace"))
     from deskpal.tools.manager import BuiltinToolManager
     def forbidden(*args, **kwargs):
         raise AssertionError("restored startup must not execute tools")
@@ -125,7 +126,8 @@ def test_factory_barrier_precedes_all_store_construction_and_releases_lock(tmp_p
     ):
         for name in names:
             monkeypatch.setattr(module, name, forbidden_constructor(name))
-    config = AppConfig(storage=StorageConfig(directory), sandbox=SandboxConfig(tmp_path / "workspace"))
+    config = AppConfig(llm=LLMConfig(provider="offline"), storage=StorageConfig(directory),
+                       sandbox=SandboxConfig(tmp_path / "workspace"))
     with pytest.raises(MaintenanceError) as caught:
         factory.create_application(config, planner=NeverPlanner())
     assert caught.value.code == "restore_pending"
@@ -143,7 +145,8 @@ def test_interrupted_restore_cannot_boot_until_explicit_resume(populated, tmp_pa
             raise RuntimeError("synthetic process interruption")
     with pytest.raises(RuntimeError):
         restore_backup(archive, target, acknowledge_data_rollback=True, fault_hook=stop)
-    config = AppConfig(storage=StorageConfig(target), sandbox=SandboxConfig(tmp_path / "workspace"))
+    config = AppConfig(llm=LLMConfig(provider="offline"), storage=StorageConfig(target),
+                       sandbox=SandboxConfig(tmp_path / "workspace"))
     with pytest.raises(MaintenanceError) as caught:
         create_application(config, planner=NeverPlanner())
     assert caught.value.code == "restore_pending"

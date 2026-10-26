@@ -2,7 +2,7 @@
 
 import ipaddress
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, urlunsplit
 
 from .errors import LLMError
 
@@ -33,4 +33,30 @@ def validate_base_url(value: Any) -> str:
         raise LLMError("base_url must be HTTPS (or loopback HTTP), without credentials, query or fragment") from None
 
 
-__all__ = ["validate_base_url"]
+def validate_connection_url(value: Any, location: str) -> str:
+    """Cloud uses HTTPS; local connects directly to a numeric loopback address.
+
+    Normalize localhost without consulting DNS, preventing hosts-file/DNS changes
+    from turning a local-only connection into a remote request.
+    """
+    normalized = validate_base_url(value)
+    parsed = urlsplit(normalized)
+    if location == "cloud" and parsed.scheme == "https":
+        return normalized
+    if location == "local":
+        host = parsed.hostname or ""
+        if host.lower() == "localhost":
+            host = "127.0.0.1"
+        try:
+            address = ipaddress.ip_address(host)
+        except ValueError:
+            raise LLMError("Local endpoint must use a loopback address") from None
+        if address.is_loopback:
+            authority = f"[{host}]" if address.version == 6 else host
+            if parsed.port is not None:
+                authority += f":{parsed.port}"
+            return urlunsplit((parsed.scheme, authority, parsed.path, "", ""))
+    raise LLMError("Endpoint does not match its execution location")
+
+
+__all__ = ["validate_base_url", "validate_connection_url"]

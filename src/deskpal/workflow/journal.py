@@ -353,11 +353,13 @@ class ExecutionJournal:
             ids = tuple(row[0] for row in conn.execute("""WITH RECURSIVE affected(task_id) AS (
                 SELECT task_id FROM dependency WHERE kind='memory' AND object_id=?
                 UNION SELECT task_id FROM context_dependency WHERE kind='memory' AND object_id=?
+                UNION SELECT i.task_id FROM conversation_item_source s JOIN conversation_item i ON i.id=s.item_id WHERE s.source_kind='memory' AND s.source_id=? AND i.task_id IS NOT NULL
                 UNION SELECT d.task_id FROM context_dependency d JOIN affected a
                     ON d.kind='dialogue_turn' AND d.object_id IN (a.task_id,a.task_id||':user',a.task_id||':assistant')
                 UNION SELECT d.task_id FROM dependency d JOIN affected a
                     ON d.kind='dialogue_turn' AND d.object_id IN (a.task_id,a.task_id||':user',a.task_id||':assistant')
-                ) SELECT task_id FROM affected ORDER BY task_id""", (memory_id, memory_id)))
+                UNION SELECT i.task_id FROM conversation_item_source s JOIN conversation_item i ON i.id=s.item_id JOIN affected a ON s.source_kind='dialogue_turn' AND s.source_id IN (a.task_id,a.task_id||':user',a.task_id||':assistant') WHERE i.task_id IS NOT NULL
+                ) SELECT task_id FROM affected ORDER BY task_id""", (memory_id, memory_id, memory_id)))
             for task_id in ids:
                 self.tasks.scrub(task_id)
             return ids

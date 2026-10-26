@@ -1,12 +1,14 @@
 """TOML configuration with environment overrides; loading has no I/O side effects."""
 
 import math
+import hashlib
 import os
 import re
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping
+from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from dotenv import dotenv_values
@@ -18,7 +20,7 @@ class ConfigError(ValueError):
 
 @dataclass(frozen=True)
 class LLMConfig:
-    provider: str = "offline"
+    provider: str = "openai"
     model: str = ""
     base_url: str = "https://api.openai.com/v1"
     api_key_env: str = "OPENAI_API_KEY"
@@ -26,10 +28,35 @@ class LLMConfig:
     api_key: str = field(default="", repr=False)
     expression_output_format: str = "prompt"
     credential_ref: str = ""
+    execution_location: str = "cloud"
+    protocol: str = "responses"
+    credential_mode: str = "system_vault"
+    request_use_default: bool = True
 
     def __post_init__(self) -> None:
         if not isinstance(self.expression_output_format, str) or self.expression_output_format not in ("prompt", "json_object"):
             raise ConfigError("llm.expression_output_format must be prompt or json_object")
+        if self.execution_location not in {"cloud", "local"} or self.protocol != "responses":
+            raise ConfigError("LLM location or protocol is unsupported")
+        if self.credential_mode not in {"system_vault", "environment", "none"}:
+            raise ConfigError("LLM credential mode is unsupported")
+        if type(self.request_use_default) is not bool:
+            raise ConfigError("llm.request_use_default must be a boolean")
+        if self.provider != "offline" and self.execution_location == "cloud" and self.credential_mode == "none":
+            raise ConfigError("Cloud Responses connections require credentials")
+
+    @property
+    def is_cloud(self) -> bool:
+        return self.provider == "openai" and self.execution_location == "cloud"
+
+    @property
+    def ready(self) -> bool:
+        return self.provider == "offline" or self.provider == "openai" and bool(self.model.strip() and (
+            self.credential_mode == "none" or self.api_key.strip()))
+
+    @property
+    def credential_source(self) -> str:
+        return self.credential_mode if self.api_key else "none" if self.credential_mode == "none" else "missing"
 
 
 @dataclass(frozen=True)
@@ -102,10 +129,11 @@ class AppConfig:
     memory: MemoryConfig = field(default_factory=MemoryConfig)
     workflow: WorkflowConfig = field(default_factory=WorkflowConfig)
     proactive: ProactiveConfig = field(default_factory=ProactiveConfig)
+    configuration_revision: str = "missing"
 
 
 def load_config(path: str | Path | None = None, *, environ: Mapping[str, str] | None = None,
-                provider_override: str | None = None) -> AppConfig:
+                provider_override: str | None = None, allow_missing: bool = False) -> AppConfig:
     """Priority: process environment > sibling .env > TOML > defaults.
 
     An explicit environ mapping is hermetic: no .env file is read. Environment
@@ -114,14 +142,20 @@ def load_config(path: str | Path | None = None, *, environ: Mapping[str, str] | 
     storage/env settings while requiring no API credential or network.
     """
     raw: dict[str, Any] = {}
+    configuration_revision = "missing"
     root = Path.cwd()
     if path is not None:
         config_path = Path(path).expanduser().resolve()
         root = config_path.parent
         try:
             with config_path.open("rb") as stream:
-                raw = tomllib.load(stream)
-        except (OSError, tomllib.TOMLDecodeError) as exc:
+                content = stream.read()
+                raw = tomllib.loads(content.decode("utf-8"))
+                configuration_revision = hashlib.sha256(content).hexdigest()
+        except FileNotFoundError:
+            if not allow_missing:
+                raise ConfigError("Cannot read valid TOML configuration") from None
+        except (OSError, UnicodeError, tomllib.TOMLDecodeError) as exc:
             raise ConfigError("Cannot read valid TOML configuration") from exc
 
     env: Mapping[str, str]
@@ -239,7 +273,7 @@ def load_config(path: str | Path | None = None, *, environ: Mapping[str, str] | 
         quiet_start=quiet_start, quiet_end=quiet_end, timezone=timezone,
     )
 
-    provider = string("llm", "provider", "offline", "DESKPAL_LLM_PROVIDER")
+    provider = string("llm", "provider", "openai", "DESKPAL_LLM_PROVIDER")
     if provider_override is not None:
         if not isinstance(provider_override, str) or provider_override not in {"offline", "openai"}:
             raise ConfigError("Provider override must be offline or openai")
@@ -256,22 +290,47 @@ def load_config(path: str | Path | None = None, *, environ: Mapping[str, str] | 
         raise ConfigError("llm.api_key_env must not be empty")
     if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", api_key_env) is None:
         raise ConfigError("llm.api_key_env must name a valid environment variable, not a credential")
-    api_key = env.get(api_key_env, "") if provider == "openai" else ""
     credential_ref = string("llm", "credential_ref", "", "DESKPAL_LLM_CREDENTIAL_REF")
+    location = string("llm", "execution_location", "cloud", "DESKPAL_LLM_EXECUTION_LOCATION")
+    protocol = string("llm", "protocol", "responses", "DESKPAL_LLM_PROTOCOL")
+    # Legacy explicit providers retain their chosen source; new installations use
+    # the vault. Source selection never silently falls through to another source.
+    legacy_mode = "system_vault"
+    if (provider != "offline" and "credential_mode" not in sections["llm"]
+            and "DESKPAL_LLM_CREDENTIAL_MODE" not in env
+            and ("provider" in sections["llm"] or "DESKPAL_LLM_PROVIDER" in env)):
+        legacy_mode = ("environment" if env.get(api_key_env, "").strip() else
+                       "system_vault" if credential_ref else "environment")
+    credential_mode = string("llm", "credential_mode", legacy_mode, "DESKPAL_LLM_CREDENTIAL_MODE")
+    request_use = value("llm", "request_use_default", True, "DESKPAL_LLM_REQUEST_USE_DEFAULT")
+    if "DESKPAL_LLM_REQUEST_USE_DEFAULT" in env and isinstance(request_use, str):
+        if request_use.lower() not in {"true", "false"}:
+            raise ConfigError("llm.request_use_default must be a boolean")
+        request_use = request_use.lower() == "true"
+    api_key = env.get(api_key_env, "") if provider == "openai" and credential_mode == "environment" else ""
     if credential_ref:
         from deskpal.credentials import WindowsCredentialStore
         if not WindowsCredentialStore.valid_ref(credential_ref):
             raise ConfigError("llm.credential_ref must name a Deskpal credential")
-        if provider == "openai" and not api_key.strip() and environ is None:
+        if provider == "openai" and credential_mode == "system_vault" and environ is None:
+            configured = urlsplit(str(sections["llm"].get("base_url", "https://api.openai.com/v1")))
+            effective = urlsplit(base_url)
+            if (configured.scheme, configured.hostname, configured.port) != (effective.scheme, effective.hostname, effective.port):
+                raise ConfigError("Credential target changed; configure a new credential for this endpoint")
             from deskpal.credentials import CredentialStoreError
             try:
                 api_key = WindowsCredentialStore().read(credential_ref) or ""
             except CredentialStoreError:
-                raise ConfigError("System credential storage is unavailable") from None
-    if provider == "openai" and (not model or not api_key.strip()):
-        raise ConfigError("OpenAI mode requires an explicit model and an API key environment variable or system credential reference")
-    if provider == "openai" and not base_url.startswith(("https://", "http://")):
-        raise ConfigError("llm.base_url must be an HTTP(S) URL")
+                # Configuration remains browsable/editable while this source is
+                # unavailable; request admission checks ready before execution.
+                api_key = ""
+    if provider == "openai":
+        from deskpal.llm.url_policy import validate_connection_url
+        from deskpal.llm.errors import LLMError
+        try:
+            base_url = validate_connection_url(base_url, location)
+        except LLMError:
+            raise ConfigError("LLM endpoint is invalid for its execution location") from None
     poll_interval = positive_number(
         "scheduling", "poll_interval_seconds", 1.0, "DESKPAL_SCHEDULING_POLL_INTERVAL_SECONDS")
     if poll_interval > 60:
@@ -297,7 +356,7 @@ def load_config(path: str | Path | None = None, *, environ: Mapping[str, str] | 
     return AppConfig(
         llm=LLMConfig(provider, model, base_url, api_key_env,
                       positive_number("llm", "timeout_seconds", 30.0, "DESKPAL_LLM_TIMEOUT_SECONDS"), api_key,
-                      expression_output_format, credential_ref),
+                      expression_output_format, credential_ref, location, protocol, credential_mode, request_use),
         sandbox=SandboxConfig(directory("sandbox", "workspace_dir", "workspace", "DESKPAL_WORKSPACE_DIR"),
                               positive_number("sandbox", "max_file_bytes", 1_048_576, "DESKPAL_MAX_FILE_BYTES", True)),
         storage=StorageConfig(directory("storage", "data_dir", "data", "DESKPAL_DATA_DIR")),
@@ -310,6 +369,7 @@ def load_config(path: str | Path | None = None, *, environ: Mapping[str, str] | 
                             max_context_bytes, max_candidates, threshold, evaluation_timeout, evaluation_tokens),
         workflow=workflow,
         proactive=proactive,
+        configuration_revision=configuration_revision,
     )
 
 

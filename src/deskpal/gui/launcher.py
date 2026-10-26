@@ -42,7 +42,17 @@ class DesktopLauncher(QObject):
         self.host = self._host_factory(self._factory, quit_on_closed=False, parent=self)
         self.host.finished.connect(self._host_finished)
         self.host.window.maintenance_requested.connect(self.request_maintenance)
+        state_changed = getattr(self.host.bridge, "state_changed", None)
+        if state_changed is not None:
+            state_changed.connect(self._host_state)
         self.host.start()
+
+    @Slot(str)
+    def _host_state(self, state: str) -> None:
+        if state == "StartupFailed":
+            # Failed startup still owns its worker until Closed; never launch a
+            # maintenance instance against resources the old Host may retain.
+            self.request_maintenance()
 
     @Slot()
     def request_maintenance(self) -> None:

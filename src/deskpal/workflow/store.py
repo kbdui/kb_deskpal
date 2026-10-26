@@ -15,7 +15,7 @@ from uuid import uuid4
 from deskpal.tasks.models import utc_now
 
 from .models import AuditEvent, DependencyRef, WorkflowBlocked
-from .migrations import SCHEMA_VERSION, migrate_schema_1
+from .migrations import SCHEMA_VERSION, migrate_schema_1, migrate_schema_2
 
 
 def canonical(value: Any) -> str:
@@ -71,20 +71,22 @@ class WorkflowStore:
             exists = self._conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='schema_version'").fetchone()
             if exists:
                 versions = self._conn.execute("SELECT version FROM schema_version").fetchall()
-                if len(versions) != 1 or versions[0][0] not in {1, SCHEMA_VERSION}:
+                if len(versions) != 1 or versions[0][0] not in {1, 2, SCHEMA_VERSION}:
                     raise ValueError("Unsupported workflow schema version")
-                if versions[0][0] == 1:
-                    self.backup(self.path.with_name(self.path.name + ".schema-1-" + uuid4().hex + ".backup"))
+                if versions[0][0] < SCHEMA_VERSION:
+                    self.backup(self.path.with_name(self.path.name + ".schema-" + str(versions[0][0]) + "-" + uuid4().hex + ".backup"))
             self._conn.execute("PRAGMA journal_mode=WAL")
             self._conn.execute("PRAGMA synchronous=FULL")
             with self.transaction() as conn:
                 exists = conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='schema_version'").fetchone()
                 if exists:
                     rows = conn.execute("SELECT version FROM schema_version").fetchall()
-                    if len(rows) != 1 or rows[0][0] not in {1, SCHEMA_VERSION}:
+                    if len(rows) != 1 or rows[0][0] not in {1, 2, SCHEMA_VERSION}:
                         raise ValueError("Unsupported workflow schema version")
                     if rows[0][0] == 1:
                         migrate_schema_1(conn)
+                    if rows[0][0] in {1, 2}:
+                        migrate_schema_2(conn)
                 else:
                     tables = conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").fetchall()
                     if tables:
@@ -92,6 +94,7 @@ class WorkflowStore:
                     for statement in _SCHEMA:
                         conn.execute(statement)
                     migrate_schema_1(conn)
+                    migrate_schema_2(conn)
                 for statement in _PRESENTATION_INDEXES:
                     conn.execute(statement)
                 # A previous process cannot know whether a reserved request was
@@ -194,6 +197,20 @@ class WorkflowStore:
         rows = conn.execute("SELECT d.*,v.revision AS current_revision,v.active,v.use_policy FROM context_dependency d LEFT JOIN dependency_version v ON d.kind=v.kind AND d.object_id=v.object_id WHERE d.task_id=? AND d.purpose=?", (task_id, purpose)).fetchall()
         self._check_dependency_rows(conn, task_id, rows)
 
+    def check_historical_context(self, conn: sqlite3.Connection, task_id: str, purpose: str) -> None:
+        """Re-admit unchanged sources into a new task after a global barrier.
+
+        Old execution admission epochs are never reused. Only immutable display
+        turns whose own conversation and full source closure remain valid can
+        become references for a newly admitted task.
+        """
+        self.check_privacy(conn)
+        conversation = conn.execute("SELECT c.context_epoch,c.deleted_at,r.epoch FROM turn_ref r JOIN conversation c ON c.id=r.conversation_id WHERE r.task_id=?", (task_id,)).fetchone()
+        if conversation is None or conversation["deleted_at"] is not None or conversation["context_epoch"] != conversation["epoch"]:
+            raise WorkflowBlocked("Historical conversation context expired")
+        rows = conn.execute("SELECT d.*,v.revision AS current_revision,v.active,v.use_policy FROM (SELECT kind,object_id,revision FROM dependency WHERE task_id=? UNION SELECT kind,object_id,revision FROM context_dependency WHERE task_id=? AND purpose=?) d LEFT JOIN dependency_version v ON d.kind=v.kind AND d.object_id=v.object_id", (task_id, task_id, purpose)).fetchall()
+        self._check_dependency_rows(conn, task_id, rows)
+
     def _check_dependency_rows(self, conn: sqlite3.Connection, task_id: str, rows: list[sqlite3.Row]) -> None:
         task = conn.execute("SELECT use_policy,scrubbed FROM task WHERE id=?", (task_id,)).fetchone()
         if task is None:
@@ -227,6 +244,9 @@ class WorkflowStore:
             turn = conn.execute("SELECT privacy_epoch FROM turn_ref WHERE task_id=?", (task_id,)).fetchone()
             if turn is not None and turn[0] != privacy["epoch"]:
                 raise WorkflowBlocked("Task privacy generation expired")
+            conversation = conn.execute("SELECT c.context_epoch,c.deleted_at,c.archived_at,r.epoch FROM turn_ref r JOIN conversation c ON c.id=r.conversation_id WHERE r.task_id=?", (task_id,)).fetchone()
+            if conversation is not None and (conversation["context_epoch"] != conversation["epoch"] or conversation["deleted_at"] is not None):
+                raise WorkflowBlocked("Conversation context expired")
 
     def record_terminal_effect(self, conn: sqlite3.Connection, task_id: str, status: str) -> None:
         """Only durable, known tool outcomes qualify; text-only turns never do."""

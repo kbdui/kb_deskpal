@@ -2,6 +2,8 @@
 
 GUI 是可选 PySide6 Widgets 前端。CLI 和领域模块不依赖 Qt；没有 GUI 依赖仍可运行后端。
 
+2026-10-26 重构增量见[聊天桌宠源码接口](gui-refactor.md)；D1–D5 范围见[开发记录](../planning/gui-refactor/development-status.md)，本轮自动化结果与实机未验证边界见[测试记录](../planning/gui-refactor/test-report.md)。下述早期模块职责随新入口演进，不沿用旧测试结论。
+
 下一聊天的协作约定见[2026-10-24 工作方式交接](../handoffs/2026-10-24-gui-refactor.md)，只说明 Agent 管理等工作方式，不提供页面重构设计。
 
 ## 文件与所有权
@@ -13,9 +15,12 @@ GUI 是可选 PySide6 Widgets 前端。CLI 和领域模块不依赖 Qt；没有 
 | [host.py](../../src/deskpal/gui/host.py) | 主窗口、桥接、托盘、通知、桌宠的生命周期总协调 |
 | [bridge.py](../../src/deskpal/gui/bridge.py) | `ApplicationBridge` 后台初始化、命令/查询/控制通道、回执和关闭 |
 | [window.py](../../src/deskpal/gui/window.py)、[views.py](../../src/deskpal/gui/views.py) | 主窗口与任务/记忆/目标等视图及交互 |
-| [viewmodels.py](../../src/deskpal/gui/viewmodels.py) | 有界、版本化视图状态 |
-| [conversation_panel.py](../../src/deskpal/gui/conversation_panel.py)、[conversation_state.py](../../src/deskpal/gui/conversation_state.py) | 会话、互动许可、候选与隐私回执展示 |
-| [companion_panel.py](../../src/deskpal/gui/companion_panel.py)、[companion_state.py](../../src/deskpal/gui/companion_state.py) | 本地人格、偏好与模拟情绪设置 |
+| [channel.py](../../src/deskpal/gui/channel.py)、[chat.py](../../src/deskpal/gui/chat.py) | 有界回执协调与版本化共享聊天状态；旧请求追踪器已删除 |
+| [chat.py](../../src/deskpal/gui/chat.py)、[task_card.py](../../src/deskpal/gui/task_card.py) | 共享持久会话投影、双窗草稿、原地审核与稳定消息 |
+| [settings.py](../../src/deskpal/gui/settings.py)、[appearance.py](../../src/deskpal/gui/appearance.py) | 唯一配置中心、身份偏好和本地图片预览/应用 |
+| [management.py](../../src/deskpal/gui/management.py)、[catalog.py](../../src/deskpal/gui/catalog.py) | 安排、记忆、目标和真实工具目录 |
+| [pet_chat.py](../../src/deskpal/gui/pet_chat.py)、[channel.py](../../src/deskpal/gui/channel.py) | 可聚焦小窗与页面有界回执协调 |
+| [persona_settings.py](../../src/deskpal/gui/persona_settings.py)、[interaction_state.py](../../src/deskpal/gui/interaction_state.py)、[companion_state.py](../../src/deskpal/gui/companion_state.py) | 新设置内人格组件、互动 DTO 和共享模拟情绪元数据；不保留旧独立页面 |
 | [preferences.py](../../src/deskpal/gui/preferences.py) | QSettings 中的窗口、显示器、托盘、通知和桌宠偏好 |
 | [tray.py](../../src/deskpal/gui/tray.py)、[notifications.py](../../src/deskpal/gui/notifications.py) | 托盘动作、通知基线/去重/静默/点击复查 |
 | [maintenance.py](../../src/deskpal/gui/maintenance.py) | 独立维护窗口及其后台操作 |
@@ -33,7 +38,7 @@ bridge 将命令、查询和控制分成有界后台通道；取消/诊断/遗�
 
 ## 桌宠表现层
 
-`presentation/` 提供严格元数据 DTO 和固定状态映射，不传任务正文或参数。PetController 经既有 bridge 查询，处理新鲜度与代际；角色点击只请求打开主窗口，不拥有 Core 或授权能力。
+`presentation/` 提供严格元数据 DTO 和固定状态映射，不传任务正文或参数。PetController 经既有 bridge 查询，处理新鲜度与代际；角色点击请求附近小窗，聊天与审核由共享 ChatView/Coordinator 处理，不增加 Core 或执行入口。
 
 图片在有界后台单 worker 准备 QImage，GUI 线程创建 QPixmap、QPainter 和透明窗口。关闭必须等待图片 worker 真正退出。静态素材位于 `gui/assets/pet/`，`provenance.json` 记录来源；资源打包声明在 `pyproject.toml`。
 

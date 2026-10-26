@@ -7,10 +7,12 @@ It is local to this module so importing tests cannot alter pytest collection.
 from copy import deepcopy
 
 from PySide6.QtCore import QObject, QSettings, QTimer, Signal
+from PySide6.QtWidgets import QLabel
 
 import pytest
 
-from deskpal.gui.conversation_panel import ConversationPanel
+from deskpal.gui.chat import ChatCoordinator, ChatView
+from deskpal.gui.settings import InteractionSettings
 from deskpal.gui.preferences import GuiPreferences
 from deskpal.gui.window import MainWindow
 
@@ -34,14 +36,21 @@ def interaction(*, revision=1, conversation_id="default", candidates=True, allow
                            if candidates else []))
 
 
+def conversation(identity, *, revision=1):
+    return {"id": identity, "conversation_id": identity, "title": identity,
+            "revision": revision, "context_epoch": 0, "timeline_revision": revision}
+
+
 def transcript(conversation_id, text, *, sequence=1, memory_epoch=0):
-    return dto(conversation_id=conversation_id, epoch=0, memory_epoch=memory_epoch,
-               turns=[{"sequence": sequence, "task_id": "task-" + conversation_id,
-                       "request": text, "response": "synthetic reply"}])
+    return dto(conversation=conversation(conversation_id), memory_epoch=memory_epoch,
+               items=[{"id": "message-" + conversation_id, "sequence": sequence,
+                       "kind": "user_message", "revision": 1, "body": text}],
+               has_more=False, next_cursor=None)
 
 
 class Bridge(QObject):
     reply = Signal(object)
+    image_reply = Signal(object)
     state_changed = Signal(str)
     privacy_changed = Signal(int)
 
@@ -58,6 +67,9 @@ class Bridge(QObject):
                    "privacy_epoch": self.privacy_epoch}
         self.sent.append(request)
         return request["request_id"]
+
+    def send_image(self, operation, parameters, generation=0):
+        return self.send(operation, parameters, generation=generation)
 
     def requests_for(self, operation):
         return [request for request in self.sent if request["operation"] == operation]
@@ -87,10 +99,16 @@ class Bridge(QObject):
 @pytest.fixture
 def panel(qtbot):
     bridge = Bridge()
-    widget = ConversationPanel(bridge)
+    coordinator = ChatCoordinator(bridge)
+    coordinator.timer.stop()
+    coordinator.default_id = "default"
+    coordinator.conversations = {identity: conversation(identity) for identity in
+                                 ("default", "conversation-a", "conversation-b")}
+    widget = InteractionSettings(coordinator)
     qtbot.addWidget(widget)
-    widget.set_available(True)
-    return widget, bridge
+    coordinator.conversations_changed.emit()
+    yield widget, bridge, coordinator
+    coordinator.timer.stop()
 
 
 @pytest.fixture
@@ -102,155 +120,249 @@ def window(qtbot, tmp_path):
     bridge.set_state("Ready")
     qtbot.waitUntil(lambda: widget.lifecycle == "Ready", timeout=2000)
     widget.poll_timer.stop()
-    return widget, bridge
+    widget.chat_coordinator.timer.stop()
+    yield widget, bridge
+    widget.poll_timer.stop()
+    widget.chat_coordinator.timer.stop()
 
 
 def load_interaction(qtbot, widget, bridge, **values):
-    widget.poll()
+    widget.refresh()
     bridge.answer(qtbot, bridge.requests_for("interaction_snapshot")[-1], interaction(**values))
 
 
-def open_conversation(qtbot, widget, bridge, identity):
-    widget.new_button.click()
-    bridge.answer(qtbot, bridge.requests_for("conversation_open")[-1],
-                  dto(conversation_id=identity, epoch=0))
-    assert widget.sessions.currentData() == identity
+def texts(widget):
+    return "\n".join(label.text() for label in widget.findChildren(QLabel))
 
 
-def test_hm06_dirty_identity_and_permissions_survive_refresh_with_current_revision(panel, qtbot):
-    widget, bridge = panel
+def test_hm06_dirty_identity_and_permissions_keep_edit_revision_for_cas(panel, qtbot):
+    widget, bridge, _ = panel
     load_interaction(qtbot, widget, bridge)
-    widget.display_name.selectAll()
-    qtbot.keyClicks(widget.display_name, "Edited")
-    widget.identity_choices["role_kind"].setCurrentText("companion")
-    widget.permission_checks["history"].setChecked(True)
+    widget.name.selectAll()
+    qtbot.keyClicks(widget.name, "Edited")
+    choice = widget.choices["role_kind"]
+    choice.setCurrentIndex(choice.findData("companion"))
+    widget.permissions["history"].setChecked(True)
     load_interaction(qtbot, widget, bridge, revision=8, display_name="Remote")
-    assert widget.display_name.text() == "Edited"
-    assert widget.identity_choices["role_kind"].currentText() == "companion"
-    assert widget.permission_checks["history"].isChecked()
-    assert widget.identity_save.isEnabled() and widget.permissions_save.isEnabled()
-    widget.identity_save.click()
-    identity_command = bridge.requests_for("interaction_command")[-1]
-    parameters = dict(identity_command["parameters"])
+    assert widget.name.text() == "Edited"
+    assert choice.currentData() == "companion"
+    assert widget.permissions["history"].isChecked()
+    assert widget.snapshot.revision == 1  # The edited baseline remains the CAS authority.
+    widget.save_identity()
+    command = bridge.requests_for("interaction_command")[-1]
+    parameters = dict(command["parameters"])
     assert parameters.pop("command_id")
-    assert parameters == {"action": "identity", "expected_revision": 8,
+    assert parameters == {"action": "identity", "expected_revision": 1,
                           **{**IDENTITY, "display_name": "Edited", "role_kind": "companion"},
                           "use_policy": "local_only"}
-    bridge.answer(qtbot, identity_command, dto(revision=9))
-    bridge.answer(qtbot, bridge.requests_for("interaction_snapshot")[-1],
-                  interaction(revision=9, display_name="Edited"))
-    assert widget.permission_checks["history"].isChecked()
-    widget.permissions_save.click()
+    bridge.answer(qtbot, command, {}, ok=False,
+                  error={"code": "RevisionConflict", "message": "synthetic revision conflict"})
+    assert widget.dirty and widget.name.text() == "Edited"
+    assert not widget.pending and widget.permissions["history"].isChecked()
+    # An explicit reload adopts the current baseline before another save.
+    widget.dirty = False
+    load_interaction(qtbot, widget, bridge, revision=8, display_name="Remote")
+    widget.permissions["history"].setChecked(True)
+    widget.save_permissions()
     parameters = dict(bridge.requests_for("interaction_command")[-1]["parameters"])
     assert parameters.pop("command_id")
-    assert parameters == {"action": "cloud_permissions", "expected_revision": 9,
+    assert parameters == {"action": "cloud_permissions", "expected_revision": 8,
                           "permissions": {key: key == "history" for key in PERMISSIONS}}
 
 
-def test_hm06_session_switch_rejects_old_history_and_invalidates_candidate(panel, qtbot):
-    widget, bridge = panel
-    open_conversation(qtbot, widget, bridge, "conversation-a")
-    old_history = bridge.requests_for("conversation_snapshot")[-1]
+@pytest.mark.parametrize("first", ["identity", "permissions"])
+def test_hm06_saving_one_settings_section_preserves_the_other_dirty_section(panel, qtbot, first):
+    widget, bridge, _ = panel
+    load_interaction(qtbot, widget, bridge, revision=4)
+    widget.name.selectAll()
+    qtbot.keyClicks(widget.name, "Edited")
+    widget.permissions["history"].setChecked(True)
+    getattr(widget, "save_" + first)()
+    initial = bridge.requests_for("interaction_command")[-1]
+    assert initial["parameters"]["expected_revision"] == 4
+    saved = interaction(revision=5, display_name="Edited" if first == "identity" else "Deskpal")
+    if first == "permissions": saved["cloud_permissions"]["history"] = True
+    bridge.answer(qtbot, initial, saved)
+    assert widget.name.text() == "Edited" and widget.permissions["history"].isChecked()
+    assert widget.dirty and not widget.pending and widget.snapshot.revision == 5
+    second = "permissions" if first == "identity" else "identity"
+    getattr(widget, "save_" + second)()
+    command = bridge.requests_for("interaction_command")[-1]
+    assert command["parameters"]["expected_revision"] == 5
+    if second == "permissions":
+        assert command["parameters"]["permissions"] == {key: key == "history" for key in PERMISSIONS}
+    else:
+        assert command["parameters"]["display_name"] == "Edited"
+    result = interaction(revision=6, display_name="Edited")
+    result["cloud_permissions"]["history"] = True
+    bridge.answer(qtbot, command, result)
+    assert not widget.dirty and not widget.pending and widget.snapshot.revision == 6
+
+
+def test_hm06_two_sessions_keep_reordered_history_and_candidates_separate(panel, qtbot):
+    interaction_widget, bridge, coordinator = panel
+    widget = ChatView(coordinator)
+    qtbot.addWidget(widget)
+    widget.set_conversation("conversation-a")
+    coordinator.load("conversation-a")
+    old_history = bridge.requests_for("conversation_timeline")[-1]
+    load_interaction(qtbot, interaction_widget, bridge, conversation_id="conversation-a")
+    interaction_widget.conversation.setCurrentIndex(
+        interaction_widget.conversation.findData("conversation-a"))
+    assert interaction_widget.candidates.currentData() == "synthetic-candidate"
+    interaction_widget.refresh()
     old_interaction = bridge.requests_for("interaction_snapshot")[-1]
-    bridge.answer(qtbot, old_interaction, interaction(conversation_id="conversation-a"))
-    assert widget.candidates.currentData() == "synthetic-candidate"
-    open_conversation(qtbot, widget, bridge, "conversation-b")
-    assert widget.candidates.count() == 0 and not widget.confirm_candidate.isEnabled()
-    fresh_history = bridge.requests_for("conversation_snapshot")[-1]
-    fresh_interaction = bridge.requests_for("interaction_snapshot")[-1]
-    bridge.answer(qtbot, fresh_history, transcript("conversation-b", "B current"))
-    bridge.answer(qtbot, fresh_interaction, interaction(conversation_id="conversation-b", candidates=False))
+    widget.set_conversation("conversation-b")
+    coordinator.load("conversation-b")
+    current = bridge.requests_for("conversation_timeline")[-1]
+    interaction_widget.conversation.setCurrentIndex(
+        interaction_widget.conversation.findData("conversation-b"))
+    assert interaction_widget.candidates.count() == 0
+    bridge.answer(qtbot, current, transcript("conversation-b", "B current"))
     bridge.answer(qtbot, old_history, transcript("conversation-a", "A stale", sequence=99))
-    bridge.answer(qtbot, old_interaction, interaction(revision=99, conversation_id="conversation-a"))
-    assert "B current" in widget.history.toPlainText() and "A stale" not in widget.history.toPlainText()
-    assert widget.submission_parameters() == {"conversation_id": "conversation-b", "expected_conversation_epoch": 0}
-    assert widget.candidates.count() == 0 and not widget.confirm_candidate.isEnabled()
+    bridge.answer(qtbot, old_interaction, interaction(revision=8, conversation_id="conversation-a"))
+    assert widget.conversation_id == "conversation-b"
+    assert "B current" in texts(widget) and "A stale" not in texts(widget)
+    assert coordinator.timelines["conversation-a"][0]["body"] == "A stale"
+    assert interaction_widget.candidates.count() == 0
     assert not bridge.requests_for("interaction_command")
 
 
-def test_hm06_candidate_confirmation_uses_receipt_and_memory_review_navigation(window, qtbot):
+@pytest.mark.parametrize("scope", ["session", "today", "persistent"])
+def test_hm06_explicit_preferences_use_selected_scope_and_false_values(panel, qtbot, scope):
+    # These controls replace the retired hidden preferences form.
+    widget, bridge, _ = panel
+    load_interaction(qtbot, widget, bridge, revision=4)
+    widget.conversation.setCurrentIndex(widget.conversation.findData("conversation-b"))
+    widget.save_preference({"scope": scope, "verbosity": "brief", "humor_allowed": "false",
+                            "followup_allowed": "false", "use_policy": "local_only"})
+    params = dict(bridge.requests_for("interaction_command")[-1]["parameters"])
+    assert params.pop("command_id")
+    assert params == {"action": "preference", "expected_revision": 4,
+                      "scope": scope, "verbosity": "brief", "humor_allowed": False,
+                      "followup_allowed": False, "use_policy": "local_only",
+                      "conversation_id": "conversation-b"}
+
+
+def test_hm06_candidate_requires_explicit_confirmation_and_memory_review_entry(window, qtbot):
     widget, bridge = window
-    panel_widget = widget.conversation_panel
-    load_interaction(qtbot, panel_widget, bridge, revision=4)
-    assert "确认后才会保存" in panel_widget.candidate_detail.text()
-    panel_widget.confirm_candidate.click()
+    coordinator = widget.chat_coordinator
+    coordinator.default_id = "default"
+    coordinator.conversations = {"default": conversation("default")}
+    coordinator.conversations_changed.emit()
+    controls = widget.settings_page.interaction
+    load_interaction(qtbot, controls, bridge, revision=4)
+    assert "确认后才会保存" in controls.candidate_text.text()
+    assert not bridge.requests_for("interaction_command")
+    controls.candidate("confirm_candidate")
     request = bridge.requests_for("interaction_command")[-1]
-    parameters = dict(request["parameters"])
-    assert parameters.pop("command_id")
-    assert parameters == {"action": "confirm_candidate", "expected_revision": 4,
-                          "candidate_id": "synthetic-candidate"}
-    panel_widget.confirm_candidate.click()
+    params = dict(request["parameters"])
+    assert params.pop("command_id")
+    assert params == {"action": "confirm_candidate", "expected_revision": 4,
+                      "candidate_id": "synthetic-candidate"}
+    controls.candidate("confirm_candidate")
     assert len(bridge.requests_for("interaction_command")) == 1
-    bridge.answer(qtbot, request, dto(revision=5))
-    assert panel_widget.candidates.count() == 0 and not panel_widget.confirm_candidate.isEnabled()
-    bridge.answer(qtbot, bridge.requests_for("interaction_snapshot")[-1], interaction(revision=5, candidates=False))
-    panel_widget.memory_candidates_button.click()
-    assert widget.tabs.currentIndex() == 2 and widget.memory_filter.currentText() == "candidate"
-    assert bridge.requests_for("memories")[-1]["parameters"] == {"limit": 50, "offset": 0, "status": "candidate"}
+    bridge.answer(qtbot, request, interaction(revision=5, candidates=False))
+    assert not controls.pending and controls.candidates.count() == 0
+    # Long-term profile candidates now use the dedicated memory navigation entry.
+    widget.set_page(2)
+    widget.memory_page.filter.setCurrentIndex(widget.memory_page.filter.findData("candidate"))
+    assert widget.stack.currentIndex() == 2
+    assert bridge.requests_for("memories")[-1]["parameters"] == {
+        "limit": 50, "offset": 0, "status": "candidate"}
     assert not bridge.requests_for("confirm") and not bridge.requests_for("memory")
 
 
-def test_hm06_privacy_invalidated_receipt_advances_epoch_and_old_dtos_cannot_revive(panel, qtbot):
-    widget, bridge = panel
-    open_conversation(qtbot, widget, bridge, "conversation-private")
-    old_history = bridge.requests_for("conversation_snapshot")[-1]
+def test_hm06_privacy_invalidated_epoch_blocks_old_settings_and_timeline(window, qtbot):
+    host, bridge = window
+    coordinator = host.chat_coordinator
+    coordinator.default_id = "default"
+    coordinator.conversations = {identity: conversation(identity) for identity in
+                                 ("default", "conversation-a")}
+    coordinator.conversations_changed.emit()
+    controls = host.settings_page.interaction
+    widget = host.chat_view
+    widget.set_conversation("conversation-a")
+    coordinator.load("conversation-a")
+    old_history = bridge.requests_for("conversation_timeline")[-1]
+    load_interaction(qtbot, controls, bridge, allowed=True, conversation_id="conversation-a")
+    controls.refresh()
     old_interaction = bridge.requests_for("interaction_snapshot")[-1]
-    bridge.answer(qtbot, old_interaction, interaction(conversation_id="conversation-private", allowed=True))
-    widget.permission_checks["history"].setChecked(False)
-    widget.permissions_save.click()
+    controls.permissions["history"].setChecked(False)
+    controls.save_permissions()
     command = bridge.requests_for("interaction_command")[-1]
+    # Mirror ApplicationBridge's order: elevate epoch, signal barrier, then acknowledge.
     bridge.privacy_epoch = 1
     bridge.privacy_changed.emit(1)
-    qtbot.waitUntil(lambda: widget.sessions.count() == 1 and widget.candidates.count() == 0, timeout=2000)
     bridge.answer(qtbot, command, dto(privacy_invalidated=True), privacy_epoch=1)
     fresh = bridge.requests_for("interaction_snapshot")[-1]
     assert fresh["privacy_epoch"] == 1 and fresh["generation"] > command["generation"]
-    assert "用途已撤销" in widget.notice.text()
-    bridge.answer(qtbot, fresh, interaction(revision=3, memory_epoch=1, interaction_epoch=1, candidates=False))
-    bridge.answer(qtbot, old_history, transcript("conversation-private", "private stale history"))
-    bridge.answer(qtbot, old_interaction, interaction(revision=99, conversation_id="conversation-private", allowed=True))
-    assert widget.history.toPlainText() == "" and widget.candidates.count() == 0
-    assert widget.sessions.count() == 1 and not any(box.isChecked() for box in widget.permission_checks.values())
-    assert len(bridge.requests_for("interaction_command")) == 1
+    bridge.answer(qtbot, fresh, interaction(revision=3, interaction_epoch=1, candidates=False))
+    bridge.answer(qtbot, old_history, transcript("conversation-a", "private stale history"))
+    bridge.answer(qtbot, old_interaction,
+                  interaction(revision=99, allowed=True, display_name="Revived"))
+    assert "private stale history" not in texts(widget)
+    assert coordinator.timelines == {} and controls.candidates.count() == 0
+    assert controls.name.text() != "Revived"
+    assert not any(box.isChecked() for box in controls.permissions.values())
+    assert not controls.pending and len(bridge.requests_for("interaction_command")) == 1
 
 
 @pytest.mark.parametrize("completion_before_receipt", [False, True])
-def test_hm06_cleanup_pending_completed_and_closed_callbacks_cannot_revive(window, qtbot, completion_before_receipt):
+def test_hm06_cleanup_pending_completed_and_closed_callbacks_cannot_revive(window, qtbot,
+                                                                           completion_before_receipt):
     widget, bridge = window
-    load_interaction(qtbot, widget.conversation_panel, bridge)
-    widget.memory_snapshot = {"id": "synthetic-memory", "revision": 1}
-    widget.memory_action("forget")
+    coordinator = widget.chat_coordinator
+    coordinator.default_id = "default"
+    coordinator.conversations = {"default": conversation("default")}
+    coordinator.conversations_changed.emit()
+    controls = widget.settings_page.interaction
+    load_interaction(qtbot, controls, bridge)
+    controls.refresh()
+    old_settings = bridge.requests_for("interaction_snapshot")[-1]
+    coordinator.load("default")
+    old_history = bridge.requests_for("conversation_timeline")[-1]
+    # Exercise the host's global memory-cleanup lifecycle, independent of per-chat jobs.
+    widget.memory_page._snapshot = {"id": "synthetic-memory", "revision": 1}
+    widget.memory_page.action("forget")
     forget = bridge.requests_for("request_forget")[-1]
-    assert widget.privacy_barrier and not widget.conversation_panel.new_button.isEnabled()
-    if not completion_before_receipt:
-        bridge.answer(qtbot, forget, dto(status="AcceptedPending", blocked=True, cleanup_pending=True))
-        assert widget.forget_state == "pending" and widget.privacy_barrier
-    widget.diagnostics_button.click()
-    # Polling cleanup is exposed by the window's CleanupBlocked lifecycle.
     bridge.set_state("CleanupBlocked")
-    qtbot.waitUntil(lambda: bool(bridge.requests_for("cleanup_status")), timeout=2000)
+    qtbot.waitUntil(lambda: widget.lifecycle == "CleanupBlocked", timeout=2000)
     widget.poll_timer.stop()
-    bridge.answer(qtbot, bridge.requests_for("cleanup_status")[-1],
-                  dto(status="Completed", complete=True, blocked=False, cleanup_pending=False))
-    assert widget.forget_state == "complete" and "清理已完成" in widget.notice.text()
+    coordinator.timer.stop()
+    if not completion_before_receipt:
+        bridge.answer(qtbot, forget, dto(status="AcceptedPending", blocked=True,
+                                        cleanup_pending=True))
+    # The dedicated cleanup status query must expose real completion.
+    status = bridge.requests_for("cleanup_status")[-1]
+    if not completion_before_receipt:
+        bridge.answer(qtbot, status, dto(status="Pending", complete=False, blocked=True,
+                                        cleanup_pending=True, pending=[{"id": "cleanup-work"}]))
+        assert "隐私清理进行中" in widget.notice.text()
+        widget._poll_cleanup()
+        status = bridge.requests_for("cleanup_status")[-1]
+    bridge.answer(qtbot, status, dto(status="Completed", complete=True, blocked=False,
+                                    cleanup_pending=False))
+    assert "清理已完成" in widget.notice.text()
     if completion_before_receipt:
-        bridge.answer(qtbot, forget, dto(status="AcceptedPending", blocked=True, cleanup_pending=True))
-        assert widget.forget_state == "complete" and "清理已完成" in widget.notice.text()
+        bridge.answer(qtbot, forget, dto(status="AcceptedPending", blocked=True,
+                                        cleanup_pending=True))
+        assert "清理已完成" in widget.notice.text()
+    bridge.answer(qtbot, old_settings, interaction(revision=99, allowed=True, display_name="Revived"))
+    bridge.answer(qtbot, old_history, transcript("default", "private stale history"))
+    assert coordinator.timelines == {} and controls.name.text() == ""
     bridge.set_state("Ready")
     qtbot.waitUntil(lambda: widget.lifecycle == "Ready", timeout=2000)
     widget.poll_timer.stop()
-    widget.reload_page("memories", explicit=True)
-    assert not widget.privacy_barrier
-    widget.tabs.setCurrentIndex(0)
-    widget.conversation_panel.poll()
+    coordinator.timer.stop()
+    controls.refresh()
     late = bridge.requests_for("interaction_snapshot")[-1]
     bridge.set_state("Closed")
     qtbot.waitUntil(lambda: widget.lifecycle == "Closed", timeout=2000)
     before = len(bridge.sent)
-    bridge.answer(qtbot, late, interaction(revision=99, allowed=True, display_name="Revived"))
+    bridge.answer(qtbot, late, interaction(revision=100, allowed=True, display_name="Revived"))
     bridge.answer(qtbot, forget, dto(status="AcceptedPending", blocked=True))
     assert len(bridge.sent) == before and not widget.isVisible()
-    assert widget.conversation_panel.display_name.text() == ""
-    assert widget.conversation_panel.candidates.count() == 0
-    assert not widget.conversation_panel.new_button.isEnabled() and not widget.poll_timer.isActive()
-    assert not widget.requests.pending
+    assert controls.name.text() == "" and controls.candidates.count() == 0
+    assert coordinator.timelines == {} and not widget.poll_timer.isActive()
+    assert not controls.channel.pending and not coordinator.channel.pending

@@ -1,14 +1,17 @@
-"""Process-local conversation cache; never reconstructs dialogue from tasks."""
+"""Bounded hot context cache, optionally rebuilt from published durable turns."""
 
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import asdict, is_dataclass, replace
 import json
 from threading import RLock
 from time import monotonic
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 from .models import ConversationRef, ConversationTurn, ConversationWindow
+
+if TYPE_CHECKING:
+    from .repository import ConversationRepository
 
 MAX_CONVERSATIONS = 4
 MAX_TURNS = 8
@@ -52,12 +55,14 @@ def _ref(value: Any) -> ConversationRef:
 
 
 class ConversationRuntime:
-    def __init__(self, *, clock: Callable[[], float] = monotonic) -> None:
+    def __init__(self, *, clock: Callable[[], float] = monotonic,
+                 repository: "ConversationRepository | None" = None) -> None:
         self._clock = clock
         self._lock = RLock()
         self._epoch = 0
         self._windows: dict[str, ConversationWindow] = {}
         self._sequences: dict[str, int] = {}
+        self.repository = repository
 
     def _expire(self) -> None:
         now = self._clock()
@@ -70,12 +75,26 @@ class ConversationRuntime:
             raise ConversationConflict("Invalid conversation identity or epoch")
         self._expire()
         window = self._windows.get(identity)
+        if self.repository is not None:
+            summary = self.repository.get(identity)
+            persistent_epoch = int(summary["context_epoch"])
+            if epoch is not None and epoch != persistent_epoch:
+                raise ConversationConflict("Conversation context expired")
+            if window is None or window.epoch != persistent_epoch:
+                if len(self._windows) >= MAX_CONVERSATIONS:
+                    oldest = min(self._windows, key=lambda key: self._windows[key].touched_at)
+                    self._windows.pop(oldest)
+                    self._sequences.pop(oldest, None)
+                window = ConversationWindow(identity, persistent_epoch, self._clock())
+                self._windows[identity] = window
         if window is None or (epoch is not None and window.epoch != epoch):
             raise ConversationConflict("Conversation closed, expired or replaced")
         return window
 
     def open(self) -> dict[str, Any]:
         with self._lock:
+            if self.repository is not None:
+                return self.repository.create("新会话", str(uuid4()))
             self._expire()
             if len(self._windows) >= MAX_CONVERSATIONS:
                 raise ConversationCapacity("At most four conversations may remain open")
@@ -88,22 +107,32 @@ class ConversationRuntime:
     def close(self, conversation_id: str, expected_epoch: int) -> None:
         with self._lock:
             self._window(conversation_id, expected_epoch)
-            del self._windows[conversation_id]
+            self._windows.pop(conversation_id, None)
             self._sequences.pop(conversation_id, None)
 
     def reserve(self, conversation_id: str, expected_epoch: int) -> int:
         with self._lock:
+            if self.repository is not None:
+                raise ConversationConflict("Persistent turns must be atomically bound to a submission")
             window = self._window(conversation_id, expected_epoch)
             sequence = self._sequences[conversation_id] + 1
             self._sequences[conversation_id] = sequence
             self._windows[conversation_id] = replace(window, touched_at=self._clock())
             return sequence
 
+    def context_epoch(self, conversation_id: str) -> int:
+        with self._lock:
+            return self._window(conversation_id).epoch
+
     def snapshot(self, conversation_id: str) -> dict[str, Any]:
         with self._lock:
             window = self._window(conversation_id)
+            if self.repository is not None:
+                turns = self.repository.load(conversation_id, window.epoch, 2 ** 63 - 1)
+                window = replace(window, turns=turns)
+                self._windows[conversation_id] = window
             return {"schema_version": 1, "capabilities": ["bounded_history", "task_navigation"],
-                    "conversation_id": window.id, "epoch": window.epoch,
+                    "conversation_id": window.id, "epoch": window.epoch, "context_epoch": window.epoch,
                     "turns": [{"sequence": turn.sequence, "task_id": turn.task_id,
                                "request": turn.request, "response": turn.response,
                                "use_policy": turn.use_policy} for turn in window.turns],
@@ -124,6 +153,8 @@ class ConversationRuntime:
             raise ValueError("A positive turn sequence is required")
         with self._lock:
             window = self._window(conversation_id, epoch)
+            if self.repository is not None:
+                window = replace(window, turns=self.repository.load(conversation_id, epoch, before_sequence))
             history: list[dict[str, Any]] = []
             planning: list[dict[str, Any]] = []
             history_rounds: list[tuple[dict[str, Any], dict[str, Any]]] = []
@@ -232,11 +263,11 @@ class ConversationRuntime:
                                 use_policy, tuple(frozen_facts))
         with self._lock:
             window = self._window(conversation_id, epoch)
+            if self.repository is not None:
+                self.repository.publish(task_id, response, turn.refs, turn.facts, use_policy)
             if turn.history_bytes + fact_bytes > MAX_HISTORY_BYTES:
                 return
-            if any(item.sequence == sequence or item.task_id == task_id for item in window.turns):
-                return
-            turns = sorted((*window.turns, turn), key=lambda item: item.sequence)
+            turns = sorted((*(item for item in window.turns if item.task_id != task_id and item.sequence != sequence), turn), key=lambda item: item.sequence)
             while (len(turns) > MAX_TURNS or len(turns) * 2 > MAX_MESSAGES
                    or sum(item.history_bytes + sum(len(fact.encode("utf-8")) for fact in item.facts)
                           for item in turns) > MAX_HISTORY_BYTES):

@@ -10,7 +10,7 @@ from typing import Any
 from deskpal.agent.context import PreparedTurn
 from deskpal.agent.ports import CompanionPort
 from deskpal.companion.signals import validate_preference
-from deskpal.conversation.runtime import ConversationRuntime
+from deskpal.conversation.runtime import ConversationConflict, ConversationRuntime
 from deskpal.llm.calls import ModelCallGateway
 from deskpal.llm.ports import LLMProvider
 from deskpal.memory.contracts import MemoryRuntime, RetrievalBundle, UsePolicy
@@ -120,6 +120,12 @@ class InteractionCoordinator:
             assert link is not None
             conversation_id = str(link["conversation_id"])
             is_conversation = not conversation_id.startswith("single:")
+            repository = self.conversations.repository
+            if is_conversation and repository is not None and not repository.contains(conversation_id):
+                # Schema 2's process-local identities have no archived dialogue.
+                # Keep their immutable turn binding and reviewed plan usable,
+                # while treating expression as a standalone legacy task.
+                is_conversation = False
             settings = self._settings()
             admitted_categories = {key for key, allowed in settings.get("cloud_permissions", {}).items() if allowed}
             frozen: dict[str, Any] = {"history": (), "planning_items": (), "warnings": ()}
@@ -226,8 +232,11 @@ class InteractionCoordinator:
                                   for key in value.allowed_cloud_categories):
                 raise WorkflowBlocked("A previously admitted cloud category was revoked")
             if value.conversation_id:
-                snapshot = self.conversations.snapshot(value.conversation_id)
-                if snapshot["epoch"] != value.conversation_epoch:
+                try:
+                    context_epoch = self.conversations.context_epoch(value.conversation_id)
+                except ConversationConflict as exc:
+                    raise WorkflowBlocked("Conversation context expired") from exc
+                if context_epoch != value.conversation_epoch:
                     raise WorkflowBlocked("Conversation epoch expired")
             if expression and settings.get("interaction_epoch", 0) != value.expression_epoch:
                 raise WorkflowBlocked("Expression settings or cue were reset")
@@ -311,6 +320,16 @@ class InteractionCoordinator:
                 invalidate()
             # Admission tickets remain invalid until the worker leaves. Clearing
             # them here would accidentally admit a late callback at the new epoch.
+
+    def discard_tasks(self, task_ids: tuple[str, ...]) -> None:
+        """Erase cached bodies only after their durable tasks were scrubbed.
+
+        The durable scrub guard still rejects late callbacks after removing the
+        process-local ticket, unlike a bare global cache invalidation.
+        """
+        with self._lock:
+            for task_id in task_ids:
+                self._prepared.pop(task_id, None)
 
     def close(self) -> None:
         self.invalidate()

@@ -1,4 +1,4 @@
-"""Explicit local companion controls; every operation uses the background bridge."""
+"""Persona and simulated affect settings, backed by explicit CAS commands."""
 
 from time import monotonic
 from typing import Any
@@ -15,12 +15,13 @@ FRESH_SECONDS = 3.0
 _MODES = {"neutral": "中性", "supportive": "支持", "focused": "专注"}
 
 
-class CompanionPanel(QWidget):
+class PersonaSettings(QWidget):
     """One bounded in-flight request, with a fresh CAS read before each command."""
 
     def __init__(self, bridge: Any, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.bridge = bridge
+        self.conversation_target: Any = lambda: None
         self._available = False
         self._generation = 1_000_000
         self._request: str | None = None
@@ -82,26 +83,6 @@ class CompanionPanel(QWidget):
         config.addRow(self.configure_button)
         layout.addWidget(self.config_group)
 
-        self.preference_group = QGroupBox("显式互动偏好")
-        preference = QFormLayout(self.preference_group)
-        self.scope = QComboBox()
-        for scope_label, scope_value in (("本次会话", "session"), ("今天", "today"), ("持续保存", "persistent")):
-            self.scope.addItem(scope_label, scope_value)
-        self.verbosity = QComboBox()
-        for verbosity_label, verbosity_value in (("本次不修改", ""), ("简短", "brief"), ("适中", "normal"), ("详细", "detailed")):
-            self.verbosity.addItem(verbosity_label, verbosity_value)
-        self.humor = QComboBox()
-        humor_options: tuple[tuple[str, bool | None], ...] = (
-            ("本次不修改", None), ("允许幽默", True), ("关闭幽默", False))
-        for humor_label, humor_value in humor_options:
-            self.humor.addItem(humor_label, humor_value)
-        preference.addRow("有效范围", self.scope)
-        preference.addRow("回复详略", self.verbosity)
-        preference.addRow("幽默偏好", self.humor)
-        self.preference_button = QPushButton("保存显式偏好")
-        preference.addRow(self.preference_button)
-        layout.addWidget(self.preference_group)
-
         self.cue_group = QGroupBox("短时互动模式（应用模拟）")
         cue = QHBoxLayout(self.cue_group)
         self.cue_seconds = QSpinBox()
@@ -143,7 +124,6 @@ class CompanionPanel(QWidget):
         self.preset.currentIndexChanged.connect(self._preset_changed)
         self.custom_style.toggled.connect(self._style_changed)
         self.configure_button.clicked.connect(self._configure)
-        self.preference_button.clicked.connect(self._preference)
         self.support_button.clicked.connect(lambda: self._cue("supportive"))
         self.focus_button.clicked.connect(lambda: self._cue("focused"))
         self.clear_cue_button.clicked.connect(lambda: self._begin({"action": "cue", "mode": "neutral"}))
@@ -153,6 +133,10 @@ class CompanionPanel(QWidget):
         self.all_reset.clicked.connect(lambda: self._begin({"action": "reset", "target": "all"}))
         bridge.reply.connect(self._reply)
         self._update_enabled()
+
+    def on_state_changed(self, state: str) -> None:
+        """Apply the host lifecycle without issuing background work on closure."""
+        self.set_available(state == "Ready")
 
     def set_available(self, available: bool) -> None:
         if self._available and not available:
@@ -188,17 +172,6 @@ class CompanionPanel(QWidget):
             parameters["style"] = {key: spin.value() for key, spin in self.style_inputs.items()}
         self._begin(parameters)
 
-    def _preference(self) -> None:
-        parameters: dict[str, Any] = {"action": "preference", "scope": self.scope.currentData()}
-        if self.verbosity.currentData():
-            parameters["verbosity"] = self.verbosity.currentData()
-        if self.humor.currentData() is not None:
-            parameters["humor_allowed"] = self.humor.currentData()
-        if len(parameters) == 2:
-            self.notice.setText("请选择至少一项要保存的显式偏好。")
-            return
-        self._begin(parameters)
-
     def _cue(self, mode: str) -> None:
         self._begin({"action": "cue", "mode": mode, "ttl_seconds": self.cue_seconds.value()})
 
@@ -208,6 +181,10 @@ class CompanionPanel(QWidget):
             self._begin({"action": "rollback", "persona_version": version})
 
     def _begin(self, parameters: dict[str, Any]) -> None:
+        if parameters.get("action") == "cue":
+            target = self.conversation_target()
+            if target:
+                parameters["conversation_id"] = target
         if not self._available or self._request is not None:
             return
         self._intent = parameters
@@ -335,9 +312,9 @@ class CompanionPanel(QWidget):
         editing = self._available and (self._request is None or self._request_kind == "refresh")
         self.refresh_button.setEnabled(ready)
         self.reload_button.setEnabled(ready)
-        for group in (self.config_group, self.preference_group, self.cue_group, self.reset_group):
+        for group in (self.config_group, self.cue_group, self.reset_group):
             group.setEnabled(editing)
-        for button in (self.configure_button, self.preference_button, self.support_button,
+        for button in (self.configure_button, self.support_button,
                        self.focus_button, self.clear_cue_button, self.affect_reset,
                        self.persona_reset, self.all_reset):
             button.setEnabled(ready)
@@ -359,9 +336,6 @@ class CompanionPanel(QWidget):
             self.custom_style.setChecked(False)
             for spin in self.style_inputs.values():
                 spin.setValue(0.0)
-            self.scope.setCurrentIndex(0)
-            self.verbosity.setCurrentIndex(0)
-            self.humor.setCurrentIndex(0)
             self.cue_seconds.setValue(300)
             self.versions.clear()
         finally:

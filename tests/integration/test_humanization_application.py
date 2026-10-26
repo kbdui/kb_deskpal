@@ -176,8 +176,10 @@ def test_hm02_same_intent_exact_plan_hash_across_personality_and_cue(hm_config, 
             assert result.required_high_risk_authorizations == ("document_delete",)
             configure(app, preset="balanced")
             companion_command(app, "cue", mode="neutral", ttl_seconds=60)
-            app.enqueue_confirmation(result.task_id, plan_hash=original.hash,
-                                     command_id="same-waiting-confirmation")
+            with pytest.raises(WorkflowBlocked):
+                app.enqueue_confirmation(result.task_id, plan_hash=original.hash,
+                                         command_id="same-waiting-confirmation")
+            assert not app.command_status("same-waiting-confirmation")["accepted"]
             assert app.wait(result.task_id, WAIT).status == TaskStatus.WAITING
             idle(app)
             assert app.journal.get_plan(result.task_id) == original

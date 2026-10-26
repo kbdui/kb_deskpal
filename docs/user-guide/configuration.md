@@ -1,10 +1,10 @@
 # 配置与模型连接
 
-优先通过 GUI“配置与数据维护”调整启动设置。进入维护前应用会关闭后台和桌宠；维护结束后重新启动应用。手工编辑配置也需要完整退出再启动。
+通过“设置 → 模型与连接”配置模型与密钥，通过“设置 → 数据与高级”进入维护。需要独立维护时，应用先等待后台、图片和小窗完整结束，再切换和重新启动。本轮源码重构仍待集中测试，状态见[开发记录](../planning/gui-refactor/development-status.md)。
 
 ## 配置从哪里读取
 
-显式指定 `--config 路径` 时读取该文件。未指定时优先当前目录已有 `config.toml`，否则选择用户配置目录；Windows 为 `%LOCALAPPDATA%/Deskpal/config.toml`。GUI 缺文件进入向导；普通 CLI 没有默认文件时沿用离线默认值，不自动保存配置。
+显式指定 `--config 路径` 时读取该文件。未指定时优先当前目录已有 `config.toml`，否则选择用户配置目录；Windows 为 `%LOCALAPPDATA%/Deskpal/config.toml`。新安装默认云模型，缺配置可进入设置或先浏览本地内容，发送在连接就绪后启用；不自动保存配置，也不使用示例回复伪装真实模型。
 
 配置优先级为：**进程环境变量 > 配置目录的 `.env` > TOML > 内置默认值**。相对目录以配置文件所在目录解析。维护页区分文件值和生效值；修改 TOML 后仍未生效，通常需要检查环境覆盖。
 
@@ -24,7 +24,9 @@ model_cache_dir = "data/models/bge-small-zh-v1.5"
 
 模型权重、实际 `config.toml` 和恢复副本不随 Git 提交。新克隆或另一台机器需自行准备依赖与模型，并在实际使用的配置中启用。BGE 仅用于本地语义检索，聊天 provider 仍由 `[llm]` 决定。
 
-## 离线演示与云模型
+## 云默认、本地模型与离线演示
+
+普通聊天使用设置中选定的连接，不逐条询问本地/云。已明确配置的旧 offline 或连接保留原选择。需要本地推理时在设置中切换本地，填写已部署的本机回环端点；当前仅支持兼容 Responses 的服务，不负责安装或启动本地模型。仅支持 Chat Completions 的服务尚不可用。本地模式禁用环境代理与重定向，不回退云服务。
 
 离线配置：
 
@@ -40,6 +42,10 @@ provider = "offline"
 ```toml
 [llm]
 provider = "openai"
+execution_location = "cloud"
+protocol = "responses"
+credential_mode = "environment"
+request_use_default = true
 model = "替换为服务支持的模型名"
 base_url = "https://你的服务地址/v1"
 api_key_env = "OPENAI_API_KEY"
@@ -47,7 +53,7 @@ timeout_seconds = 30.0
 expression_output_format = "prompt"
 ```
 
-`openai` 是本项目兼容 Responses 协议的 adapter 名称。服务必须兼容该协议，不能仅凭“支持 OpenAI 格式”推定可用。外部服务地址使用 HTTPS，本机回环服务可用 HTTP；地址填 API 根路径，adapter 负责请求 `/responses`。保存配置不会联网验证凭据或模型。
+`openai` 是本项目兼容 Responses 协议的 adapter 名称。云模式使用 HTTPS；本地模式设 `execution_location="local"`，仅接受本机回环地址，可用 HTTP，无鉴权本地服务可设 `credential_mode="none"`。地址填 API 根路径，adapter 请求 `/responses`。保存只做本地校验；“测试连接”另行明确触发固定公共文本请求，可能产生少量费用。保存、已生效和连接验证成功是三个状态。
 
 `expression_output_format = "json_object"` 仅用于明确支持原生 JSON 的表达请求；默认保留 `prompt`。修改后仍需验证具体服务，离线测试不证明真实模型效果。
 
@@ -55,13 +61,12 @@ expression_output_format = "prompt"
 
 可选择以下任一方式：
 
-- 进程环境：在启动应用的终端设置 `$env:OPENAI_API_KEY = '替换为密钥'`。
-- 配置目录 `.env`：写入 `OPENAI_API_KEY=替换为密钥`。
-- Windows 向导密码框：保存至当前用户系统凭据库，TOML 仅保存 `credential_ref` 引用。
+- 设置密码框（默认）：选择 `system_vault`，经独立后台保存至当前用户 Windows 凭据库，TOML 仅保存 `credential_ref` 引用。
+- 外部环境（高级）：选择 `environment`，在启动终端设置 `$env:OPENAI_API_KEY = '替换为密钥'`，或在配置目录 `.env` 中设置该变量。
 
-环境或 `.env` 中的非空密钥优先于系统凭据。若使用其他变量名，令 `api_key_env` 与之相同；仓库 `.env.example` 的示例名是 `DEEPSEEK_API_KEY`，不会自动改成 `OPENAI_API_KEY`。不要把密钥写入 TOML、聊天或 Git。
+凭据模式决定使用系统凭据还是环境，不在某个来源缺失时悄悄换另一个。旧配置没有模式字段时按旧规则迁移，保留实际环境优先级；环境对配置字段的显式覆盖仍会提示。若使用其他变量名，令 `api_key_env` 与之相同；仓库 `.env.example` 示例 `DEEPSEEK_API_KEY` 不会自动改成 `OPENAI_API_KEY`。已有密钥不回填，不写入聊天、TOML 或 Git。
 
-清空向导密码输入框不会删除已存凭据；旧引用也不会自动删除。系统凭据库不可用时，改用环境变量。配置保存会保留 `.recovery-*` 原文副本；损坏配置的明确修复会重建支持的设置，其他旧设置重置，原文副本需单独保管。
+密钥操作明确选择保留、替换或移除；清空本次输入不等于删除凭据。替换/移除在配置发布成功后清理旧引用，失败保留待清理状态。系统凭据库不可用会报错，不降级明文；可自行选择外部环境模式。配置保存仍保留原文恢复副本；损坏配置的明确修复会重建支持的设置，原文副本需单独保管。
 
 ## 目录和常用设置
 
@@ -80,4 +85,4 @@ expression_output_format = "prompt"
 
 常用环境覆盖包括 `DESKPAL_LLM_PROVIDER`、`DESKPAL_LLM_MODEL`、`DESKPAL_LLM_BASE_URL`、`DESKPAL_DATA_DIR`、`DESKPAL_WORKSPACE_DIR`、`DESKPAL_EMBEDDING_PROVIDER`、`DESKPAL_MODEL_CACHE_DIR`。环境变量名不全部按字段机械拼接，完整支持项以[配置加载代码](../../src/deskpal/config/__init__.py)为准。
 
-云请求中的用户内容、合资格记忆和必要工具结果会发给配置的服务。GUI 默认 `local_only` 会阻止云规划，只有主动选择 `cloud_allowed` 才允许该次请求进入云链路；相关记忆、目标、会话等来源限制仍生效。详见[记忆与隐私](memory-and-privacy.md)。
+保存云连接时说明后续普通新输入将由该服务处理；`request_use_default` 控制新请求默认用途，聊天不再设逐条开关。既有仅本地来源、长期记忆、目标和类别许可仍有效，选择云不追溯放宽它们。本地 embedding 与云聊天设置相互独立。详见[记忆与隐私](memory-and-privacy.md)。

@@ -141,8 +141,9 @@ def test_recovery_exact_plan_hash_and_ordinary_grants_are_not_persistent(cli, tm
     assert resumed["hash"] == snapshot["hash"]
     code, _, error = cli("--workflow", "confirm", "--id", task_id, "--plan-hash", "0" * 64, "--authorize", "write_text")
     assert code == 1 and "Traceback" not in error
-    code, denied, _ = cli("--workflow", "confirm", "--id", task_id, "--plan-hash", snapshot["hash"])
-    assert code == 2 and denied["required_authorizations"] == ["write_text"]
+    code, denied, error = cli("--workflow", "confirm", "--id", task_id, "--plan-hash", snapshot["hash"])
+    assert code == 1 and denied is None and "Traceback" not in error
+    assert success(cli, "--workflow", "task", "--id", task_id)["attempts"] == []
     assert not (tmp_path / "workspace" / "note.txt").exists()
     completed = success(cli, "--workflow", "confirm", "--id", task_id, "--plan-hash", snapshot["hash"], "--authorize", "write_text")
     assert completed["status"] == "Completed"
@@ -158,9 +159,10 @@ def test_recovery_high_risk_confirmation_stays_separate(cli, tmp_path):
     assert code == 2 and waiting["required_high_risk_authorizations"] == ["document_delete"]
     reviewed = success(cli, "--workflow", "task", "--id", waiting["task_id"])
     plan_hash = reviewed["plan"]["hash"]
-    code, _, _ = cli("--workflow", "confirm", "--id", waiting["task_id"], "--plan-hash", plan_hash,
+    code, _, error = cli("--workflow", "confirm", "--id", waiting["task_id"], "--plan-hash", plan_hash,
                       "--authorize", "document_delete")
-    assert code == 2 and target.exists()
+    assert code == 1 and "Traceback" not in error and target.exists()
+    assert success(cli, "--workflow", "task", "--id", waiting["task_id"])["attempts"] == []
     result = success(cli, "--workflow", "confirm", "--id", waiting["task_id"], "--plan-hash", plan_hash,
                      "--authorize-high-risk", "document_delete")
     assert result["status"] == "Completed" and not target.exists()

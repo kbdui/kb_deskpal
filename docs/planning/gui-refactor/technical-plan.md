@@ -1,10 +1,10 @@
 # 陪伴桌宠重构：前后端技术方案
 
-日期：2026-10-25。状态：拟实施契约，尚未实现或执行产品测试，不是当前 API 文档。产品行为以[产品设计](product-design.md)为准，执行顺序见[实施与验收](implementation-and-acceptance.md)。
+设计日期：2026-10-25。本文为技术基线；实际接口见[源码说明](../../developer-guide/gui-refactor.md)，范围见[开发记录](development-status.md)，T1 自动化结果与实机未验证边界见[测试记录](test-report.md)。产品行为以[产品设计](product-design.md)为准。
 
 第二轮补充的默认云模型、设置内密钥传递、头像/桌宠素材与工具插件目录契约见[模型、素材与工具扩展](settings-assets-and-tools.md)。下文已同步取消分散设置入口，备份范围随自定义素材扩展。
 
-本次按用户要求仅完成文档。入口见[设计总览](README.md)，消费这些契约的页面状态见[页面与状态细则](page-and-state-spec.md)。
+D0 按用户要求先完成文档；后续开发授权和退役旧 GUI 的补充要求见开发记录。入口见[设计总览](README.md)，页面状态见[页面与状态细则](page-and-state-spec.md)。
 
 ## 1. 核心决策
 
@@ -225,7 +225,7 @@ Host 统一拥有小窗与菜单，关闭/维护切换时先禁止新交互，�
 | 改动 | 调用方 / 文档同步 |
 | --- | --- |
 | 会话持久化与 epoch | application/service、dispatcher register、interaction prepare/publish、conversation runtime、workflow/humanization、GUI panels/state、CLI 如有调用 |
-| 任务审核与确认回执 | desktop、service、dispatcher、agent pending 权限查询、window/viewmodels、任务/小窗组件 |
+| 任务审核与确认回执 | desktop、service、dispatcher、agent pending 权限查询、window/channel/chat、任务/小窗组件 |
 | 隐私来源闭包 | application/privacy、workflow journal/deletion job、memory integration、所有正文 DTO、GUI 清屏 |
 | 提醒投影 | scheduling ports、application reminder service、desktop、notifications、host、安排页 |
 | 新 schema / 素材 | migrations/store/factory、assets 服务、archives 版本/资源清单识别与校验、恢复流程、测试夹具 |

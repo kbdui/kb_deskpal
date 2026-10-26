@@ -4,7 +4,8 @@
 
 | 位置 | 保存内容 | 主要代码 |
 | --- | --- | --- |
-| `workflow.sqlite3` | Task/Submission/Plan/attempt、目标/绑定/提议、依赖、inbox/cursor、删除工作单、outbox、回合/预算/隐私/效果账本 | [workflow/](../../src/deskpal/workflow) |
+| `workflow.sqlite3` | Task/Submission/Plan/attempt、目标/绑定/提议、依赖、持久会话/时间线、提醒inbox/cursor、素材元数据、清理工作单与隐私/效果账本 | [workflow/](../../src/deskpal/workflow) |
+| `assets/` | 当前及待回收托管静态 PNG，profile 通过 ID 引用 | [assets/](../../src/deskpal/assets) |
 | `memory.sqlite3` | 记忆断言、来源、revision、用途、审核、索引与画像相关记录 | [memory/repository.py](../../src/deskpal/memory/repository.py) |
 | `scheduling.sqlite3` | 日程、计时器、到期事件及来源库身份/世代 | [scheduling/service.py](../../src/deskpal/scheduling/service.py) |
 | `companion.sqlite3` | 人格版本、有限模拟情绪与持久互动设置 | [companion/repository.py](../../src/deskpal/companion/repository.py) |
@@ -13,7 +14,7 @@
 | QSettings | GUI 几何、偏好、通知去重 | [gui/preferences.py](../../src/deskpal/gui/preferences.py) |
 | 工作区 / 模型缓存 | 工具文件和检索资产，各自策略管理 | [sandbox/](../../src/deskpal/sandbox)、[maintenance/cache.py](../../src/deskpal/maintenance/cache.py) |
 
-SQLite 运行中还可能存在 WAL/SHM 文件。不要把单个主库文件复制当成运行中一致备份。完整聊天档案不在本版范围；有界会话内存与持久任务/上下文工作副本必须区分。
+SQLite 运行中还可能存在 WAL/SHM 文件。不要把单个主库文件复制当成运行中一致备份。2026-10-25 重构的工作库 schema3 增加持久聊天；显示存档、有界模型上下文与长期记忆仍各自独立。详见[源码增量](gui-refactor.md)，此次迁移和新格式尚待集中测试。
 
 ## 事务、版本和锁
 
@@ -60,7 +61,7 @@ Goal 的 revision 随写入递增，execution_version 仅随状态/执行条件�
 
 ## 归档与恢复屏障
 
-四库备份使用数据目录实例锁和 SQLite backup 形成快照，包含 manifest；历史 companion 缺失可明确表示。工作区、配置、凭据、模型缓存、日志和 GUI 偏好不在归档中。归档未加密未签名，hash 只校验完整性。
+格式2备份使用数据目录实例锁和 SQLite backup 形成四库及当前托管 PNG 的一致快照，包含引用/hash/尺寸 manifest；历史 companion 缺失可明确表示，仍可读取格式1四库归档。工作区、配置、凭据、模型缓存、日志和 GUI 偏好不在归档中。归档未加密未签名，hash 只校验完整性。
 
 恢复只发布到新目标目录。中断留下 `.restore-in-progress.json`/stage，只有相同归档、相同清单/hash 的明确 resume 才续办；`create_application()` 在开库前拒绝未完成目录。不能删除标记绕过屏障或用未知内容覆盖已有目标。
 

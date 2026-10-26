@@ -126,10 +126,13 @@ def test_restart_discards_both_grant_classes_and_confirms_exact_saved_plan(confi
         assert restored.canonical_json == saved.canonical_json
         with pytest.raises(ValueError):
             reopened.confirm_task(waiting.task_id, plan_hash="wrong-plan-hash")
-        still_waiting = reopened.confirm_task(waiting.task_id, plan_hash=saved.hash)
-        assert still_waiting.status == TaskStatus.WAITING
-        assert set(still_waiting.required_authorizations) == {"write_text", "document_copy", "document_delete"}
-        assert still_waiting.required_high_risk_authorizations == ("document_delete",)
+        with pytest.raises(WorkflowBlocked):
+            reopened.confirm_task(waiting.task_id, plan_hash=saved.hash)
+        still_waiting = reopened.task_review(waiting.task_id)
+        assert still_waiting["status"] == TaskStatus.WAITING.value
+        assert set(still_waiting["missing_permissions"]["ordinary_tools"]) == {"write_text", "document_copy"}
+        assert still_waiting["missing_permissions"]["high_risk_tools"] == ["document_delete"]
+        assert reopened.journal.attempts(waiting.task_id) == ()
         assert victim.exists()
         assert not (config.sandbox.workspace_dir / "new.txt").exists()
         done = reopened.confirm_task(waiting.task_id, plan_hash=saved.hash,

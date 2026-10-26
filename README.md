@@ -6,7 +6,7 @@
 - **开发者**：从[开发者指南](docs/developer-guide/README.md)开始，查阅文件架构、核心代码、执行链路、GUI、存储、扩展和验证说明。
 - **版本与证据**：[文档总导航](docs/README.md)保留各版本接口、计划、测试和交付记录。
 
-两套指南按 2026-10-23 当前代码整理；下文版本状态保留实现与验收边界。
+两套指南随源码更新；2026-10-26 GUI 重构 D1–D5 源码已整合，旧 GUI 实现已删除，范围见[开发记录](docs/planning/gui-refactor/development-status.md)，本轮自动化结果与修补见[测试记录](docs/planning/gui-refactor/test-report.md)。实机交互待用户自行验证。下文历史版本状态保留当时的验收边界。
 
 ## 当前状态
 
@@ -16,7 +16,7 @@
 
 Windows 个人智能 Agent 桌宠项目。当前版本 **0.5.0rc1**：在既有持久任务、来源化记忆、目标与本地提议后端上，加入 Qt Widgets 主窗口、后台交互、准确授权、托盘与通知。Python 3.11+。实机验收缺项见 [V0.5 状态](docs/versions/v0.5/delivery.md)，不宣称全部版本门槛已通过。
 
-提供 GUI 与命令行入口；Live2D、后台云规划和跨启动完整聊天档案仍属后续范围。V0.8 原人格/情绪实现的最小测试见[历史报告](docs/versions/v0.8/test-report.md)。2026-10-22 后续拟人化增量已实现至 H5：有界会话、可控表达、当前情境候选和并发遗忘，H6 材料完成后已按用户授权集中测试，**真实模型体验尚未验收通过**。实现见[开发记录](docs/versions/v0.8/humanization-development-status.md)，首败、修补、定向复测及限制见[本轮测试报告](docs/versions/v0.8/humanization-test-report.md)；历史测试不覆盖新代码。架构见 [ARCHITECTURE.md](ARCHITECTURE.md)，GUI 基础用法见 [V0.5 操作指南](docs/versions/v0.5/operations.md)和[接口](docs/versions/v0.5/interfaces.md)，CLI 继续参考 [V0.4 操作指南](docs/versions/v0.4/operations.md)。
+提供 GUI 与命令行入口。本轮重构加入持久日常/专项聊天、原地授权、五入口界面、桌宠小窗与静态形象导入，进度见[GUI 开发记录](docs/planning/gui-refactor/development-status.md)；Live2D 和无人值守执行继续暂缓。V0.8 拟人化历史测试及真实模型限制见[测试报告](docs/versions/v0.8/humanization-test-report.md)，不能扩大到本次源码。架构见 [ARCHITECTURE.md](ARCHITECTURE.md)，新界面用法见[用户指南](docs/user-guide/desktop.md)，CLI 继续参考 [V0.4 操作指南](docs/versions/v0.4/operations.md)。
 
 V0.5 [开工前评估](docs/planning/v0.5/environment-assessment.md)与[计划](docs/planning/v0.5/development-plan.md)保留为规划快照；实际证据见 [测试报告](docs/versions/v0.5/test-report.md)。
 
@@ -34,7 +34,7 @@ python -m pip install -r requirements-gui.txt -c constraints/windows-py312-gui.t
 python -m deskpal.gui --config config.toml
 ```
 
-加 --offline 可进行本次离线运行。GUI 默认 local_only，阻止整次云规划；使用 DeepSeek 时需主动选择 cloud_allowed。任务页按独立请求处理，会话页提供进程内有界多轮上下文。无 GUI 依赖仍可运行后端：
+加 --offline 可明确使用本次固定命令演示。新安装默认云连接，在设置中配置模型与密钥；缺配置可浏览但不能发送。聊天不逐条切换云/本地，用途与类别许可集中设置，旧来源限制保留。聊天存档跨重启保留，模型上下文仍有界。无 GUI 依赖仍可运行后端：
 
 ```powershell
 conda activate deskpal_env
@@ -45,7 +45,7 @@ python -m deskpal --list-tools
 
 基础安装用 requirements.txt；截图和本地 embedding 分别用 requirements-screenshot.txt、requirements-embedding.txt。直接声明统一在 pyproject.toml，requirements 只引用分组；Windows 还会安装 tzdata。约束包含 Windows CPython 3.12 的 44 项观察版本，不是跨平台哈希锁。见 [依赖维护](docs/guides/dependencies.md)与 [Embedding 安装](docs/guides/embedding-setup.md)。
 
-默认 Provider 是明确标识的离线演示，无需 key/网络；它用固定规则生成回复与工具计划，不具备真实模型的自然语言理解能力。也可用安装后的 deskpal 命令。
+新默认 provider 为云连接，尚未配置时不生成回复。若要运行上述固定命令演示，先在配置明确设 `provider="offline"`；该演示无需 key/网络，不具备真实模型的自然语言理解能力。也可用安装后的 deskpal 命令。
 
 ## 工具与确认
 
@@ -122,9 +122,9 @@ python -m deskpal --companion rollback --companion-parameters '{"expected_revisi
 
 ## 配置与数据
 
-`--config config.toml` 显式选择配置；优先级：进程环境变量 > 配置目录 .env > TOML > 默认值。相对路径以配置文件目录为准。.env 按字面解析且不修改全局环境；密钥禁止写 TOML 或 Git。GUI 缺配置进入向导，可用 `python -m deskpal.gui --setup` 主动进入。默认路径优先当前目录已有 `config.toml`，其次 Windows 用户配置目录；普通 CLI 无默认文件时保留原离线行为。完整路径和维护流程见[新增操作说明](docs/versions/v0.9/operations.md)。
+`--config config.toml` 显式选择配置；字段优先级为进程环境变量 > 配置目录 .env > TOML > 默认值。相对路径以配置目录为准，密钥禁止写 TOML 或 Git。GUI 缺配置进入设置，可用 `python -m deskpal.gui --setup` 主动进入。默认路径优先当前目录已有文件，其次 Windows 用户配置目录；新默认云连接须配置就绪。完整流程见[模型配置](docs/user-guide/configuration.md)。
 
-API 模式使用兼容 Responses 协议的 adapter，provider=openai，model/base_url/api_key_env 按实际服务配置；密钥使用环境/.env 或向导写入 Windows 系统凭据，环境 key 优先。请求、合资格记忆与必要工具结果会发给所配置服务；本地存储不等于本地模型推理。配置项见 [config.example.toml](config.example.toml)，历史协议范围见 [V0.3 接口](docs/versions/v0.3/interfaces.md)。
+API 模式仅兼容 Responses 协议，执行位置由 `execution_location` 区分云和本机回环。新连接默认系统凭据库，也可明确选择环境来源；旧配置保留原实际来源。密钥在设置经专用后台通道保存，现有密钥不回显。请求和允许使用的来源才进入所选模型；切换云不放宽旧来源用途。本地 embedding 独立配置。字段见 [config.example.toml](config.example.toml)。
 
 ```text
 src/deskpal/

@@ -9,6 +9,8 @@ MESSAGES = {
     "unsafe_path": "目录关系或文件类型不安全，请选择独立的普通目录。",
     "io_error": "本地文件操作失败，请检查权限和可用空间。",
     "credential_missing": "未发现可用凭据，请配置所选环境变量或 Windows 系统凭据。",
+    "credential_target_changed": "连接目标已变化，请明确替换或移除原凭据，避免向新服务发送旧密钥。",
+    "connection_failed": "连接验证失败，请检查协议、服务地址、模型名和凭据；保存值仍保留。",
     "environment_override": "环境设置会覆盖文件中的部分设置。",
     "cache_missing": "尚未准备语义检索模型，请明确允许下载后准备。",
     "cache_unmanaged": "此目录不是本程序管理的缓存；可离线校验，请换用空目录准备。",

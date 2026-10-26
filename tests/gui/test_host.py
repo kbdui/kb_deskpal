@@ -3,18 +3,29 @@
 from threading import Event
 
 from PySide6.QtCore import QSettings
-from PySide6.QtWidgets import QSystemTrayIcon
+from PySide6.QtWidgets import QMessageBox, QSystemTrayIcon
 
 from deskpal.application.factory import create_application
 from deskpal.application.instance import InstanceLock, InstanceLockError
 from deskpal.config import load_config
 from deskpal.gui.bridge import ApplicationBridge
+from deskpal.gui.channel import Channel
 from deskpal.gui.host import DesktopHost
 from deskpal.gui.preferences import GuiPreferences
 from deskpal.planner.models import Plan
 from deskpal.tools.models import ToolCall
 
 import pytest
+
+
+def gui_ready(host):
+    coordinator = host.window.chat_coordinator
+    return (host.window.lifecycle == "Ready" and host.feed_timer.isActive()
+            and coordinator.available and coordinator.model_ready
+            and bool(coordinator.default_id)
+            and host.window.chat_view.conversation_id == coordinator.default_id
+            and host.bridge.pending_count == 0
+            and not any(channel.pending for channel in host.window.findChildren(Channel)))
 
 
 def make_host(qtbot, tmp_path, monkeypatch, *, planner=None):
@@ -32,10 +43,9 @@ def make_host(qtbot, tmp_path, monkeypatch, *, planner=None):
     qtbot.waitUntil(lambda: host.bridge.state == "Ready", timeout=5000)
     # The worker updates its property before emitting queued Ready callbacks.
     # Test doubles must be installed only after both GUI handlers and their
-    # initial settings requests have finished, otherwise startup can call them.
-    qtbot.waitUntil(lambda: host.window.lifecycle == "Ready" and host.feed_timer.isActive()
-                   and host.bridge.pending_count == 0 and not host.window.requests.pending,
-                   timeout=5000)
+    # initial settings, appearance and persistent-conversation requests have
+    # finished, otherwise startup can call them.
+    qtbot.waitUntil(lambda: gui_ready(host), timeout=5000)
     return host, replies, config
 
 
@@ -51,6 +61,8 @@ def close(qtbot, host):
     host.bridge.shutdown()
     qtbot.waitUntil(lambda: host.bridge.state == "Closed", timeout=5000)
     qtbot.waitUntil(lambda: host.window.lifecycle == "Closed", timeout=5000)
+    assert host._finalized and host.pet.settled
+    assert host.pet_chat is None and not host._retired_chats
 
 
 def test_host_factory_waits_for_queued_ready_and_initial_settings(qtbot, tmp_path, monkeypatch):
@@ -77,8 +89,11 @@ def test_host_factory_waits_for_queued_ready_and_initial_settings(qtbot, tmp_pat
         assert host.window.lifecycle == "Ready"
         assert host.feed_timer.isActive()
         assert host.bridge.pending_count == 0
-        assert not host.window.requests.pending
+        assert not any(channel.pending for channel in host.window.findChildren(Channel))
+        assert host.window.chat_view.conversation_id == host.window.chat_coordinator.default_id
         assert any(reply["operation"] == "settings" and reply["ok"] for reply in replies)
+        assert any(reply["operation"] == "conversation_ensure_default" and reply["ok"] for reply in replies)
+        assert any(reply["operation"] == "appearance_snapshot" and reply["ok"] for reply in replies)
     finally:
         close(qtbot, host)
 
@@ -86,9 +101,14 @@ def test_host_factory_waits_for_queued_ready_and_initial_settings(qtbot, tmp_pat
 def test_production_host_runs_offline_request_and_releases_instance(qtbot, tmp_path, monkeypatch):
     host, replies, config = make_host(qtbot, tmp_path, monkeypatch)
     try:
+        coordinator = host.window.chat_coordinator
+        conversation_id = coordinator.default_id
         receipt = execute(qtbot, host, replies, "submit",
-            {"request": "帮我执行一个任务", "command_id": "host-submit", "use_policy": "local_only"})
+            {"request": "帮我执行一个任务", "command_id": "host-submit", "use_policy": "local_only",
+             "conversation_id": conversation_id,
+             "expected_context_epoch": coordinator.conversations[conversation_id]["context_epoch"]})
         task_id = receipt["task_id"]
+        assert receipt["conversation_id"] == conversation_id
         for _ in range(50):
             data = execute(qtbot, host, replies, "task", {"task_id": task_id})
             if data["task"]["status"] == "Completed":
@@ -96,6 +116,9 @@ def test_production_host_runs_offline_request_and_releases_instance(qtbot, tmp_p
             qtbot.wait(20)
         assert data["task"]["status"] == "Completed"
         assert len(data["attempts"]) == 1
+        timeline = execute(qtbot, host, replies, "conversation_timeline", {"id": conversation_id})
+        assert {item["kind"] for item in timeline["items"] if item["task_id"] == task_id} == {
+            "user_message", "assistant_message", "task_card"}
         with pytest.raises(InstanceLockError):
             InstanceLock(config.storage.data_dir).acquire()
     finally:
@@ -133,10 +156,53 @@ def test_slow_planner_cancel_remains_responsive_and_does_not_claim_forced_stop(q
 def test_window_close_with_no_tray_never_hides_the_only_window(qtbot, tmp_path, monkeypatch):
     host, _, _ = make_host(qtbot, tmp_path, monkeypatch)
     host.preferences.set_close_to_tray(True)
+    host.window.chat_view.input.setPlainText("synthetic unsent draft")
+    confirmations = []
+
+    def confirm_exit(*args):
+        confirmations.append(args)
+        return QMessageBox.StandardButton.Yes
+
+    monkeypatch.setattr(QMessageBox, "question", confirm_exit)
     host.window.show()
-    host.window.close()
-    qtbot.waitUntil(lambda: host.bridge.state in {"Closing", "Closed"})
-    close(qtbot, host)
+    try:
+        assert host.window.has_unsaved_content()
+        host.window.close()
+        qtbot.waitUntil(lambda: host.bridge.state in {"Closing", "Closed"})
+        assert len(confirmations) == 1
+        assert not host._hidden_to_tray
+    finally:
+        close(qtbot, host)
+
+
+def test_declined_exit_keeps_draft_and_reentrant_confirmation_is_guarded(qtbot, tmp_path, monkeypatch):
+    host, _, _ = make_host(qtbot, tmp_path, monkeypatch)
+    host.window.show()
+    draft = "synthetic unsent draft"
+    host.window.chat_view.input.setPlainText(draft)
+    answers = iter((QMessageBox.StandardButton.No, QMessageBox.StandardButton.Yes))
+    confirmations = []
+
+    def confirm_exit(*args):
+        confirmations.append(args)
+        # A native confirmation runs a nested event loop: another exit gesture
+        # must neither prompt again nor start backend shutdown within it.
+        host._request_quit()
+        assert host.bridge.state == "Ready"
+        return next(answers)
+
+    monkeypatch.setattr(QMessageBox, "question", confirm_exit)
+    try:
+        host.window.request_exit()
+        assert len(confirmations) == 1
+        assert host.bridge.state == "Ready" and host.window.isVisible()
+        assert host.window.chat_view.input.toPlainText() == draft
+        assert host.window.chat_coordinator.draft(host.window.chat_view.conversation_id).text == draft
+        host.window.request_exit()
+        qtbot.waitUntil(lambda: host.bridge.state in {"Closing", "Closed"})
+        assert len(confirmations) == 2
+    finally:
+        close(qtbot, host)
 
 
 def test_notification_toggle_does_not_coalesce_with_old_feed(qtbot, tmp_path, monkeypatch):

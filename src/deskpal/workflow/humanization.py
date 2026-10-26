@@ -96,6 +96,7 @@ class HumanizationStore:
             if conn.execute("SELECT 1 FROM immutableplan WHERE task_id=?", (task_id,)).fetchone():
                 raise WorkflowBlocked("A persisted plan cannot change its source policy")
             conn.execute("UPDATE task SET use_policy='local_only' WHERE id=?", (task_id,))
+            conn.execute("UPDATE conversation_item SET use_policy='local_only' WHERE task_id=?", (task_id,))
             conn.execute("UPDATE dependency_version SET use_policy='local_only' WHERE kind='dialogue_turn' AND object_id IN (?,?,?)",
                          (task_id, task_id + ":user", task_id + ":assistant"))
 

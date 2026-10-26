@@ -13,7 +13,7 @@ from deskpal.companion import CompanionRuntime
 from deskpal.config import AppConfig, ConfigError, load_config
 from deskpal.execution_log import ExecutionLog, JsonlExecutionLog
 from deskpal.llm.ports import LLMProvider
-from deskpal.llm.providers import OfflineLLMProvider, OpenAILLMProvider
+from deskpal.llm.providers import OfflineLLMProvider, OpenAILLMProvider, UnavailableLLMProvider
 from deskpal.memory.contracts import EmbeddingProvider, MemoryEvaluator
 from deskpal.memory.repository import SQLiteMemoryRepository
 from deskpal.memory.coordinator import MemoryCoordinator
@@ -62,7 +62,9 @@ def _create_core(config: AppConfig | None = None, *, planner: Planner | None = N
     llm: LLMProvider
     if settings.llm.provider == "offline":
         llm = OfflineLLMProvider()
-    elif settings.llm.provider == "openai":
+    elif settings.llm.provider == "openai" and not settings.llm.ready:
+        llm = UnavailableLLMProvider()
+    elif settings.llm.provider == "openai" and settings.llm.ready:
         llm = OpenAILLMProvider(settings.llm)
     else:
         raise ConfigError("llm.provider must be offline or openai")
@@ -92,20 +94,20 @@ def _create_core(config: AppConfig | None = None, *, planner: Planner | None = N
             except Exception:
                 startup_warnings = ("Semantic model unavailable; using lexical retrieval (no automatic download)",)
         retriever = MemoryRetriever(repository, embedding=selected_embedding,
-                                   cloud=settings.llm.provider != "offline",
+                                   cloud=settings.llm.is_cloud,
                                    max_bytes=settings.memory.max_context_bytes,
                                    semantic_threshold=settings.memory.semantic_threshold,
                                    startup_warnings=startup_warnings)
         evaluator = memory_evaluator
         if evaluator is None and settings.memory.mode == "candidate_review":
             evaluation_llm: LLMProvider = llm
-            if settings.llm.provider == "openai":
+            if settings.llm.provider == "openai" and settings.llm.ready:
                 evaluation_llm = OpenAILLMProvider(settings.llm,
                     timeout_seconds=settings.memory.evaluation_timeout_seconds,
                     max_output_tokens=settings.memory.evaluation_max_output_tokens)
             evaluator = LLMMemoryEvaluator(evaluation_llm, max_candidates=settings.memory.max_candidates)
         memory = MemoryCoordinator(repository, retriever=retriever, evaluator=evaluator,
-                                   mode=settings.memory.mode, cloud=settings.llm.provider != "offline")
+                                   mode=settings.memory.mode, cloud=settings.llm.is_cloud)
         scheduling = SchedulingService(settings.storage.data_dir / "scheduling.sqlite3",
                                        execution_log=execution_log,
                                        poll_interval=settings.scheduling.poll_interval_seconds)
@@ -130,7 +132,7 @@ def _create_core(config: AppConfig | None = None, *, planner: Planner | None = N
                          on_close=lambda: owned.close(), memory_runtime=memory,
                          journal=journal, execution_guard=execution_guard,
                          companion_runtime=companion,
-                         companion_cloud=settings.llm.provider != "offline",
+                         companion_cloud=settings.llm.is_cloud,
                          companion_unavailable=companion_unavailable)
         # Transfer ownership only after every constructor/start has succeeded.
         owned = resources.pop_all()

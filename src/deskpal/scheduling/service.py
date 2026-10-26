@@ -193,6 +193,42 @@ class SchedulingService:
             tail = int(self._db.execute("SELECT COALESCE(MAX(id),0) FROM events WHERE source=?", (source,)).fetchone()[0])
             return EventCursorState(source, tail, self.event_anchor(source, tail) or "empty")
 
+    def page_items(self, *, source: str = "all", offset: int = 0,
+                   limit: int = 50, status: str = "all") -> dict[str, Any]:
+        """Read current resources without polling, consuming, or running tools.
+
+        Timers retain their persisted status. Calendar status is a presentation
+        of reminder_fired: scheduled/reminded, not a claim about attendance.
+        """
+        if not isinstance(source, str) or not isinstance(status, str) or source not in {"all", "timer", "calendar"} or status not in {"all", "pending", "fired", "cancelled", "scheduled", "reminded"}:
+            raise ValueError("Unsupported scheduling source or status filter")
+        if type(offset) is not int or offset < 0 or type(limit) is not int or not 1 <= limit <= 100:
+            raise ValueError("Scheduling page limit must be 1..100 and offset non-negative")
+        with self._lock:
+            self._ensure_open()
+            rows = self._db.execute("""
+                SELECT 'timer' AS source,id,id AS source_id,label AS title,label,due_at,
+                       NULL AS start_at,NULL AS end_at,NULL AS reminder_at,NULL AS timezone,
+                       status,duration_seconds,created_at,created_at AS updated_at,
+                       1 AS occurrence_revision,due_at AS sort_at
+                FROM timers WHERE ? IN ('all','timer') AND (?='all' OR status=?)
+                UNION ALL
+                SELECT 'calendar',id,id,title,title,reminder_at,start_at,end_at,reminder_at,timezone,
+                       CASE WHEN reminder_fired=1 THEN 'reminded' ELSE 'scheduled' END,
+                       NULL,created_at,updated_at,revision,start_at
+                FROM calendar WHERE ? IN ('all','calendar') AND
+                     (?='all' OR CASE WHEN reminder_fired=1 THEN 'reminded' ELSE 'scheduled' END=?)
+                ORDER BY sort_at,source,id LIMIT ? OFFSET ?
+                """, (source, status, status, source, status, status, limit + 1, offset)).fetchall()
+            items = []
+            for row in rows[:limit]:
+                item = dict(row)
+                item.pop("sort_at")
+                items.append(item)
+            identity = self.store_identity
+            return {"items": items, "offset": offset, "has_more": len(rows) > limit,
+                "store_id": identity.store_id, "generation": identity.generation}
+
     def _now(self) -> datetime:
         now = self._clock.now()
         if not isinstance(now, datetime) or now.tzinfo is None or now.utcoffset() is None:

@@ -1,6 +1,7 @@
 """Registration, audit, permission gating and dispatch of trusted tools."""
 
 from dataclasses import dataclass
+from collections.abc import Callable
 from typing import Any, Mapping
 
 from deskpal.execution_log import ExecutionLog, NullExecutionLog
@@ -50,6 +51,13 @@ class BuiltinToolManager:
         self._sandbox = sandbox
         self._log = execution_log if execution_log is not None else NullExecutionLog()
         self._tools: dict[str, _Registered] = {}
+        self._result_observer: Callable[[str, ToolResult], None] | None = None
+
+    def set_result_observer(self, observer: Callable[[str, ToolResult], None]) -> None:
+        """Application-owned projection hook; never authorizes or retries tools."""
+        if self._result_observer is not None and self._result_observer is not observer:
+            raise ValueError("Tool result observer is already owned")
+        self._result_observer = observer
 
     def register(self, tool: Tool) -> None:
         source = tool.spec
@@ -87,6 +95,19 @@ class BuiltinToolManager:
 
     def list_tools(self) -> tuple[ToolSpec, ...]:
         return tuple(_copy_spec(entry.spec) for entry in self._tools.values())
+
+    def catalog_metadata(self, name: str) -> dict[str, str]:
+        """Trusted, read-only availability; registration never implies success."""
+        entry = self._tools.get(name)
+        if entry is None:
+            raise ToolNotFound("Tool is not registered")
+        origin = "builtin" if type(entry.tool).__module__.startswith("deskpal.tools.") else "host_registered"
+        result = {"origin": origin, "plugin_id": origin, "availability": "check_at_execution", "reason": "执行时检查参数、工作区权限与资源状态"}
+        if type(entry.tool).__module__ == "deskpal.tools.screenshot":
+            inspect = getattr(entry.tool, "catalog_availability", None)
+            if callable(inspect):
+                result.update(inspect())
+        return result
 
     def _lookup(self, call: ToolCall, context: ToolContext) -> _Registered:
         entry = self._tools.get(call.name)
@@ -157,6 +178,14 @@ class BuiltinToolManager:
             self._log.record("tool_failed", context.task_id, self._result_data(normalized))
         else:
             self._log.record("tool_completed", context.task_id, self._result_data(normalized))
+            if self._result_observer is not None:
+                # A projection failure cannot turn a completed side effect into
+                # a retryable tool failure. Its source remains independently
+                # discoverable as an unassociated reminder.
+                try:
+                    self._result_observer(context.task_id, normalized)
+                except Exception:
+                    pass
         return normalized
 
     @staticmethod

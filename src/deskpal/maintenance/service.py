@@ -18,8 +18,9 @@ from .errors import MaintenanceError, message_for
 
 OPERATIONS: dict[str, frozenset[str]] = {
     "setup_status": frozenset(),
-    "setup_save": frozenset({"values", "expected_revision", "credential_secret"}),
-    "setup_repair": frozenset({"values", "expected_revision", "credential_secret", "confirm"}),
+    "setup_save": frozenset({"values", "expected_revision", "credential_secret", "credential_action"}),
+    "setup_repair": frozenset({"values", "expected_revision", "credential_secret", "credential_action", "confirm"}),
+    "connection_test": frozenset({"expected_revision", "confirm"}),
     "cache_status": frozenset(),
     "cache_verify": frozenset(),
     "cache_prepare": frozenset({"allow_download"}),
@@ -166,6 +167,9 @@ class MaintenanceService:
             assert_restore_ready(settings.storage.data_dir)
             result["effective"] = {
                 "provider": settings.llm.provider, "model": settings.llm.model,
+                "execution_location": settings.llm.execution_location, "protocol": settings.llm.protocol,
+                "credential_mode": settings.llm.credential_mode, "credential_source": settings.llm.credential_source,
+                "request_use_default": settings.llm.request_use_default,
                 "base_url": settings.llm.base_url, "api_key_env": settings.llm.api_key_env,
                 "timeout_seconds": settings.llm.timeout_seconds,
                 "expression_output_format": settings.llm.expression_output_format,
@@ -175,6 +179,9 @@ class MaintenanceService:
                 "model_cache_dir": str(settings.memory.model_cache_dir),
             }
             result["can_start"] = True
+            result["llm_ready"] = settings.llm.ready
+            result["configured"] = settings.llm.ready
+            result["active_revision"] = None  # no production Application is active in maintenance
         except (MaintenanceError, ConfigError, OSError, CredentialStoreError, ValueError) as error:
             issue = safe_error(error)
             result["issues"] = [*result.get("issues", []), issue]
@@ -186,7 +193,12 @@ class MaintenanceService:
         if set(parameters) - OPERATIONS[operation]:
             raise MaintenanceError("invalid_config")
         try:
-            encoded = json.dumps(dict(parameters), ensure_ascii=False, allow_nan=False)
+            bounded_parameters = {key: value for key, value in parameters.items() if key != "credential_secret"}
+            secret = parameters.get("credential_secret")
+            if secret is not None:
+                from deskpal.credentials import WindowsCredentialStore
+                WindowsCredentialStore.validate_secret(secret)
+            encoded = json.dumps(bounded_parameters, ensure_ascii=False, allow_nan=False)
             if len(encoded.encode("utf-8")) > 131072:
                 raise MaintenanceError("invalid_config")
         except (TypeError, ValueError, RecursionError, UnicodeError):
@@ -196,6 +208,31 @@ class MaintenanceService:
         return _bounded(self._execute(operation, parameters))
 
     def _execute(self, operation: str, parameters: Mapping[str, Any]) -> dict[str, Any]:
+        if operation == "connection_test":
+            if not _flag(parameters, "confirm"):
+                raise MaintenanceError("confirmation_required")
+            from .setup import SetupService
+            from deskpal.llm.providers import OpenAILLMProvider
+            from deskpal.memory.cache_lock import CacheLease, CacheLeaseError
+            try:
+                with CacheLease(self.config_path.parent / ("." + self.config_path.name + ".setup"), exclusive=True):
+                    status = SetupService(self.config_path).inspect()
+                    if status["revision"] != _text(parameters, "expected_revision"):
+                        raise MaintenanceError("revision_conflict")
+                    settings = load_config(self.config_path)
+                    if settings.llm.provider == "offline" or not settings.llm.ready:
+                        raise MaintenanceError("credential_missing")
+                    with InstanceLock(settings.storage.data_dir):
+                        # Fixed public text only: no tools, memory, persona or conversation.
+                        reply = OpenAILLMProvider(settings.llm, max_output_tokens=32).generate("Reply with the word OK.")
+                        if not reply.strip():
+                            raise MaintenanceError("connection_failed")
+            except LLMError:
+                raise MaintenanceError("connection_failed") from None
+            except CacheLeaseError:
+                raise MaintenanceError("busy") from None
+            return {"status": "verified", "revision": status["revision"],
+                    "protocol": settings.llm.protocol, "private_context_sent": False}
         if operation.startswith("setup_"):
             from .setup import SetupService
             setup = SetupService(self.config_path)
@@ -208,11 +245,16 @@ class MaintenanceService:
             secret = parameters.get("credential_secret")
             if secret is not None and not isinstance(secret, str):
                 raise MaintenanceError("invalid_config")
+            action = parameters.get("credential_action", "keep")
+            if not isinstance(action, str):
+                raise MaintenanceError("invalid_config")
             if operation == "setup_repair":
                 status = setup.repair(values, expected_revision=revision,
-                                      confirm=_flag(parameters, "confirm"), credential_secret=secret or None)
+                                      confirm=_flag(parameters, "confirm"), credential_secret=secret or None,
+                                      credential_action=action)
             else:
-                status = setup.save(values, expected_revision=revision, credential_secret=secret or None)
+                status = setup.save(values, expected_revision=revision, credential_secret=secret or None,
+                                    credential_action=action)
             return self._setup_status(status)
         if operation.startswith("cache_"):
             from .cache import ModelCacheManager

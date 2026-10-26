@@ -73,6 +73,22 @@ class MaintenanceBridge(QObject):
 
     def send(self, operation: str, parameters: dict[str, Any] | None = None,
              *, generation: int = 0) -> str:
+        if parameters is not None and "credential_secret" in parameters:
+            raise ValueError("Use the dedicated sensitive configuration channel")
+        return self._submit(operation, parameters, generation=generation)
+
+    def send_sensitive(self, operation: str, parameters: dict[str, Any], *,
+                       credential_secret: str | None = None, generation: int = 0) -> str:
+        """One-shot in-memory delivery; never hash, serialize or cache the secret."""
+        if operation not in {"setup_save", "setup_repair"} or "credential_secret" in parameters:
+            raise ValueError("Invalid sensitive operation")
+        if credential_secret is not None:
+            from deskpal.credentials import WindowsCredentialStore
+            WindowsCredentialStore.validate_secret(credential_secret)
+        return self._submit(operation, parameters, generation=generation, credential_secret=credential_secret)
+
+    def _submit(self, operation: str, parameters: dict[str, Any] | None = None,
+                *, generation: int = 0, credential_secret: str | None = None) -> str:
         if self._closing or self.busy:
             raise RuntimeError("maintenance unavailable")
         # A JSON copy bounds input and prevents later edits to the command.
@@ -81,7 +97,10 @@ class MaintenanceBridge(QObject):
             raise ValueError("maintenance command too large")
         request_id = str(uuid4())
         self._active = request_id
-        self._commands.put_nowait((request_id, operation, json.loads(encoded), generation))
+        payload = json.loads(encoded)
+        if credential_secret is not None:
+            payload["credential_secret"] = credential_secret
+        self._commands.put_nowait((request_id, operation, payload, generation))
         if self._thread is None:
             self._thread = Thread(target=self._run, name="deskpal-maintenance", daemon=False)
             self._thread.start()
@@ -165,6 +184,8 @@ class MaintenanceWindow(QMainWindow):
 
     def __init__(self, bridge: MaintenanceBridge, parent: QWidget | None = None) -> None:
         super().__init__(parent)
+        from .widgets import install_wheel_guard
+        install_wheel_guard()
         self.bridge = bridge
         self._generation = 0
         self._request: str | None = None
@@ -178,7 +199,14 @@ class MaintenanceWindow(QMainWindow):
         self._populating = False
         self._starting = False
         self._setup_notice = ""
-        self.setWindowTitle("Deskpal · 首次配置与数据维护")
+        self._config_exists = False
+        self._config_valid = False
+        self._status_loaded = False
+        self.setWindowTitle("Deskpal · 设置")
+        self.setStyleSheet("QWidget { background: #f8f7f2; color: #293b32; font-size: 14px; } "
+                           "QLineEdit, QComboBox, QPlainTextEdit { background: #ffffff; border: 1px solid #ccd7cc; padding: 7px; border-radius: 6px; } "
+                           "QPushButton { background: #dbe8dc; border: 1px solid #bdcdbf; padding: 8px 14px; border-radius: 7px; } "
+                           "QPushButton:disabled { color: #89938b; background: #edf0e9; }")
         self.resize(820, 720)
         root = QWidget()
         layout = QVBoxLayout(root)
@@ -204,14 +232,19 @@ class MaintenanceWindow(QMainWindow):
         self.start_button = QPushButton("启动应用")
         self.start_button.setEnabled(False)
         self.stop_button = QPushButton("退出 / 请求停止")
+        self.browse_button = QPushButton("暂不配置，浏览本地内容")
+        self.browse_button.setEnabled(False)
         controls.addWidget(self.start_button)
+        controls.addWidget(self.browse_button)
         controls.addWidget(self.stop_button)
         layout.addLayout(controls)
         self.setCentralWidget(root)
         self.start_button.clicked.connect(self._start)
+        self.browse_button.clicked.connect(self._browse)
         self.stop_button.clicked.connect(self.close)
         bridge.reply.connect(self._reply)
         bridge.stopped.connect(self._stopped)
+        self.tabs.currentChanged.connect(self._section_changed)
 
     def open(self) -> None:
         self.show()
@@ -233,24 +266,32 @@ class MaintenanceWindow(QMainWindow):
         return button
 
     def _build_setup(self) -> None:
-        layout = self._page("配置")
-        hint = QLabel("离线演示是确定性示例。云模式兼容 OpenAI API；保存不调用云连接测试，也不自动安装依赖。新密钥留空沿用环境变量或 Windows 凭据库；环境变量优先。")
+        layout = self._page("模型与连接")
+        hint = QLabel("云连接默认使用系统凭据库；保存后新的聊天输入由所配置服务处理，历史、人格和记忆仍受各自许可限制。保存仅在本机校验，不自动联网。本地连接仅支持已部署的回环 Responses 端点，不会回退到云。离线演示仅返回固定示例。")
         hint.setWordWrap(True)
         layout.addWidget(hint)
         form = QFormLayout()
-        choices = {"provider": ["offline", "openai"],
+        choices = {"provider": ["openai", "offline"],
+                   "execution_location": ["cloud", "local"], "protocol": ["responses"],
+                   "credential_mode": ["system_vault", "environment", "none"],
+                   "request_use_default": ["true", "false"],
+                   "memory_mode": ["explicit_only", "candidate_review", "paused"],
                    "embedding_provider": ["disabled", "fastembed"],
                    "expression_output_format": ["prompt", "json_object"]}
-        labels = {"provider": "聊天模型类型", "model": "聊天模型名", "base_url": "API 地址",
+        labels = {"provider": "模型适配器 / 高级离线演示", "execution_location": "执行位置",
+                  "protocol": "连接协议（兼容 Responses 接口）", "credential_mode": "有效凭据来源",
+                  "request_use_default": "允许新聊天输入由云服务处理",
+                  "model": "聊天模型名", "base_url": "API 地址",
                   "api_key_env": "密钥环境变量名", "timeout_seconds": "超时秒数",
                   "expression_output_format": "表达格式", "workspace_dir": "工作区目录",
-                  "data_dir": "数据目录", "embedding_provider": "语义检索模型",
+                  "data_dir": "数据目录", "memory_mode": "记忆写入方式（保存后重启生效）", "embedding_provider": "语义检索模型",
                   "model_cache_dir": "语义检索模型缓存目录"}
         for key, label in labels.items():
             field: QLineEdit | QComboBox
             if key in choices:
                 field = QComboBox()
-                field.addItems(choices[key])
+                from .widgets import label as enum_label
+                for option in choices[key]: field.addItem(enum_label(option), option)
             else:
                 field = QLineEdit()
                 field.setMaxLength(4096)
@@ -265,6 +306,24 @@ class MaintenanceWindow(QMainWindow):
         self.secret.setEchoMode(QLineEdit.EchoMode.Password)
         self.secret.textChanged.connect(self._edited)
         form.addRow("保存新密钥到 Windows 凭据库", self.secret)
+        self.secret_action = QComboBox()
+        for option, title in [("keep", "保留当前凭据"), ("replace", "替换为本次输入"), ("remove", "移除当前凭据")]: self.secret_action.addItem(title, option)
+        self.secret_action.currentTextChanged.connect(self._edited)
+        self.secret.textChanged.connect(self._secret_edited)
+        form.addRow("凭据操作（保留 / 替换 / 移除）", self.secret_action)
+        self.show_secret = QCheckBox("临时查看本次输入")
+        self.show_secret.toggled.connect(lambda shown: self.secret.setEchoMode(
+            QLineEdit.EchoMode.Normal if shown else QLineEdit.EchoMode.Password))
+        form.addRow("", self.show_secret)
+        self.local_hint = QLabel("本地服务须已自行部署；仅允许 127.0.0.1 / ::1 / localhost，忽略环境代理并拒绝所有重定向。协议验证需单独点击测试连接。")
+        self.local_hint.setWordWrap(True)
+        form.addRow("本地连接", self.local_hint)
+        self._setup_form = form
+        location = self.fields["execution_location"]
+        mode = self.fields["credential_mode"]
+        assert isinstance(location, QComboBox) and isinstance(mode, QComboBox)
+        location.currentTextChanged.connect(self._connection_fields)
+        mode.currentTextChanged.connect(self._connection_fields)
         layout.addLayout(form)
         repair_hint = QLabel("修复会重建受支持的配置，其他设置会重置；原文恢复副本可能包含曾误填的秘密，请妥善保管。确认前请检查上述设置。")
         repair_hint.setWordWrap(True)
@@ -274,6 +333,41 @@ class MaintenanceWindow(QMainWindow):
         self._button(layout, "重新读取配置与来源（放弃未保存编辑）", lambda: self.request("setup_status"))
         self._button(layout, "保存配置", lambda: self._save(False))
         self._button(layout, "确认修复并保存", lambda: self._save(True))
+        self.test_confirm = QCheckBox("测试将发送固定公共文本，不含私人上下文；云服务可能产生少量费用")
+        layout.addWidget(self.test_confirm)
+        self._button(layout, "测试已保存的连接", self._test_connection)
+        self._connection_fields()
+
+    def _section_changed(self, index: int) -> None:
+        if index != 0:
+            self.secret.clear()
+            self.show_secret.setChecked(False)
+
+    def _secret_edited(self, value: str) -> None:
+        if value and not self._populating:
+            self.secret_action.setCurrentIndex(self.secret_action.findData("replace"))
+
+    def _connection_fields(self) -> None:
+        mode = self.fields["credential_mode"]
+        location = self.fields["execution_location"]
+        assert isinstance(mode, QComboBox) and isinstance(location, QComboBox)
+        self._setup_form.setRowVisible(self.fields["api_key_env"], mode.currentData() == "environment")
+        for widget in (self.secret, self.secret_action, self.show_secret):
+            self._setup_form.setRowVisible(widget, mode.currentData() == "system_vault")
+        self._setup_form.setRowVisible(self.local_hint, location.currentData() == "local")
+        self._setup_form.setRowVisible(self.fields["request_use_default"], location.currentData() == "cloud")
+        if mode.currentData() != "system_vault":
+            self.secret.clear()
+            self.show_secret.setChecked(False)
+
+    def _test_connection(self) -> None:
+        if self._dirty:
+            self.status.setText("请先保存配置，再测试已保存的连接。")
+            return
+        if not self.test_confirm.isChecked():
+            self.status.setText("请明确确认发送固定公共文本及可能的少量费用。")
+            return
+        self.request("connection_test", {"expected_revision": self._revision, "confirm": True})
 
     def _edited(self) -> None:
         if self._populating:
@@ -377,19 +471,20 @@ class MaintenanceWindow(QMainWindow):
             return
         values: dict[str, Any] = {}
         for key, field in self.fields.items():
-            values[key] = field.currentText() if isinstance(field, QComboBox) else field.text()
+            values[key] = field.currentData() if isinstance(field, QComboBox) else field.text()
         try:
             values["timeout_seconds"] = float(values["timeout_seconds"])
         except ValueError:
             self.status.setText("超时秒数须为有效数字。")
             return
+        values["request_use_default"] = values["request_use_default"] == "true"
         parameters: dict[str, Any] = {"values": values, "expected_revision": self._revision}
-        if self.secret.text():
-            parameters["credential_secret"] = self.secret.text()
+        parameters["credential_action"] = self.secret_action.currentData()
         if repair:
             parameters["confirm"] = True
         self._can_start = False
-        self.request("setup_repair" if repair else "setup_save", parameters)
+        self.request("setup_repair" if repair else "setup_save", parameters,
+                     credential_secret=self.secret.text() or None)
         self.secret.clear()
         parameters.clear()
 
@@ -444,16 +539,22 @@ class MaintenanceWindow(QMainWindow):
             self.start_button.setEnabled(False)
             self.status.setText("恢复目录已填入。请检查并明确保存配置后启动。")
 
-    def request(self, operation: str, parameters: dict[str, Any] | None = None) -> None:
+    def request(self, operation: str, parameters: dict[str, Any] | None = None,
+                *, credential_secret: str | None = None) -> None:
         if self._closing or self._request is not None:
             return
         try:
-            self._request = self.bridge.send(operation, parameters, generation=self._generation)
+            if operation in {"setup_save", "setup_repair"}:
+                self._request = self.bridge.send_sensitive(operation, parameters or {},
+                    credential_secret=credential_secret, generation=self._generation)
+            else:
+                self._request = self.bridge.send(operation, parameters, generation=self._generation)
         except (RuntimeError, ValueError):
             self.status.setText("维护请求未受理；请等待当前操作完成或减少输入。")
             return
         self.tabs.setEnabled(False)
         self.start_button.setEnabled(False)
+        self.browse_button.setEnabled(False)
         self.status.setText("正在执行维护操作；同步模型阶段无法强制中止。")
 
     @Slot(object)
@@ -470,35 +571,47 @@ class MaintenanceWindow(QMainWindow):
             self.output.setPlainText(str(error.get("message", "维护失败。")) + "\n" + "\n".join(str(x) for x in steps))
             self.status.setText("操作失败；按下方指引修正后重试。")
             self._starting = False
+            self.start_button.setEnabled(self._can_start)
+            self.browse_button.setEnabled(self._status_loaded and (not self._config_exists or self._can_start))
             return
         data = envelope.get("data", {})
         operation = envelope.get("operation", "")
         self.status.setText("维护操作完成。")
         if operation in {"setup_status", "setup_save", "setup_repair"}:
+            self._status_loaded = True
+            self._config_exists = bool(data.get("config_exists"))
+            self._config_valid = bool(data.get("config_valid"))
             self._revision = str(data.get("revision", ""))
             values = data.get("values", {})
             self._populating = True
             for key, field in self.fields.items():
-                value = str(values.get(key, ""))
+                raw_value = values.get(key, "")
+                value = str(raw_value).lower() if type(raw_value) is bool else str(raw_value)
                 if isinstance(field, QComboBox):
-                    field.setCurrentText(value)
+                    field.setCurrentIndex(field.findData(value))
                 else:
                     field.setText(value)
             self.secret.clear()
+            self.secret_action.setCurrentIndex(self.secret_action.findData("keep"))
+            self.show_secret.setChecked(False)
             self._populating = False
             self._dirty = False
             blocking = [issue for issue in data.get("issues", [])
                         if issue.get("code") != "environment_override"]
             self._can_start = bool(data.get("can_start", bool(data.get("config_exists"))
                 and bool(data.get("config_valid")) and not blocking))
+            self.start_button.setText("启动应用" if data.get("llm_ready") else "启动浏览（聊天待配置）")
             # Safe source labels/issue messages only, never arbitrary provider DTO JSON.
             sources = data.get("sources", {})
             lines = [f"{key}: {str(sources.get(key, ''))[:160]}" for key in self.fields]
             effective = data.get("effective", {})
             if isinstance(effective, dict):
-                lines.extend(f"当前生效 {key}: {str(effective[key])[:500]}"
+                lines.extend(f"下次启动采用 {key}: {str(effective[key])[:500]}"
                              for key in self.fields if key in effective)
             lines.append("已有凭据：" + ("是" if data.get("credential_present") else "否 / 离线无需"))
+            lines.append("有效凭据来源：" + str(data.get("credential_source", "missing")))
+            if data.get("credential_cleanup_pending"):
+                lines.append("配置已移除凭据引用，但系统凭据库清理尚未完成。")
             lines.extend(str(issue.get("message", "配置需修正"))[:500] for issue in data.get("issues", [])[:20])
             if data.get("configuration_reset"):
                 self._setup_notice = "已重建受支持的配置。请重新检查所有设置。"
@@ -508,6 +621,8 @@ class MaintenanceWindow(QMainWindow):
                 lines.append(self._setup_notice)
             self.output.setPlainText("\n".join(lines))
             if operation in {"setup_save", "setup_repair"}:
+                self._setup_notice = "已保存，等待重新启动后生效；尚未测试连接。" + self._setup_notice
+                self.status.setText("已保存，等待启动后生效。")
                 self.request("setup_status")
                 return
             if self._starting:
@@ -515,6 +630,9 @@ class MaintenanceWindow(QMainWindow):
                 if self._can_start:
                     self._shutdown("start")
                     return
+        elif operation == "connection_test":
+            self.status.setText("连接验证成功；已验证保存版本的 Responses 文本响应。")
+            self.output.setPlainText("固定公共文本请求成功；未发送聊天、历史、人格或记忆。配置是否生效取决于应用是否已重新启动。")
         elif operation.startswith("cache_"):
             self._cache_revision = str(data.get("revision", ""))
             keys: tuple[str, ...] = ("status", "verification", "dependency_available", "managed", "files", "bytes",
@@ -536,6 +654,14 @@ class MaintenanceWindow(QMainWindow):
                 self.use_restore_button.setEnabled(bool(self._restore_target))
                 self.output.appendPlainText("恢复后仍需启动审核原有任务；恢复不代表历史遗忘已完成。请先明确保存恢复目录配置。")
         self.start_button.setEnabled(self._can_start)
+        self.browse_button.setEnabled(self._status_loaded and (not self._config_exists or self._can_start))
+
+    def _browse(self) -> None:
+        if self._dirty:
+            self.status.setText("仍有未保存更改；请保存，或重新读取配置以放弃编辑后浏览。")
+            return
+        if not self.bridge.busy and self._status_loaded and (not self._config_exists or self._can_start):
+            self._shutdown("start")
 
     def _start(self) -> None:
         if self._can_start and not self.bridge.busy:

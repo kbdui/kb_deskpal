@@ -209,7 +209,8 @@ def test_t02_presets_cues_do_not_change_planner_or_same_task_plan_authority(conf
             call_count = len(recorder.calls)
             command(app, preset="concise" if preset != "concise" else "warm")
             command(app, "cue", mode="focused", ttl_seconds=60)
-            app.enqueue_confirmation(waiting.task_id, plan_hash=original.hash)
+            with pytest.raises(WorkflowBlocked):
+                app.enqueue_confirmation(waiting.task_id, plan_hash=original.hash)
             repeated = app.wait(waiting.task_id, timeout=WAIT_SECONDS)
             wait_idle(app)
             assert repeated.status == TaskStatus.WAITING
@@ -375,6 +376,7 @@ def test_t04_confirmation_replay_runs_one_tool_and_one_terminal_emotion(config, 
         monkeypatch.setattr(app.tools, "execute", blocked)
         facade = DesktopFacade(app)
         parameters = {"task_id": waiting.task_id, "plan_hash": saved.hash,
+                      "expected_revision": app.tasks.get(waiting.task_id).revision,
                       "ordinary_tools": ["write_text"], "high_risk_tools": [], "command_id": "same-confirmation"}
         before = app.companion_snapshot()
         assert facade.execute("confirm", parameters)["accepted"]

@@ -12,7 +12,7 @@ from deskpal.tools.models import ToolSpec
 from .errors import LLMError
 from .models import ChatMessage, LLMResponse
 from .ports import LLMProvider
-from .providers import OfflineLLMProvider
+from .providers import OfflineLLMProvider, UnavailableLLMProvider
 
 
 _T = TypeVar("_T")
@@ -27,7 +27,9 @@ class ModelCallGateway:
                  finish: Callable[[str, str], None] | None = None, *,
                  providers: Mapping[str, LLMProvider] | None = None) -> None:
         self._provider = provider
-        self.capability = "offline_demo" if isinstance(provider, OfflineLLMProvider) else "remote"
+        self.capability = ("offline_demo" if isinstance(provider, OfflineLLMProvider) else
+                           "unavailable" if isinstance(provider, UnavailableLLMProvider) else
+                           "local" if getattr(provider, "is_cloud", True) is False else "remote")
         self._reserve = reserve
         self._finish = finish
         self._providers = dict(providers or {})

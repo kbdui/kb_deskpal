@@ -12,6 +12,7 @@ import uuid
 from contextlib import ExitStack
 from pathlib import Path
 from typing import Any, Mapping
+from urllib.parse import urlsplit
 
 from dotenv import dotenv_values
 
@@ -26,7 +27,11 @@ from .cache import _safe
 from .errors import MaintenanceError, message_for
 
 FIELDS = {
-    "provider": ("llm", "provider", "offline", "DESKPAL_LLM_PROVIDER"),
+    "provider": ("llm", "provider", "openai", "DESKPAL_LLM_PROVIDER"),
+    "execution_location": ("llm", "execution_location", "cloud", "DESKPAL_LLM_EXECUTION_LOCATION"),
+    "protocol": ("llm", "protocol", "responses", "DESKPAL_LLM_PROTOCOL"),
+    "credential_mode": ("llm", "credential_mode", "system_vault", "DESKPAL_LLM_CREDENTIAL_MODE"),
+    "request_use_default": ("llm", "request_use_default", True, "DESKPAL_LLM_REQUEST_USE_DEFAULT"),
     "model": ("llm", "model", "", "DESKPAL_LLM_MODEL"),
     "base_url": ("llm", "base_url", "https://api.openai.com/v1", "DESKPAL_LLM_BASE_URL"),
     "api_key_env": ("llm", "api_key_env", "OPENAI_API_KEY", "DESKPAL_LLM_API_KEY_ENV"),
@@ -35,6 +40,7 @@ FIELDS = {
     "expression_output_format": ("llm", "expression_output_format", "prompt", "DESKPAL_LLM_EXPRESSION_OUTPUT_FORMAT"),
     "workspace_dir": ("sandbox", "workspace_dir", "workspace", "DESKPAL_WORKSPACE_DIR"),
     "data_dir": ("storage", "data_dir", "data", "DESKPAL_DATA_DIR"),
+    "memory_mode": ("memory", "mode", "explicit_only", "DESKPAL_MEMORY_MODE"),
     "embedding_provider": ("memory", "embedding_provider", "disabled", "DESKPAL_EMBEDDING_PROVIDER"),
     "model_cache_dir": ("memory", "model_cache_dir", "data/models/fastembed", "DESKPAL_MODEL_CACHE_DIR"),
 }
@@ -106,12 +112,47 @@ class SetupService:
         data = self.config_path.read_bytes()
         return data, hashlib.sha256(data).hexdigest()
 
+    def _cleanup_references(self, references: list[str] | None = None) -> list[str]:
+        """Persist non-secret deletion intents under the configuration lease.
+
+        An intent may be recorded before publication, but cleanup always excludes
+        the current reference. A failed publication can never delete its key.
+        """
+        path = self.config_path.with_name("." + self.config_path.name + ".credential-cleanup.json")
+        _safe(path)
+        if references is None:
+            if not path.exists():
+                return []
+            if not path.is_file() or path.stat().st_size > 16384:
+                raise MaintenanceError("invalid_config")
+            value = json.loads(path.read_text(encoding="utf-8"))
+            if (not isinstance(value, list) or len(value) > 64
+                    or not all(WindowsCredentialStore.valid_ref(item) for item in value)):
+                raise MaintenanceError("invalid_config")
+            return list(dict.fromkeys(value))
+        if len(references) > 64:
+            raise MaintenanceError("credential_store_unavailable")
+        descriptor, name = tempfile.mkstemp(prefix=".deskpal-credential-cleanup-", dir=path.parent)
+        stage = Path(name)
+        try:
+            with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+                json.dump(references, stream)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(stage, path)
+        finally:
+            stage.unlink(missing_ok=True)
+        return references
+
     @staticmethod
     def _validate_values(values: Mapping[str, Any]) -> None:
         if not isinstance(values, Mapping) or set(values) - set(FIELDS):
             raise MaintenanceError("invalid_config")
         for name, value in values.items():
-            if name == "timeout_seconds":
+            if name == "request_use_default":
+                if type(value) is not bool:
+                    raise MaintenanceError("invalid_config")
+            elif name == "timeout_seconds":
                 if isinstance(value, bool) or not isinstance(value, (float, int)):
                     raise MaintenanceError("invalid_config")
                 try:
@@ -121,6 +162,8 @@ class SetupService:
                     raise MaintenanceError("invalid_config") from None
             elif not isinstance(value, str) or len(value) > 2048 or any(ord(c) < 32 for c in value):
                 raise MaintenanceError("invalid_config")
+        if "memory_mode" in values and values["memory_mode"] not in {"explicit_only", "candidate_review", "paused"}:
+            raise MaintenanceError("invalid_config")
         if "base_url" in values:
             try:
                 validate_base_url(values["base_url"])
@@ -141,13 +184,12 @@ class SetupService:
             fields[name] = table.get(key, default)
         self._validate_values(fields)
         self._directories(fields)
-        env = {str(fields["api_key_env"]): "validation-placeholder"}
         descriptor, name = tempfile.mkstemp(prefix=".deskpal-config-check-", suffix=".toml", dir=self.config_path.parent)
         candidate = Path(name)
         try:
             with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as stream:
                 stream.write(text)
-            config = load_config(candidate, environ=env)
+            config = load_config(candidate, environ={})
         finally:
             candidate.unlink(missing_ok=True)
         return config
@@ -194,7 +236,12 @@ class SetupService:
                 raw = {}
                 issues.append("invalid_config")
             values: dict[str, Any] = {}
+            llm_raw = raw.get("llm", {})
+            if not isinstance(llm_raw, dict):
+                llm_raw = {}
             for name, (section, key, default, _) in FIELDS.items():
+                if name == "credential_mode" and "provider" in llm_raw:
+                    default = "system_vault" if llm_raw.get("credential_ref") else "environment"
                 table = raw.get(section, {})
                 value = table.get(key, default) if isinstance(table, dict) else default
                 try:
@@ -206,16 +253,24 @@ class SetupService:
                         issues.append("invalid_config")
             # Read environment files only for presence/source; never return their values.
             env = self._environment()
+            selected_env_name = env.get("DESKPAL_LLM_API_KEY_ENV", values["api_key_env"])
+            if "credential_mode" not in llm_raw and "provider" in llm_raw:
+                legacy_present = isinstance(selected_env_name, str) and bool(str(env.get(selected_env_name, "") or "").strip())
+                values["credential_mode"] = ("environment" if legacy_present else
+                                             "system_vault" if values["credential_ref"] else "environment")
             sources = {name: "environment" if env_key in os.environ else "dotenv" if env_key in env
                        else "file" if revision != "missing" else "default"
                        for name, (_, _, _, env_key) in FIELDS.items()}
             if any(source in {"environment", "dotenv"} for source in sources.values()):
                 issues.append("environment_override")
             env_name = env.get("DESKPAL_LLM_API_KEY_ENV", values["api_key_env"])
-            present = bool(isinstance(env_name, str) and str(env.get(env_name, "") or "").strip())
+            mode = env.get("DESKPAL_LLM_CREDENTIAL_MODE", values["credential_mode"])
+            present = mode == "environment" and bool(isinstance(env_name, str) and str(env.get(env_name, "") or "").strip())
             credential_source = "environment" if present else "missing"
             reference = env.get("DESKPAL_LLM_CREDENTIAL_REF", values["credential_ref"])
-            if not present and reference and WindowsCredentialStore.valid_ref(reference) and WindowsCredentialStore.available():
+            if mode == "none":
+                credential_source = "none"
+            if mode == "system_vault" and reference and WindowsCredentialStore.valid_ref(reference) and WindowsCredentialStore.available():
                 try:
                     present = bool(WindowsCredentialStore().read(reference))
                     if present:
@@ -227,15 +282,18 @@ class SetupService:
             config_valid = False
             if revision != "missing" and "invalid_config" not in issues:
                 try:
-                    load_config(self.config_path, environ={str(values["api_key_env"]): "validation-placeholder"})
+                    load_config(self.config_path, environ={})
                     self._directories(values)
                     config_valid = True
                 except Exception:
                     issues.append("invalid_config")
-            if values["provider"] == "openai" and not present:
+            if values["provider"] == "openai" and mode != "none" and not present:
                 issues.append("credential_missing")
+            cleanup_refs = [reference for reference in self._cleanup_references()
+                            if reference != values["credential_ref"]]
             return {"values": values, "revision": revision, "config_exists": revision != "missing",
                     "config_valid": config_valid, "credential_present": present, "credential_source": credential_source,
+                    "credential_cleanup_pending": bool(cleanup_refs), "credential_cleanup_refs": cleanup_refs,
                     "sources": sources, "issues": [{"code": code, "message": message_for(code)} for code in issues]}
         except MaintenanceError:
             raise
@@ -243,25 +301,36 @@ class SetupService:
             raise MaintenanceError("io_error") from None
 
     def save(self, values: Mapping[str, Any], *, expected_revision: str | None,
-             credential_secret: str | None = None) -> dict[str, Any]:
+             credential_secret: str | None = None, credential_action: str = "keep") -> dict[str, Any]:
         return self._save(values, expected_revision=expected_revision, repair=False,
-                          credential_secret=credential_secret)
+                          credential_secret=credential_secret, credential_action=credential_action)
 
     def repair(self, values: Mapping[str, Any], *, expected_revision: str | None,
-               confirm: bool, credential_secret: str | None = None) -> dict[str, Any]:
+               confirm: bool, credential_secret: str | None = None, credential_action: str = "keep") -> dict[str, Any]:
         if confirm is not True:
             raise MaintenanceError("confirmation_required")
         return self._save(values, expected_revision=expected_revision, repair=True,
-                          credential_secret=credential_secret)
+                          credential_secret=credential_secret, credential_action=credential_action)
 
     def _save(self, values: Mapping[str, Any], *, expected_revision: str | None,
-              repair: bool, credential_secret: str | None) -> dict[str, Any]:
+              repair: bool, credential_secret: str | None, credential_action: str) -> dict[str, Any]:
         new_ref = None
         stage: Path | None = None
         published = False
         vault_attempted = False
+        old_ref = ""
+        cleanup_failed = False
+        pending_references: list[str] = []
         try:
             self._validate_values(values)
+            if credential_action not in {"keep", "replace", "remove"}:
+                raise MaintenanceError("invalid_config")
+            if credential_secret is not None:
+                if credential_action == "remove":
+                    raise MaintenanceError("invalid_config")
+                credential_action = "replace"  # backward-compatible explicit secret input
+            if credential_action == "replace" and credential_secret is None:
+                raise MaintenanceError("credential_missing")
             if expected_revision is None:
                 raise MaintenanceError("revision_conflict")
             if credential_secret is not None:
@@ -284,9 +353,33 @@ class SetupService:
                     old_raw = {}
                     old_readable = False
                 edited = dict(values)
+                if revision == "missing" and edited.get("provider", "openai") != "offline":
+                    edited.setdefault("credential_mode", "system_vault")
+                old_llm = old_raw.get("llm", {})
+                if not isinstance(old_llm, dict):
+                    old_llm = {}
+                old_ref = str(old_llm.get("credential_ref", ""))
+                pending_references = self._cleanup_references()
+                if "credential_ref" in edited and edited["credential_ref"] != old_ref:
+                    raise MaintenanceError("invalid_config")
+                old_mode = old_llm.get("credential_mode", "system_vault" if old_ref else "environment")
+                same_environment = (old_mode == "environment" and edited.get("api_key_env", old_llm.get("api_key_env", "OPENAI_API_KEY"))
+                                    == old_llm.get("api_key_env", "OPENAI_API_KEY"))
+                if credential_action == "keep" and (old_ref or same_environment and old_llm.get("provider") == "openai"):
+                    previous = urlsplit(str(old_llm.get("base_url", FIELDS["base_url"][2])))
+                    candidate = urlsplit(str(edited.get("base_url", old_llm.get("base_url", FIELDS["base_url"][2]))))
+                    if (previous.scheme, previous.hostname, previous.port) != (candidate.scheme, candidate.hostname, candidate.port):
+                        raise MaintenanceError("credential_target_changed")
+                if credential_action == "remove":
+                    edited["credential_ref"] = ""
+                    if edited.get("credential_mode", old_mode) == "environment":
+                        raise MaintenanceError("invalid_config")
                 if credential_secret is not None:
+                    if edited.get("credential_mode", old_llm.get("credential_mode", "system_vault")) != "system_vault":
+                        raise MaintenanceError("invalid_config")
                     new_ref = "Deskpal/LLM/" + uuid.uuid4().hex
                     edited["credential_ref"] = new_ref
+                    edited["credential_mode"] = "system_vault"
                 text = _patch("" if repair else old_text, edited)
                 config = self._validate_text(text)
                 data_dirs = {config.storage.data_dir}
@@ -314,6 +407,9 @@ class SetupService:
                         stack.enter_context(InstanceLock(directory))
                     if self._read()[1] != revision:
                         raise MaintenanceError("revision_conflict")
+                    if credential_action in {"replace", "remove"} and WindowsCredentialStore.valid_ref(old_ref):
+                        pending_references = list(dict.fromkeys([*pending_references, old_ref]))
+                        self._cleanup_references(pending_references)
                     if credential_secret is not None and new_ref is not None:
                         vault_attempted = True
                         WindowsCredentialStore().write(new_ref, credential_secret)
@@ -342,8 +438,27 @@ class SetupService:
                         os.replace(stage, self.config_path)
                     stage = None
                     published = True
+                    active_ref = str(edited.get("credential_ref", old_ref))
+                    remaining: list[str] = []
+                    for reference in pending_references:
+                        if reference == active_ref:
+                            remaining.append(reference)
+                            continue
+                        try:
+                            WindowsCredentialStore().delete(reference)
+                        except CredentialStoreError:
+                            remaining.append(reference)
+                    try:
+                        self._cleanup_references(remaining)
+                    except (MaintenanceError, OSError, ValueError):
+                        remaining = pending_references
+                    pending_references = [reference for reference in remaining if reference != active_ref]
+                    cleanup_failed = bool(pending_references)
             result = self.inspect()
-            result.update(configuration_reset=repair, local_recovery_copy=revision != "missing")
+            result.update(configuration_reset=repair, local_recovery_copy=revision != "missing",
+                          saved=True, requires_restart=True, active_revision=None,
+                          credential_cleanup_pending=cleanup_failed,
+                          credential_cleanup_refs=pending_references)
             return result
         except MaintenanceError:
             raise

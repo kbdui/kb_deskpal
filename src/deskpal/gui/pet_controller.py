@@ -1,13 +1,13 @@
 """One GUI-owned pet; read-only presentation polling and bounded decoration."""
 
-from collections import deque
+from collections import OrderedDict, deque
 from collections.abc import Callable
-from math import ceil
+from math import ceil, isfinite
 from time import monotonic
 from typing import Any
 
-from PySide6.QtCore import QObject, QPoint, QTimer, Signal
-from PySide6.QtGui import QPixmap
+from PySide6.QtCore import QObject, QPoint, QRect, QTimer, Qt, Signal
+from PySide6.QtGui import QImage, QPixmap
 
 from deskpal.presentation.models import PresentationSnapshot
 from deskpal.presentation.state import expression_for_status, status_label
@@ -22,6 +22,9 @@ FRESH_SECONDS = 3.0
 
 class PetController(QObject):
     navigation_requested = Signal()
+    context_requested = Signal(object)
+    anchor_changed = Signal()
+    unavailable = Signal()
     stopped = Signal()
 
     def __init__(self, bridge: Any, preferences: GuiPreferences, *,
@@ -51,6 +54,15 @@ class PetController(QObject):
         self._seen: deque[tuple[str, int, str | None, int]] = deque(maxlen=128)
         self._cache: dict[str, QPixmap] = {}
         self.cache_bytes = 0
+        self._rasters: OrderedDict[tuple[object, ...], QPixmap] = OrderedDict()
+        self._sources: OrderedDict[tuple[str, int], QImage] = OrderedDict()
+        self._package: dict[str, QImage] = {}
+        self._profiles: dict[str, dict[str, Any]] = {}
+        self._appearance_request: str | None = None
+        self._appearance_at = 0.0
+        self._image_requests: dict[str, tuple[int, str, int]] = {}
+        self._image_generation = 0
+        self._session_hidden = False
         self.diagnostics: tuple[str, ...] = ()
         self.lifecycle = "Disabled"
         self.expression = "neutral"
@@ -79,6 +91,7 @@ class PetController(QObject):
         self.loader.ready.connect(self._assets_ready)
         self.loader.idle.connect(self._loader_idle)
         self.bridge.reply.connect(self._reply)
+        self.bridge.image_reply.connect(self._image_reply)
         self.bridge.state_changed.connect(self._host_state)
         self.bridge.privacy_changed.connect(self._privacy)
         self.preferences.changed.connect(self._preference)
@@ -94,6 +107,7 @@ class PetController(QObject):
     def _enable(self) -> None:
         if self._stopping or self.window is not None:
             return
+        self._session_hidden = False
         self._generation += 1
         self._baseline = True
         self._snapshot = None
@@ -102,7 +116,11 @@ class PetController(QObject):
         self.diagnostics = ()
         self._render_broken = False
         self.window.navigate_requested.connect(self.navigation_requested)
-        self.window.disable_requested.connect(lambda: self.preferences.set_pet_enabled(False))
+        self.window.disable_requested.connect(self.hide_temporarily)
+        self.window.context_requested.connect(self.context_requested)
+        self.window.anchor_changed.connect(self.anchor_changed)
+        self.window.display_metrics_changed.connect(self._metrics_changed)
+        self.window.set_scale(self.preferences.pet_scale)
         self.window.position_changed.connect(self._save_position)
         self.window.render_failed.connect(self._paint_failed)
         self.window.move(QPoint(*self.preferences.pet_position))
@@ -121,24 +139,51 @@ class PetController(QObject):
         if window is None or self._stopping:
             return
         self._generation += 1
+        if not self.preferences.pet_visible or self._session_hidden:
+            # Already running bridge workers may finish, but hidden UI must not
+            # accept those results or let their render path start more work.
+            self._image_generation += 1
+            self._image_requests.clear()
+            self._appearance_request = None
+            self._appearance_at = 0.0
         self._baseline = True
         self._snapshot = None
         self._clear_companion()
         self._cancel_decorations()
         self._set_unknown()
-        if self.preferences.pet_visible:
+        if self.preferences.pet_visible and not self._session_hidden:
             window.show()
             self.lifecycle = "Degraded" if not self._cache else "Visible"
             if self.bridge.state == "Ready":
+                self._poll_appearance(force=True)
                 self.poll_timer.start()
                 self.poll()
         else:
             self.lifecycle = "Hidden"
             window.hide()
+            self.unavailable.emit()
             self.poll_timer.stop()
             self.stale_timer.stop()
 
+    def hide_temporarily(self) -> None:
+        self._session_hidden = True
+        self._visibility()
+
+    def restore_visibility(self) -> None:
+        if not self._session_hidden:
+            return
+        self._session_hidden = False
+        self._visibility()
+
     def disable(self) -> None:
+        self.unavailable.emit()
+        self._image_generation += 1
+        self._image_requests.clear()
+        self._appearance_request = None
+        self._profiles.clear()
+        self._package.clear()
+        self._sources.clear()
+        self._rasters.clear()
         self._generation += 1
         self._asset_generation += 1
         self.poll_timer.stop()
@@ -196,33 +241,170 @@ class PetController(QObject):
         if self._render_broken:
             return
         self.diagnostics = result.diagnostics
-        cache: dict[str, QPixmap] = {}
-        count = 0
-        # One fixed bounded physical resolution. Qt scales this correctly across
-        # DPR changes; no per-screen cache accumulates and hit regions stay logical.
-        for name, image in result.images.items():
-            if image.width() > PREPARED_EDGE or image.height() > PREPARED_EDGE:
-                self.diagnostics += ("assets:unprepared_image",)
-                continue
-            cost = image.width() * image.height() * 4
-            if count + cost > MAX_CACHE_BYTES:
-                continue
-            pixmap = QPixmap.fromImage(image)
-            pixmap.setDevicePixelRatio(2)
-            cache[name] = pixmap
-            count += cost
-        if "neutral" not in cache:
-            cache.clear()
-            count = 0
-        self._cache = cache
-        self.cache_bytes = count
-        if "neutral" in cache:
-            self.window.set_stable_mask(cache["neutral"])
-        self.lifecycle = ("Visible" if cache else "Degraded") if self.window.isVisible() else "Hidden"
+        self._package = {name: image for name, image in result.images.items()
+                         if image.width() <= PREPARED_EDGE and image.height() <= PREPARED_EDGE}
+        self._trim_sources()
+        self._metrics_changed()
+        self._poll_appearance(force=True)
+
+    def _metrics(self) -> tuple[float, int]:
+        dpr = self.window.devicePixelRatioF() if self.window is not None else 1.0
+        dpr = max(.25, dpr if isfinite(dpr) else 1.0)
+        edge = min(1152, max(1, ceil(240 * self.preferences.pet_scale * dpr)))
+        return dpr, edge
+
+    def _metrics_changed(self) -> None:
+        if self.window is None or self._stopping:
+            return
+        self._image_generation += 1
+        self._image_requests.clear()
+        self._rasters.clear()
+        self._cache.clear()
         self._render()
+
+    def _poll_appearance(self, *, force: bool = False) -> None:
+        if (self.bridge.state != "Ready" or self.window is None or self._stopping
+                or not self.preferences.pet_visible or self._session_hidden or not self.window.isVisible()):
+            return
+        if self._appearance_request is not None or (not force and self._clock() - self._appearance_at < 2):
+            return
+        try:
+            self._appearance_request = self.bridge.send("appearance_snapshot", {}, generation=self._generation)
+            self._appearance_at = self._clock()
+        except (BufferError, RuntimeError, ValueError):
+            pass
+
+    def _appearance_reply(self, envelope: dict[str, Any]) -> None:
+        self._appearance_request = None
+        if (not envelope.get("ok") or envelope.get("generation") != self._generation
+                or envelope.get("privacy_epoch") != self.bridge.privacy_epoch or self.window is None
+                or self._stopping or not self.preferences.pet_visible
+                or self._session_hidden or not self.window.isVisible()):
+            return
+        rows = envelope.get("data", {}).get("profiles", [])
+        if not isinstance(rows, list):
+            return
+        profiles = {row["slot"]: dict(row) for row in rows[:7]
+                    if isinstance(row, dict) and isinstance(row.get("slot"), str)
+                    and row["slot"].startswith("pet_")}
+        if profiles != self._profiles:
+            self._profiles = profiles
+            self._image_generation += 1
+            self._image_requests.clear()
+            self._rasters.clear()
+            self._sources.clear()
+            self._cache.clear()
+            self._render()
+
+    def _profile(self, expression: str) -> tuple[str | None, dict[str, Any]]:
+        main = self._profiles.get("pet_main", {})
+        profile = self._profiles.get("pet_main" if expression == "neutral" else "pet_" + expression, {})
+        asset = profile.get("effective_asset_id") or profile.get("asset_id")
+        if not profile.get("asset_id") and (main.get("effective_asset_id") or main.get("asset_id")):
+            profile = main
+            asset = main.get("effective_asset_id") or main.get("asset_id")
+        return (asset if isinstance(asset, str) and asset else None), profile
+
+    def _request_image(self, asset: str, edge: int) -> None:
+        if (self.window is None or self._stopping or not self.preferences.pet_visible or self._session_hidden
+                or not self.window.isVisible()):
+            return
+        if any(item[1:] == (asset, edge) for item in self._image_requests.values()):
+            return
+        if len(self._image_requests) >= 2 or self.bridge.state != "Ready":
+            return
+        try:
+            request = self.bridge.send_image("asset_preview", {"asset_id": asset, "max_edge": edge},
+                                             generation=self._image_generation)
+            self._image_requests[request] = (self._image_generation, asset, edge)
+        except (BufferError, RuntimeError, ValueError):
+            pass
+
+    def _image_reply(self, envelope: Any) -> None:
+        if not isinstance(envelope, dict):
+            return
+        pending = self._image_requests.pop(str(envelope.get("request_id")), None)
+        if (pending is None or pending[0] != self._image_generation or self.window is None
+                or self._stopping or not self.preferences.pet_visible
+                or self._session_hidden or not self.window.isVisible()
+                or envelope.get("generation") != pending[0]
+                or envelope.get("privacy_epoch") != self.bridge.privacy_epoch or not envelope.get("ok")):
+            return
+        payload = envelope.get("image", {})
+        raw = payload.get("png") if isinstance(payload, dict) else None
+        if not isinstance(raw, bytes) or not raw.startswith(b"\x89PNG\r\n\x1a\n") or len(raw) > 5 * 1024 * 1024 or payload.get("asset_id") != pending[1]:
+            return
+        # The worker emits PNG only. Content detection avoids QImage.fromData's
+        # incompatible runtime/stub format argument without accepting other formats.
+        image = QImage.fromData(raw)
+        if image.isNull() or max(image.width(), image.height()) > pending[2]:
+            return
+        key = (pending[1], pending[2])
+        self._sources[key] = image
+        self._sources.move_to_end(key)
+        self._trim_sources()
+        self._render()
+
+    def _trim_sources(self) -> None:
+        while (self._sources and sum(value.sizeInBytes() for value in self._sources.values())
+               + sum(value.sizeInBytes() for value in self._package.values()) > MAX_CACHE_BYTES // 2):
+            self._sources.popitem(last=False)
+
+    def _pixmap(self, expression: str) -> QPixmap | None:
+        if self.window is None or self._render_broken:
+            return None
+        asset, profile = self._profile(expression)
+        dpr, edge = self._metrics()
+        crop = profile.get("crop", (0.0, 0.0, 1.0, 1.0))
+        try:
+            crop = tuple(float(value) for value in crop)
+            if (len(crop) != 4 or not all(isfinite(value) for value in crop)
+                    or min(crop) < 0 or crop[2] <= 0 or crop[3] <= 0
+                    or crop[0] + crop[2] > 1.000001 or crop[1] + crop[3] > 1.000001):
+                raise ValueError("crop")
+        except (TypeError, ValueError, OverflowError):
+            crop = (0., 0., 1., 1.)
+        metadata = profile.get("asset") or {}
+        revision = metadata.get("revision", 0) if isinstance(metadata, dict) else 0
+        key = (asset or "builtin", revision, profile.get("revision", 0), expression,
+               self.preferences.pet_scale, dpr, crop, profile.get("display_mode", "contain"))
+        cached = self._rasters.get(key)
+        if cached is not None:
+            self._rasters.move_to_end(key)
+            return cached
+        if asset:
+            source = self._sources.get((asset, edge))
+            if source is None:
+                self._request_image(asset, edge)
+                # A missing custom differential uses the current custom main only.
+                return self._pixmap("neutral") if expression != "neutral" else None
+        else:
+            source = self._package.get(expression, self._package.get("neutral"))
+        if source is None:
+            return None
+        rect = QRect(round(crop[0] * source.width()), round(crop[1] * source.height()),
+                     max(1, round(crop[2] * source.width())), max(1, round(crop[3] * source.height())))
+        prepared = source.copy(rect).scaled(edge, edge, Qt.AspectRatioMode.KeepAspectRatio,
+                                            Qt.TransformationMode.SmoothTransformation)
+        pixmap = QPixmap.fromImage(prepared)
+        # Keep the logical canvas size even above the bounded physical sampling
+        # resolution. The cache key still distinguishes the actual screen DPR.
+        pixmap.setDevicePixelRatio(min(dpr, edge / (240 * self.preferences.pet_scale)))
+        self._rasters[key] = pixmap
+        # Reserve half of 32 MiB for source previews; aliases do not retain evictions.
+        while sum(item.width() * item.height() * 4 for item in self._rasters.values()) > MAX_CACHE_BYTES // 2:
+            self._rasters.popitem(last=False)
+        self.cache_bytes = sum(item.width() * item.height() * 4 for item in self._rasters.values())
+        self.cache_bytes += sum(item.sizeInBytes() for item in self._sources.values())
+        self.cache_bytes += sum(item.sizeInBytes() for item in self._package.values())
+        return pixmap
 
     def _paint_failed(self, code: str) -> None:
         self._render_broken = True
+        self._rasters.clear()
+        self._sources.clear()
+        self._package.clear()
+        self._image_requests.clear()
         self._cache.clear()
         self.cache_bytes = 0
         self.diagnostics += (code,)
@@ -241,7 +423,13 @@ class PetController(QObject):
             else:
                 self.disable()
         elif key == "pet_visible":
+            self._session_hidden = False
             self._visibility()
+        elif key == "pet_scale" and self.window is not None:
+            self.window.set_scale(self.preferences.pet_scale)
+        elif key == "pet_position" and self.window is not None:
+            self.window.move(QPoint(*self.preferences.pet_position))
+            self.window.fit_to_screens()
         elif key in {"pet_on_top", "pet_click_through"} and self.window is not None:
             self.window.set_native_options(on_top=self.preferences.pet_on_top,
                                           click_through=self.preferences.pet_click_through)
@@ -258,6 +446,9 @@ class PetController(QObject):
 
     def _privacy(self, epoch: int) -> None:
         self._generation += 1
+        self._image_generation += 1
+        self._image_requests.clear()
+        self._appearance_request = None
         # Bridge drops these receipts itself after an epoch change.
         self._request = None
         self._companion_request = None
@@ -268,7 +459,7 @@ class PetController(QObject):
         self._set_unknown()
 
     def poll(self) -> None:
-        if (self.window is None or not self.preferences.pet_visible or self._stopping
+        if (self.window is None or not self.preferences.pet_visible or self._session_hidden or self._stopping
                 or self.bridge.state != "Ready"):
             return
         if self._request is None:
@@ -279,15 +470,24 @@ class PetController(QObject):
                 # The regular one-second timer is the only capacity retry.
                 self._set_unknown()
         self._poll_companion()
+        self._poll_appearance()
+        self._render()
 
     def _reply(self, envelope: Any) -> None:
+        if (isinstance(envelope, dict) and self._appearance_request is not None
+                and envelope.get("request_id") == self._appearance_request):
+            self._appearance_reply(envelope)
+            return
+        if (isinstance(envelope, dict) and envelope.get("ok")
+                and envelope.get("operation") in {"appearance_apply", "appearance_reset"}):
+            self._poll_appearance(force=True)
         if isinstance(envelope, dict) and envelope.get("request_id") == self._companion_request:
             self._companion_reply(envelope)
             return
         if not isinstance(envelope, dict) or envelope.get("request_id") != self._request:
             return
         self._request = None
-        if (self.window is None or not self.preferences.pet_visible or self._stopping
+        if (self.window is None or not self.preferences.pet_visible or self._session_hidden or self._stopping
                 or self.bridge.state != "Ready" or envelope.get("generation") != self._generation
                 or envelope.get("privacy_epoch") != self.bridge.privacy_epoch):
             return
@@ -353,7 +553,7 @@ class PetController(QObject):
 
     def _poll_companion(self) -> None:
         """Reuse the existing one-second timer; a slow decoration read cannot block status."""
-        if (self.window is None or not self.preferences.pet_visible or self._stopping
+        if (self.window is None or not self.preferences.pet_visible or self._session_hidden or self._stopping
                 or self.bridge.state != "Ready" or self.status not in {"Idle", "Completed"}):
             return
         if self._companion is not None and self._clock() - self._companion_received_at >= FRESH_SECONDS:
@@ -371,7 +571,7 @@ class PetController(QObject):
 
     def _companion_reply(self, envelope: dict[str, Any]) -> None:
         self._companion_request = None
-        if (self.window is None or not self.preferences.pet_visible or self._stopping
+        if (self.window is None or not self.preferences.pet_visible or self._session_hidden or self._stopping
                 or self.bridge.state != "Ready" or envelope.get("generation") != self._generation
                 or envelope.get("privacy_epoch") != self.bridge.privacy_epoch):
             return
@@ -420,7 +620,7 @@ class PetController(QObject):
                 or value.memory_epoch != authority.memory_epoch):
             return "neutral"
         # Missing optional images keep the original neutral fallback.
-        return value.expression if value.expression in self._cache else "neutral"
+        return expression_id(value.expression)
 
     def _clear_companion(self, *, restore: bool = False) -> None:
         self._companion = None
@@ -492,7 +692,7 @@ class PetController(QObject):
 
     def _decorate(self) -> None:
         if (self._decoration_token != self._token() or self._stopping or self.window is None
-                or not self.preferences.pet_visible or self.status == "Unknown"):
+                or not self.preferences.pet_visible or self._session_hidden or self.status == "Unknown"):
             return
         self._set_expression(self._desired)
         if self._desired_completion and self._desired == "pleased" and self.status == "Completed":
@@ -512,5 +712,11 @@ class PetController(QObject):
 
     def _render(self) -> None:
         if self.window is not None:
-            pixmap = self._cache.get(self.expression, self._cache.get("neutral"))
+            neutral = self._pixmap("neutral")
+            pixmap = neutral if self.expression == "neutral" else self._pixmap(self.expression)
+            self._cache = {"neutral": neutral} if neutral is not None else {}
+            if pixmap is not None:
+                self._cache[self.expression] = pixmap
+            self.window.set_stable_mask(neutral)
+            self.lifecycle = ("Visible" if neutral is not None else "Degraded") if self.window.isVisible() else "Hidden"
             self.window.present(pixmap, status_label(self.status), "; ".join(self.diagnostics))

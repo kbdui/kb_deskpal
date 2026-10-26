@@ -13,7 +13,7 @@ from PySide6.QtCore import QObject, QSettings, QTimer, Signal
 from PySide6.QtGui import QColor, QImage
 from PySide6.QtTest import QSignalSpy
 
-from deskpal.gui.companion_panel import CompanionPanel
+from deskpal.gui.persona_settings import PersonaSettings
 from deskpal.gui.pet_assets import AssetResult, PetAssetLoader
 from deskpal.gui.pet_controller import PetController
 from deskpal.gui.preferences import GuiPreferences
@@ -48,6 +48,7 @@ def presentation(status="Idle", *, sequence=0, revision=0, memory_epoch=0):
 
 class Bridge(QObject):
     reply = Signal(object)
+    image_reply = Signal(object)
     state_changed = Signal(str)
     privacy_changed = Signal(int)
 
@@ -59,6 +60,9 @@ class Bridge(QObject):
         self.outstanding = {}
         self.delivered = 0
         self.shutdown_count = 0
+
+    def send_image(self, operation, parameters, generation=0):
+        return self.send(operation, parameters, generation=generation)
 
     def send(self, operation, parameters=None, *, generation=0):
         request = {"request_id": f"request-{len(self.sent) + 1}", "operation": operation,
@@ -100,9 +104,9 @@ class Bridge(QObject):
 @pytest.fixture
 def panel(qtbot, monkeypatch):
     clock = [100.0]
-    monkeypatch.setattr("deskpal.gui.companion_panel.monotonic", lambda: clock[0])
+    monkeypatch.setattr("deskpal.gui.persona_settings.monotonic", lambda: clock[0])
     bridge = Bridge()
-    widget = CompanionPanel(bridge)
+    widget = PersonaSettings(bridge)
     qtbot.addWidget(widget)
     widget.set_available(True)
     return widget, bridge, clock
@@ -121,16 +125,11 @@ def test_t08_panel_dirty_edits_survive_refresh_and_fresh_revision_preflight(pane
     widget.preset.setCurrentIndex(widget.preset.findData("warm"))
     widget.custom_style.setChecked(True)
     widget.style_inputs["warmth"].setValue(0.93)
-    widget.scope.setCurrentIndex(widget.scope.findData("persistent"))
-    widget.verbosity.setCurrentIndex(widget.verbosity.findData("brief"))
-    widget.humor.setCurrentIndex(2)
     widget.poll()
     assert widget.style_inputs["warmth"].isEnabled()  # Passive reads preserve active editing.
     bridge.answer(qtbot, bridge.requests_for("companion")[-1], companion(revision=2, preset="concise"))
     assert widget.enabled.isChecked() and widget.emotions_enabled.isChecked()
     assert widget.preset.currentData() == "warm" and widget.style_inputs["warmth"].value() == 0.93
-    assert widget.scope.currentData() == "persistent" and widget.verbosity.currentData() == "brief"
-    assert widget.humor.currentData() is False
     assert "配置修订 2" in widget.summary.text()
     widget.configure_button.click()
     assert bridge.sent[-1]["operation"] == "companion" and bridge.sent[-1]["parameters"] == {}
@@ -142,13 +141,9 @@ def test_t08_panel_dirty_edits_survive_refresh_and_fresh_revision_preflight(pane
         "action": "configure", "expected_revision": 7, "enabled": True, "emotions_enabled": True,
         "preset": "warm", "style": {**STYLE, "warmth": 0.93}}
     assert widget.preset.currentData() == "warm" and widget.style_inputs["warmth"].value() == 0.93
-    assert widget.scope.currentData() == "persistent" and widget.humor.currentData() is False
 
 
 @pytest.mark.parametrize("action,extra", [
-    ("preference", {"scope": "session", "verbosity": "brief", "humor_allowed": False}),
-    ("preference", {"scope": "today", "verbosity": "brief", "humor_allowed": False}),
-    ("preference", {"scope": "persistent", "verbosity": "brief", "humor_allowed": False}),
     ("support", {"mode": "supportive", "ttl_seconds": 300}),
     ("focus", {"mode": "focused", "ttl_seconds": 300}),
     ("clear_cue", {"mode": "neutral"}),
@@ -160,21 +155,47 @@ def test_t08_panel_dirty_edits_survive_refresh_and_fresh_revision_preflight(pane
 def test_t08_panel_explicit_controls_send_only_finite_command_fields(panel, qtbot, action, extra):
     widget, bridge, _ = panel
     load_panel(qtbot, widget, bridge)
-    if action == "preference":
-        widget.scope.setCurrentIndex(widget.scope.findData(extra["scope"]))
-        widget.verbosity.setCurrentIndex(widget.verbosity.findData("brief"))
-        widget.humor.setCurrentIndex(2)  # Explicit False, not omitted or a truthiness default.
-        widget.preference_button.click()
-        command_action = "preference"
-    else:
-        getattr(widget, action + "_button" if action in {"support", "focus", "clear_cue", "rollback"}
-                else action).click()
-        command_action = "cue" if action in {"support", "focus", "clear_cue"} else (
-            "reset" if action.endswith("_reset") else "rollback")
+    getattr(widget, action + "_button" if action in {"support", "focus", "clear_cue", "rollback"}
+            else action).click()
+    command_action = "cue" if action in {"support", "focus", "clear_cue"} else (
+        "reset" if action.endswith("_reset") else "rollback")
     assert not bridge.requests_for("companion_command")
     bridge.answer(qtbot, bridge.sent[-1], companion(revision=23))
     assert bridge.requests_for("companion_command")[-1]["parameters"] == {
         "action": command_action, "expected_revision": 23, **extra}
+
+
+def test_t08_persona_unchanged_preset_is_omitted_and_all_six_custom_axes_are_explicit(panel, qtbot):
+    widget, bridge, _ = panel
+    load_panel(qtbot, widget, bridge, preset="warm")
+    widget.emotions_enabled.setChecked(False)
+    widget.configure_button.click()
+    bridge.answer(qtbot, bridge.sent[-1], companion(revision=4, preset="warm"))
+    command = bridge.requests_for("companion_command")[-1]
+    assert command["parameters"] == {
+        "action": "configure", "expected_revision": 4, "enabled": True,
+        "emotions_enabled": False}
+    bridge.answer(qtbot, command, {})
+    bridge.answer(qtbot, bridge.sent[-1], companion(revision=5, preset="warm", emotions=False))
+    widget.custom_style.setChecked(True)
+    widget.style_inputs["curiosity"].setValue(0.85)
+    widget.configure_button.click()
+    bridge.answer(qtbot, bridge.sent[-1], companion(revision=5, preset="warm", emotions=False))
+    assert bridge.requests_for("companion_command")[-1]["parameters"] == {
+        "action": "configure", "expected_revision": 5, "enabled": True,
+        "emotions_enabled": False, "style": {**STYLE, "curiosity": 0.85}}
+
+
+def test_t08_persona_cue_uses_selected_conversation_without_duplicated_preference_form(panel, qtbot):
+    widget, bridge, _ = panel
+    load_panel(qtbot, widget, bridge)
+    widget.conversation_target = lambda: "conversation-b"
+    widget.focus_button.click()
+    bridge.answer(qtbot, bridge.sent[-1], companion(revision=6))
+    assert bridge.requests_for("companion_command")[-1]["parameters"] == {
+        "action": "cue", "expected_revision": 6, "conversation_id": "conversation-b",
+        "mode": "focused", "ttl_seconds": 300}
+    assert not hasattr(widget, "preference_group")
 
 
 @pytest.mark.parametrize("invalid", ["request", "generation", "privacy", "lifecycle"])
@@ -263,8 +284,9 @@ def test_t08_window_clear_and_closed_drop_late_panel_reads_and_commands(qtbot, t
     widget.poll_timer.stop()
     widget.show()
     qtbot.waitUntil(widget.isVisible, timeout=2000)
-    widget.tabs.setCurrentIndex(widget._companion_index)
-    panel_widget = widget.companion_panel
+    widget.set_page(4)
+    widget.settings_page.tabs.setCurrentIndex(0)
+    panel_widget = widget.settings_page.companion
     bridge.answer(qtbot, bridge.requests_for("companion")[-1], companion())
     panel_widget.focus_button.click()
     bridge.answer(qtbot, bridge.requests_for("companion")[-1], companion(revision=2))
@@ -275,14 +297,18 @@ def test_t08_window_clear_and_closed_drop_late_panel_reads_and_commands(qtbot, t
         bridge.privacy_epoch += 1
         bridge.privacy_changed.emit(bridge.privacy_epoch)
         qtbot.waitUntil(lambda: "已清空" in panel_widget.summary.text(), timeout=2000)
-    sent = len(bridge.sent)
+    # Shared chat may reload its directory; obsolete persona replies must not reissue persona work.
+    sent = tuple(len(bridge.requests_for(operation)) for operation in ("companion", "companion_command"))
     bridge.answer(qtbot, command, companion(revision=3, preset="warm"))
-    assert len(bridge.sent) == sent and "已清空" in panel_widget.summary.text()
+    assert tuple(len(bridge.requests_for(operation)) for operation in ("companion", "companion_command")) == sent
+    assert "已清空" in panel_widget.summary.text()
     panel_widget.poll()
-    late_read = bridge.sent[-1]
+    late_read = bridge.requests_for("companion")[-1]
     bridge.set_state("Closed")
     qtbot.waitUntil(lambda: widget.lifecycle == "Closed", timeout=2000)
+    closed_sent = tuple(len(bridge.requests_for(operation)) for operation in ("companion", "companion_command"))
     bridge.answer(qtbot, late_read, companion(revision=4, preset="warm"))
+    assert tuple(len(bridge.requests_for(operation)) for operation in ("companion", "companion_command")) == closed_sent
     assert "已清空" in panel_widget.summary.text()
     assert not panel_widget.config_group.isEnabled() and not widget.isVisible()
     assert not panel_widget.enabled.isChecked()
@@ -353,7 +379,7 @@ def test_t08_pet_idle_emotion_reaches_real_window_and_each_read_lane_is_bounded(
     for _ in range(20):
         controller.poll()
     assert len(bridge.pending("presentation")) == len(bridge.pending("companion")) == 1
-    assert {request["operation"] for request in bridge.sent} == {"presentation", "companion"}
+    assert {request["operation"] for request in bridge.sent} == {"presentation", "companion", "appearance_snapshot"}
     assert all(request["parameters"] == {} for request in bridge.sent)
 
 

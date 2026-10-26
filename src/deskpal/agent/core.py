@@ -298,7 +298,8 @@ class AgentCore:
         if current is None:
             raise KeyError(task_id)
         if current.status == TaskStatus.CANCELLED:
-            self._pending.pop(task_id, None)
+            with self._lock:
+                self._pending.pop(task_id, None)
             return current
         if current.status not in {TaskStatus.CREATED, TaskStatus.PLANNING,
                                   TaskStatus.RUNNING, TaskStatus.WAITING}:
@@ -306,7 +307,8 @@ class AgentCore:
         self._event("task_status_changed", task_id,
                     {"previous_status": current.status.value, "status": TaskStatus.CANCELLED.value})
         result = self.tasks.update_status(task_id, TaskStatus.CANCELLED)
-        self._pending.pop(task_id, None)
+        with self._lock:
+            self._pending.pop(task_id, None)
         return result
 
     def run(self, request: str, *, authorized_tools: Iterable[str] = (),
@@ -377,6 +379,17 @@ class AgentCore:
             self._pending_dependencies[task_id] = memory_refs
             self._task_dependencies[task_id] = memory_refs
 
+    def pending_grants(self, task_id: str) -> tuple[frozenset[str], frozenset[str]]:
+        """Read-only task-scoped process grants; no durable receipt is a grant."""
+        with self._lock:
+            pending = self._pending.get(task_id)
+            return (frozenset(), frozenset()) if pending is None else (pending[2], pending[3])
+
+    def has_pending_plan(self, task_id: str) -> bool:
+        """Expose presence only, without publishing mutable execution state."""
+        with self._lock:
+            return task_id in self._pending
+
     def revoke_pending(self, task_ids: Iterable[str]) -> None:
         """Drop in-memory grants after a durable invalidation or deletion."""
         with self._lock:
@@ -429,11 +442,14 @@ class AgentCore:
         runtime = self._memory_runtime
         if runtime is None:
             return
-        for task_id in tuple(self._pending):
-            if not runtime.valid(self._pending_dependencies.get(task_id, ())):
+        with self._lock:
+            candidates = tuple((task_id, self._pending_dependencies.get(task_id, ())) for task_id in self._pending)
+        for task_id, refs in candidates:
+            if not runtime.valid(refs):
                 # Remove the grant-bearing snapshot before fallible cleanup.
-                self._pending.pop(task_id, None)
-                self._pending_dependencies.pop(task_id, None)
+                with self._lock:
+                    self._pending.pop(task_id, None)
+                    self._pending_dependencies.pop(task_id, None)
                 current = self.tasks.get(task_id)
                 if current is not None and current.status == TaskStatus.WAITING:
                     self.tasks.update_status(task_id, TaskStatus.CANCELLED)
@@ -611,8 +627,9 @@ class AgentCore:
                 if current is None or current.status != TaskStatus.WAITING:
                     self._transition(task_id, TaskStatus.WAITING, result={
                         "required_authorizations": required, "required_high_risk_authorizations": required_high_risk})
-                self._pending[task_id] = (request, self._plan_copy(plan), authorization, high_risk)
-                self._pending_dependencies[task_id] = self._task_dependencies.get(task_id, ())
+                with self._lock:
+                    self._pending[task_id] = (request, self._plan_copy(plan), authorization, high_risk)
+                    self._pending_dependencies[task_id] = self._task_dependencies.get(task_id, ())
                 self._boundary(task_id)
                 return AgentResult(task_id, TaskStatus.WAITING, response,
                                    required_authorizations=tuple(required),
@@ -620,7 +637,8 @@ class AgentCore:
                                    authorization_requests=tuple(details),
                                    planned_calls=tuple(_call_copy(call) for call in plan.steps),
                                    warnings=tuple(warnings))
-            self._pending.pop(task_id, None)
+            with self._lock:
+                self._pending.pop(task_id, None)
             phase = "tool execution"
             self._transition(task_id, TaskStatus.RUNNING)
             self._stage(task_id, "Act")
@@ -808,7 +826,8 @@ class AgentCore:
                 self._record_companion_outcome(task_id, results, companion_generation)
 
     def _fail(self, task_id: str, error: str, results: list[ToolResult]) -> AgentResult:
-        self._pending.pop(task_id, None)
+        with self._lock:
+            self._pending.pop(task_id, None)
         if self._journal is not None:
             try:
                 if any(item.status in {"Started", "Uncertain"} for item in self._journal.attempts(task_id)):
@@ -845,7 +864,8 @@ class AgentCore:
         return AgentResult(task_id, TaskStatus.FAILED, error, tuple(results), error=error)
 
     def _cancelled_result(self, task_id: str, results: list[ToolResult]) -> AgentResult:
-        self._pending.pop(task_id, None)
+        with self._lock:
+            self._pending.pop(task_id, None)
         if self._journal is not None:
             self.tasks.update_status(task_id, TaskStatus.CANCELLED,
                 result={"tool_results": [_result_data(item) for item in results]})

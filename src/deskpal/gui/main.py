@@ -30,7 +30,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     app.setQuitOnLastWindowClosed(False)
     config_path = args.config if args.config is not None else default_config_path()
     launcher = DesktopLauncher(config_path, lambda: create_application(load_config(config_path,
-        provider_override="offline" if args.offline else None)), maintenance=args.maintenance,
+        provider_override="offline" if args.offline else None, allow_missing=True)), maintenance=args.maintenance,
         maintenance_provider_override="offline" if args.offline else None)
     launcher.start()
     return app.exec()

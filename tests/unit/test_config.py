@@ -13,7 +13,10 @@ from deskpal.config import ConfigError, load_config
 def test_defaults_use_current_directory_without_creating_storage(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     config = load_config(environ={})
-    assert config.llm.provider == "offline"
+    assert config.llm.provider == "openai"
+    assert config.llm.execution_location == "cloud"
+    assert config.llm.credential_mode == "system_vault"
+    assert config.llm.is_cloud and not config.llm.ready
     assert config.llm.api_key == ""
     assert config.sandbox.workspace_dir == tmp_path / "workspace"
     assert config.storage.data_dir == tmp_path / "data"
@@ -73,14 +76,48 @@ def test_offline_does_not_read_key_variable():
                 raise AssertionError("Offline mode must not look up the API key")
             return super().get(key, default)
 
-    assert load_config(environ=KeyReadForbidden()).llm.api_key == ""
+    config = load_config(environ=KeyReadForbidden(DESKPAL_LLM_PROVIDER="offline"))
+    assert config.llm.api_key == ""
+    assert config.llm.ready and not config.llm.is_cloud
+
+
+@pytest.mark.parametrize("selection", [
+    {},
+    {"DESKPAL_LLM_PROVIDER": "openai", "DESKPAL_LLM_CREDENTIAL_MODE": "system_vault"},
+])
+def test_new_default_and_explicit_vault_do_not_read_environment_key(selection):
+    class KeyReadForbidden(dict):
+        def get(self, key, default=None):
+            if key == "OPENAI_API_KEY":
+                raise AssertionError("Vault selection must not look up the environment API key")
+            return super().get(key, default)
+
+    env = KeyReadForbidden(selection, OPENAI_API_KEY="fake-environment-key")
+    config = load_config(environ=env)
+    assert config.llm.provider == "openai"
+    assert config.llm.execution_location == "cloud"
+    assert config.llm.credential_mode == "system_vault"
+    assert config.llm.api_key == "" and not config.llm.ready
+
+
+def test_explicit_toml_vault_does_not_read_environment_key(tmp_path):
+    path = tmp_path / "config.toml"
+    path.write_text('[llm]\nprovider="openai"\nmodel="fixture-model"\n'
+                    'credential_mode="system_vault"\n', encoding="utf-8")
+
+    class KeyReadForbidden(dict):
+        def get(self, key, default=None):
+            if key == "OPENAI_API_KEY":
+                raise AssertionError("Explicit vault selection must not look up the environment API key")
+            return super().get(key, default)
+
+    config = load_config(path, environ=KeyReadForbidden(OPENAI_API_KEY="fake-environment-key"))
+    assert config.llm.credential_mode == "system_vault"
+    assert config.llm.api_key == "" and not config.llm.ready
 
 
 @pytest.mark.parametrize("env", [
     {"DESKPAL_LLM_PROVIDER": "other"},
-    {"DESKPAL_LLM_PROVIDER": "openai", "OPENAI_API_KEY": "fake-test-key"},
-    {"DESKPAL_LLM_PROVIDER": "openai", "DESKPAL_LLM_MODEL": "model"},
-    {"DESKPAL_LLM_PROVIDER": "openai", "DESKPAL_LLM_MODEL": "model", "OPENAI_API_KEY": "  "},
     {"DESKPAL_LLM_PROVIDER": "openai", "DESKPAL_LLM_MODEL": "model",
      "OPENAI_API_KEY": "fake-test-key", "DESKPAL_LLM_BASE_URL": "file:///unsafe"},
     {"DESKPAL_LLM_API_KEY_ENV": " "}, {"DESKPAL_WORKSPACE_DIR": " "}, {"DESKPAL_DATA_DIR": ""},
@@ -89,6 +126,22 @@ def test_invalid_required_values_are_rejected_without_exposing_key(env):
     with pytest.raises(ConfigError) as error:
         load_config(environ=env)
     assert "fake-test-key" not in str(error.value)
+
+
+@pytest.mark.parametrize("env", [
+    {"DESKPAL_LLM_PROVIDER": "openai", "OPENAI_API_KEY": "fake-test-key"},
+    {"DESKPAL_LLM_PROVIDER": "openai", "DESKPAL_LLM_MODEL": "model"},
+    {"DESKPAL_LLM_PROVIDER": "openai", "DESKPAL_LLM_MODEL": "model", "OPENAI_API_KEY": "  "},
+])
+def test_incomplete_cloud_connection_remains_browsable_without_exposing_key(env):
+    config = load_config(environ=env)
+    assert config.llm.provider == "openai" and config.llm.is_cloud
+    assert config.llm.credential_mode == "environment"
+    assert config.llm.model == env.get("DESKPAL_LLM_MODEL", "")
+    assert config.llm.api_key == env.get("OPENAI_API_KEY", "")
+    assert not config.llm.ready
+    assert "fake-test-key" not in repr(config)
+    assert "fake-test-key" not in repr(config.llm)
 
 
 @pytest.mark.parametrize("variable", ["DESKPAL_MAX_TOOL_STEPS", "DESKPAL_MAX_FILE_BYTES"])
@@ -260,7 +313,8 @@ def test_explicit_environ_never_reads_dotenv_or_process(
 
     monkeypatch.setattr(config_module, "dotenv_values", forbidden_read)
     config = load_config(environ=explicit)
-    assert config.llm.provider == "offline"
+    assert config.llm.provider == "openai"
+    assert not config.llm.ready
     assert config.llm.model == explicit.get("DESKPAL_LLM_MODEL", "")
     assert config.llm.api_key == ""
 
@@ -271,7 +325,8 @@ def test_dotenv_bare_entries_are_ignored_but_empty_values_remain_values(
     env_file = tmp_path / ".env"
     env_file.write_text("DESKPAL_LLM_PROVIDER\nDESKPAL_MAX_TOOL_STEPS\nBARE_TEST_KEY\n", encoding="utf-8")
     config = load_config()
-    assert config.llm.provider == "offline"
+    assert config.llm.provider == "openai"
+    assert not config.llm.ready
     assert config.agent.max_tool_steps == 8
     env_file.write_text("DESKPAL_LLM_PROVIDER=\n", encoding="utf-8")
     with pytest.raises(ConfigError):
@@ -284,8 +339,11 @@ def test_empty_dotenv_credential_is_not_treated_as_configured(
     (tmp_path / ".env").write_text(
         'DESKPAL_LLM_PROVIDER=openai\nDESKPAL_LLM_MODEL=fake-model\n'
         'DESKPAL_LLM_API_KEY_ENV=TEST_DOTENV_KEY\nTEST_DOTENV_KEY=\n', encoding="utf-8")
-    with pytest.raises(ConfigError):
-        load_config()
+    config = load_config()
+    assert config.llm.model == "fake-model"
+    assert config.llm.api_key == ""
+    assert config.llm.credential_source == "missing"
+    assert not config.llm.ready
 
 
 @pytest.mark.parametrize("failure", ["encoding", "read-error"])
@@ -312,7 +370,8 @@ def test_missing_dotenv_uses_process_and_defaults_without_error(
     monkeypatch.chdir(tmp_path)
     isolated_process_environment["DESKPAL_LLM_MODEL"] = "process-model"
     config = load_config()
-    assert config.llm.provider == "offline"
+    assert config.llm.provider == "openai"
+    assert not config.llm.ready
     assert config.llm.model == "process-model"
     assert config.storage.data_dir == tmp_path / "data"
     assert not (tmp_path / ".env").exists()

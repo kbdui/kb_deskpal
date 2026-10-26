@@ -1,12 +1,17 @@
-# Offline is an explicit deterministic demo, not a real language model.
+# New connections default to cloud. Complete model/credentials in Settings.
+# Set provider="offline" explicitly for the deterministic command demo.
 [llm]
-provider = "offline"
+provider = "openai"
 # API mode: provider = "openai", model = a model available to your account.
 model = ""
 base_url = "https://api.openai.com/v1"
 api_key_env = "OPENAI_API_KEY"
+execution_location = "cloud" # cloud | local (numeric loopback / localhost only)
+protocol = "responses"
+credential_mode = "system_vault" # system_vault | environment | none (local only)
+request_use_default = true
 # Optional Windows Credential Manager reference written by the setup wizard.
-# Environment/.env credentials take precedence. Never put the secret in TOML.
+# The selected credential_mode determines the source. Never put secrets in TOML.
 credential_ref = ""
 timeout_seconds = 30.0
 # Explicit opt-in for compatible Responses endpoints. JSON mode guarantees
@@ -31,7 +36,7 @@ poll_interval_seconds = 1.0
 max_pixels = 16000000
 
 [memory]
-# Ordinary chat is not persisted by default. candidate_review opts into extraction.
+# Long-term memory extraction is opt-in; conversation transcripts are separate.
 mode = "explicit_only"
 # Optional CPU model: install requirements-embedding.txt and download/cache explicitly.
 embedding_provider = "disabled"

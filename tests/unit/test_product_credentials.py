@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from deskpal.config import ConfigError, load_config
+from deskpal.config import load_config
 from deskpal.credentials import CredentialStoreError, WindowsCredentialStore
 from deskpal.maintenance.errors import MaintenanceError
 from deskpal.maintenance.setup import SetupService
@@ -45,10 +45,14 @@ def test_hermetic_config_and_offline_override_never_read_vault(tmp_path: Path, m
     def forbidden(*args: object) -> str:
         raise AssertionError("vault must not be read")
     monkeypatch.setattr(WindowsCredentialStore, "read", forbidden)
-    with pytest.raises(ConfigError):
-        load_config(path, environ={})
+    unconfigured = load_config(path, environ={})
+    assert unconfigured.llm.credential_ref == REF
+    assert unconfigured.llm.credential_mode == "system_vault"
+    assert unconfigured.llm.api_key == ""
+    assert not unconfigured.llm.ready
     result = load_config(path, environ={}, provider_override="offline")
     assert result.llm.api_key == ""
+    assert result.llm.ready and not result.llm.is_cloud
     assert load_config(path, environ={"OPENAI_API_KEY": "fake-env"}).llm.api_key == "fake-env"
 
 

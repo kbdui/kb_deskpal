@@ -6,13 +6,14 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from PySide6.QtCore import QObject, QSettings, QTimer, Signal, Slot
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QMenu
 
 from deskpal.application.service import ApplicationService
 
 from .bridge import ApplicationBridge
 from .notifications import NotificationController
 from .pet_controller import PetController
+from .pet_chat import PetChatWindow
 from .preferences import GuiPreferences
 from .tray import TrayController
 from .window import MainWindow
@@ -34,7 +35,17 @@ class DesktopHost(QObject):
         self.window.defer_closed = True
         self.tray = TrayController(self.window, self.preferences, parent=self)
         self.pet = PetController(self.bridge, self.preferences, parent=self)
-        self.pet.navigation_requested.connect(self.restore)
+        self.pet_chat: PetChatWindow | None = None
+        self._retired_chats: dict[int, PetChatWindow] = {}
+        self._pet_menu = QMenu(self.window)
+        self._pet_menu.addAction("聊一聊", self._open_pet_chat)
+        self._pet_menu.addAction("打开主窗口", self.restore)
+        self._pet_menu.addAction("收起小窗", self._hide_pet_chat)
+        self._pet_menu.addAction("暂时隐藏桌宠", self.pet.hide_temporarily)
+        self.pet.navigation_requested.connect(self._toggle_pet_chat)
+        self.pet.context_requested.connect(self._show_pet_menu)
+        self.pet.anchor_changed.connect(self._reanchor_pet_chat)
+        self.pet.unavailable.connect(self._hide_pet_chat)
         self.pet.stopped.connect(self._finish_closed)
         self._finalized = False
         self._timezone = ZoneInfo("Asia/Shanghai")
@@ -49,6 +60,8 @@ class DesktopHost(QObject):
         self._validation_serial = 0
         self._notification_generation = 0
         self._hidden_to_tray = False
+        self._exit_prompt_active = False
+        self._exit_confirmed = False
         self.feed_timer = QTimer(self)
         self.feed_timer.setInterval(2000)
         self.feed_timer.timeout.connect(self._poll_feed)
@@ -61,7 +74,7 @@ class DesktopHost(QObject):
         self.window.close_requested.connect(self._window_close)
         self.window.privacy_cleared.connect(self.notifications.clear_pending)
         self.tray.restore_requested.connect(self.restore)
-        self.tray.quit_requested.connect(self.bridge.shutdown)
+        self.tray.quit_requested.connect(self._request_quit)
         self.notifications.navigation_requested.connect(self._navigate)
         self.notifications.revalidation_requested.connect(self._validate_notifications)
         self.preferences.changed.connect(self._preference)
@@ -74,8 +87,68 @@ class DesktopHost(QObject):
         self.bridge.start()
 
     @Slot()
+    def _toggle_pet_chat(self) -> None:
+        if self.pet_chat is not None and self.pet_chat.isVisible():
+            self.pet_chat.hide()
+        else:
+            self._open_pet_chat()
+
+    @Slot()
+    def _open_pet_chat(self) -> None:
+        if self.bridge.state != "Ready" or self.pet.window is None or not self.pet.window.isVisible():
+            return
+        if self.pet_chat is None:
+            self.pet_chat = PetChatWindow(self.window.chat_coordinator)
+            self.pet_chat.expand_requested.connect(self._expand_pet_chat)
+        self.pet_chat.open_for(self.pet.window)
+
+    @Slot()
+    def _hide_pet_chat(self) -> None:
+        if self.pet_chat is not None:
+            self.pet_chat.hide()
+        self._pet_menu.hide()
+
+    @Slot()
+    def _reanchor_pet_chat(self) -> None:
+        if self.pet_chat is not None and self.pet_chat.isVisible():
+            self.pet_chat.reanchor()
+
+    @Slot(object)
+    def _show_pet_menu(self, position: Any) -> None:
+        if self.bridge.state == "Ready" and self.pet.window is not None:
+            self._pet_menu.popup(position)
+
+    @Slot(str, str)
+    def _expand_pet_chat(self, conversation_id: str, task_id: str) -> None:
+        if self.bridge.state != "Ready":
+            return
+        self._hide_pet_chat()
+        self.restore()
+        self.window.open_conversation(conversation_id, task_id=task_id or None)
+
+    def _dispose_pet_chat(self) -> None:
+        chat, self.pet_chat = self.pet_chat, None
+        if chat is None:
+            return
+        identity = id(chat)
+        self._retired_chats[identity] = chat
+        chat.destroyed.connect(lambda _object=None, key=identity: self._chat_destroyed(key))
+        chat.dispose()
+
+    def _chat_destroyed(self, identity: int) -> None:
+        # QObject.destroyed is emitted before its children finish destruction.
+        # Keep the ownership barrier through the next event-loop turn.
+        QTimer.singleShot(0, self, lambda key=identity: self._chat_reaped(key))
+
+    def _chat_reaped(self, identity: int) -> None:
+        self._retired_chats.pop(identity, None)
+        self._finish_closed()
+
+    @Slot()
     def restore(self) -> None:
         self._hidden_to_tray = False
+        if self.preferences.pet_visible:
+            self.pet.restore_visibility()
         self.window.showNormal()
         self.window.raise_()
         self.window.activateWindow()
@@ -86,6 +159,28 @@ class DesktopHost(QObject):
             self._hidden_to_tray = True
             self.window.hide()
         else:
+            self._request_quit()
+
+    @Slot()
+    def _request_quit(self) -> None:
+        state = self.bridge.state
+        if state in {"Closing", "Closed"} or self._exit_prompt_active:
+            return
+        if state == "StartupFailed":
+            self.bridge.shutdown()
+            return
+        if not self._exit_confirmed:
+            # Native modal dialogs run a nested event loop. Repeated tray or
+            # close gestures must not create another confirmation within it.
+            self._exit_prompt_active = True
+            try:
+                confirmed = self.window.confirm_exit()
+            finally:
+                self._exit_prompt_active = False
+            if not confirmed:
+                return
+            self._exit_confirmed = True
+        if self.bridge.state not in {"Closing", "Closed"}:
             self.bridge.shutdown()
 
     @Slot(str)
@@ -99,6 +194,8 @@ class DesktopHost(QObject):
             self.feed_timer.stop()
             self.tick_timer.stop()
             self.notifications.clear_pending()
+            self._hide_pet_chat()
+            self._dispose_pet_chat()
             if state == "Closing":
                 # A hidden close-to-tray window must remain available on timeout.
                 self.restore()
@@ -109,9 +206,9 @@ class DesktopHost(QObject):
     def _finish_closed(self) -> None:
         if self.bridge.state != "Closed" or self._finalized:
             return
-        if not self.pet.settled:
+        if not self.pet.settled or self.pet_chat is not None or self._retired_chats:
             self.restore()
-            self.window.state_label.setText("正在关闭：后台已释放，等待桌宠图片和窗口资源释放。")
+            self.window.state_label.setText("正在关闭：后台已释放，等待桌宠图片和聊天窗口资源释放。")
             return
         self._finalized = True
         self.tray.dispose()
@@ -135,6 +232,10 @@ class DesktopHost(QObject):
 
     @Slot(str, object)
     def _preference(self, key: str, value: Any) -> None:
+        if key == "pet_enabled" and not value:
+            self._dispose_pet_chat()
+        if key == "pet_visible" and not value:
+            self._hide_pet_chat()
         if key == "pet_click_through" and value and not self.tray.available:
             self.restore()
         if key == "notifications_enabled":
@@ -149,7 +250,7 @@ class DesktopHost(QObject):
         try:
             self.bridge.send("settings")
         except BufferError:
-            QTimer.singleShot(250, self._request_settings)
+            QTimer.singleShot(250, self, self._request_settings)
 
     @Slot()
     def _poll_feed(self) -> None:
@@ -186,7 +287,7 @@ class DesktopHost(QObject):
         except BufferError:
             # Keep the controller's current batch, but invalidate this retry if
             # privacy or the notification switch changes before capacity returns.
-            QTimer.singleShot(250, lambda: self._retry_validation(candidates, generation))
+            QTimer.singleShot(250, self, lambda: self._retry_validation(candidates, generation))
 
     def _retry_validation(self, candidates: Any, generation: int) -> None:
         if (generation == self._notification_generation
@@ -207,6 +308,11 @@ class DesktopHost(QObject):
         if envelope.get("request_id") == self._feed_request:
             self._feed_request = None
             if not envelope.get("ok") or self.bridge.state != "Ready":
+                # A restored store can have a smaller audit range. Re-establish a
+                # new baseline rather than repeatedly replaying or trusting its old cursor.
+                self._after_sequence = None
+                self._until_sequence = None
+                self.notifications.clear_pending()
                 return
             self._after_sequence = int(data["next_sequence"])
             more = bool(data["has_more"])
@@ -214,7 +320,7 @@ class DesktopHost(QObject):
             self.notifications.ingest(data.get("items", []), baseline=bool(data.get("baseline")),
                 next_sequence=self._after_sequence, until_sequence=data.get("until_sequence"), has_more=more)
             if more:
-                QTimer.singleShot(10, self._poll_feed)
+                QTimer.singleShot(10, self, self._poll_feed)
         if envelope.get("request_id") == self._validation_request:
             self._validation_request = None
             self.notifications.revalidated(data.get("items", []) if envelope.get("ok") else [],

@@ -1,48 +1,7 @@
-"""Detached, bounded DTO decoders for dialogue and interaction controls."""
+"""Detached, bounded DTO decoder for interaction settings."""
 
 from dataclasses import dataclass
 from typing import Any
-
-
-@dataclass(frozen=True)
-class TurnView:
-    sequence: int
-    task_id: str
-    request: str
-    response: str
-
-
-@dataclass(frozen=True)
-class ConversationSnapshot:
-    conversation_id: str
-    epoch: int
-    turns: tuple[TurnView, ...]
-
-    @classmethod
-    def decode(cls, value: dict[str, Any]) -> "ConversationSnapshot":
-        if value.get("schema_version") != 1:
-            raise ValueError("Unknown conversation schema")
-        identity, epoch, turns = value.get("conversation_id"), value.get("epoch"), value.get("turns")
-        if (not isinstance(identity, str) or not identity or len(identity) > 200
-                or type(epoch) is not int or epoch < 0 or not isinstance(turns, list) or len(turns) > 8):
-            raise ValueError("Invalid conversation snapshot")
-        output: list[TurnView] = []
-        total = 0
-        last = 0
-        for item in turns:
-            if not isinstance(item, dict):
-                raise ValueError("Invalid conversation turn")
-            sequence, task_id = item.get("sequence"), item.get("task_id")
-            request, response = item.get("request"), item.get("response")
-            if (type(sequence) is not int or sequence <= last or not isinstance(task_id, str)
-                    or len(task_id) > 200 or not isinstance(request, str) or not isinstance(response, str)):
-                raise ValueError("Invalid conversation turn fields")
-            total += len(request.encode("utf-8")) + len(response.encode("utf-8"))
-            if total > 16 * 1024:
-                raise ValueError("Conversation history exceeds budget")
-            last = sequence
-            output.append(TurnView(sequence, task_id, request, response))
-        return cls(identity, epoch, tuple(output))
 
 
 @dataclass(frozen=True)

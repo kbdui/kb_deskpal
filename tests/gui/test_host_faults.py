@@ -5,12 +5,13 @@ import sqlite3
 from threading import Event
 
 from PySide6.QtCore import QSettings, QTimer
-from PySide6.QtWidgets import QSystemTrayIcon
+from PySide6.QtWidgets import QLabel, QSystemTrayIcon
 import pytest
 
 from deskpal.application.factory import create_application
 from deskpal.application.instance import InstanceLock, InstanceLockError
 from deskpal.config import load_config
+from deskpal.gui.channel import Channel
 from deskpal.gui.host import DesktopHost
 from deskpal.gui.preferences import GuiPreferences
 from deskpal.llm.errors import LLMError
@@ -48,12 +49,22 @@ def production_host(qtbot, tmp_path, monkeypatch, **injections):
     host.start()
     try:
         qtbot.waitUntil(lambda: host.bridge.state == "Ready", timeout=5000)
-        qtbot.waitUntil(lambda: host.bridge.pending_count == 0, timeout=5000)
+        qtbot.waitUntil(lambda: host.window.lifecycle == "Ready"
+                       and host.window.chat_coordinator.available
+                       and host.window.chat_coordinator.model_ready
+                       and bool(host.window.chat_coordinator.default_id)
+                       and host.window.chat_view.conversation_id == host.window.chat_coordinator.default_id
+                       and host.bridge.pending_count == 0
+                       and not any(channel.pending for channel in host.window.findChildren(Channel)),
+                       timeout=5000)
         yield host, applications[0], config, replies, ticks
     finally:
         host.bridge.shutdown()
         qtbot.waitUntil(lambda: host.bridge.state == "Closed", timeout=7000)
+        qtbot.waitUntil(lambda: host.window.lifecycle == "Closed", timeout=7000)
         heartbeat.stop()
+        assert host._finalized and host.pet.settled
+        assert host.pet_chat is None and not host._retired_chats
         assert all(not thread.is_alive() for thread in host.bridge._threads)
         with InstanceLock(config.storage.data_dir):
             pass
@@ -72,10 +83,11 @@ def execute(qtbot, host, replies, operation, parameters=None):
 
 def assert_responsive(qtbot, host, ticks):
     before = len(ticks)
-    host.window.chat_input.setFocus()
-    qtbot.keyClicks(host.window.chat_input, "responsive")
+    host.window.chat_view.input.setFocus()
+    qtbot.keyClicks(host.window.chat_view.input, "responsive")
     qtbot.waitUntil(lambda: len(ticks) >= before + 5, timeout=1500)
-    assert "responsive" in host.window.chat_input.toPlainText()
+    assert "responsive" in host.window.chat_view.input.toPlainText()
+    assert "responsive" in host.window.chat_coordinator.draft(host.window.chat_view.conversation_id).text
 
 
 class BlockingEmbedding:
@@ -201,8 +213,12 @@ def test_synthetic_provider_failure_is_visible_and_host_recovers(qtbot, tmp_path
     with production_host(qtbot, tmp_path, monkeypatch, planner=planner) as values:
         host, application, _config, replies, ticks = values
         try:
+            coordinator = host.window.chat_coordinator
+            conversation_id = coordinator.default_id
             task = execute(qtbot, host, replies, "submit",
-                           {"request": "synthetic API failure", "command_id": "provider-fault"})
+                           {"request": "synthetic API failure", "command_id": "provider-fault",
+                            "conversation_id": conversation_id,
+                            "expected_context_epoch": coordinator.conversations[conversation_id]["context_epoch"]})
             qtbot.waitUntil(planner.entered.is_set, timeout=5000)
             assert_responsive(qtbot, host, ticks)
             diagnostics = execute(qtbot, host, replies, "diagnostics")
@@ -214,8 +230,18 @@ def test_synthetic_provider_failure_is_visible_and_host_recovers(qtbot, tmp_path
             assert "Synthetic provider unavailable" in failed["task"]["error"]
             assert failed["attempts"] == []
             host.window.navigate("task", task["task_id"])
-            qtbot.waitUntil(lambda: "Synthetic provider unavailable" in host.window.tasks.detail.toPlainText(),
+            # A request that failed before producing a tool plan has no visible
+            # task card. Its persistent assistant message carries the failure.
+            qtbot.waitUntil(lambda: any(
+                "Synthetic provider unavailable" in label.text()
+                for label in host.window.chat_view.body.findChildren(QLabel)),
                             timeout=5000)
+            assert host.window.stack.currentWidget() is host.window.chat_view
+            assert host.window.chat_view.conversation_id == conversation_id
+            assert coordinator.reviews[task["task_id"]]["status"] == "Failed"
+            assert any(item["task_id"] == task["task_id"] and item["kind"] == "assistant_message"
+                       and "Synthetic provider unavailable" in item["body"]
+                       for item in coordinator.timelines[conversation_id])
             # Failure must leave the Host usable, without retrying the failed task.
             recovered = execute(qtbot, host, replies, "submit",
                                 {"request": "synthetic recovery", "command_id": "provider-recovery"})

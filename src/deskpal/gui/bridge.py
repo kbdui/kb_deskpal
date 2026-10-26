@@ -31,11 +31,11 @@ class _Command:
     privacy_epoch: int
 
 
-READ_OPERATIONS = frozenset({"tasks", "task", "memories", "goals", "goal", "milestones",
+READ_OPERATIONS = frozenset({"conversation_task_location", "schedule_items", "task_review", "task_updates", "command_status", "conversation_list", "conversation_timeline", "conversation_item", "conversation_cleanup_status", "appearance_snapshot", "tools_catalog", "tool_detail", "plugins_catalog", "reminder_feed", "reminder_detail", "tasks", "task", "memories", "goals", "goal", "milestones",
                              "bindings", "proposals", "proposal", "settings", "notification_feed",
                              "notification_validate", "presentation", "companion",
                              "conversation_snapshot", "interaction_snapshot", "cleanup_status"})
-CONTROL_OPERATIONS = frozenset({"cancel", "diagnostics", "request_forget"})
+CONTROL_OPERATIONS = frozenset({"conversation_clear", "conversation_delete", "cancel", "diagnostics", "request_forget"})
 PRIVACY_ACTIONS = frozenset({"forget", "correct", "accept", "reject"})
 MAX_PENDING = 32
 MAX_PARAMETERS_BYTES = 131072
@@ -44,6 +44,9 @@ MAX_REPLY_BYTES = 4194304
 
 def _error(exc: Exception) -> dict[str, str]:
     """Exceptions can contain user text or credentials; expose classified errors only."""
+    from deskpal.assets.models import AssetError
+    if isinstance(exc, AssetError):
+        return {"code": exc.code, "message": exc.message}
     kind = type(exc).__name__
     if kind == "QueueFull":
         return {"code": "QueueFull", "message": "任务队列已满，请稍后重试。"}
@@ -64,6 +67,7 @@ class ApplicationBridge(QObject):
     state_changed = Signal(str)
     reply = Signal(object)
     privacy_changed = Signal(int)
+    image_reply = Signal(object)
     _delivery_wakeup = Signal()
 
     def __init__(self, factory: Callable[[], ApplicationService], *,
@@ -82,6 +86,9 @@ class ApplicationBridge(QObject):
         self._lock = RLock()
         self._commands: Queue[_Command] = Queue(MAX_PENDING)
         self._reads: Queue[_Command] = Queue(MAX_PENDING)
+        self._images: Queue[_Command] = Queue(7)
+        self._image_pending: dict[str, _Command] = {}
+        self._image_outbox: deque[dict[str, Any]] = deque()
         self._controls: Queue[_Command] = Queue(MAX_PENDING)
         self._pending: dict[str, _Command] = {}
         self._read_keys: dict[str, str] = {}
@@ -130,7 +137,8 @@ class ApplicationBridge(QObject):
                 return
             self._threads = [Thread(target=self._initialize, name="deskpal-gui-commands", daemon=True),
                              Thread(target=self._read_loop, name="deskpal-gui-reads", daemon=True),
-                             Thread(target=self._control_loop, name="deskpal-gui-control", daemon=True)]
+                             Thread(target=self._control_loop, name="deskpal-gui-control", daemon=True),
+                             Thread(target=self._image_loop, name="deskpal-gui-images", daemon=True)]
             for thread in self._threads:
                 thread.start()
 
@@ -139,6 +147,10 @@ class ApplicationBridge(QObject):
             app = self._factory()
             # Even a late result after a user closes the startup screen is owned.
             self._app = app
+            configure = getattr(app, "configure_asset_decoder", None)
+            if configure is not None:
+                from .asset_decoder import QtAssetDecoder
+                configure(QtAssetDecoder())
             self._facade = self._facade_factory(app)
             if not self._closing.is_set():
                 blocked = bool(app.diagnostics().get("cleanup_pending"))
@@ -193,8 +205,14 @@ class ApplicationBridge(QObject):
                     previous = self._pending.get(existing)
                     if previous is not None and previous.generation == generation and previous.privacy_epoch == self._epoch:
                         return existing
-            if operation == "request_forget" or (operation == "memory" and copied.get("action") in PRIVACY_ACTIONS):
+            if operation in {"request_forget", "conversation_clear", "conversation_delete"} or (operation == "memory" and copied.get("action") in PRIVACY_ACTIONS):
                 self._epoch += 1
+                self._outbox.clear()
+                self._outbox_bytes = 0
+                self._pending.clear()
+                self._read_keys.clear()
+                self._image_outbox.clear()
+                self._image_pending.clear()
                 self.privacy_changed.emit(self._epoch)
             command = _Command(request_id, operation, copied, generation, self._epoch)
             self._pending[request_id] = command
@@ -240,10 +258,17 @@ class ApplicationBridge(QObject):
             self._delivery_timer.stop()
             self._set_state("Closed")
             return
+        for _ in range(2):
+            with self._lock:
+                image_envelope = self._image_outbox.popleft() if self._image_outbox else None
+                if image_envelope is not None:
+                    self._image_pending.pop(image_envelope["request_id"], None)
+            if image_envelope is not None and not self._closing.is_set() and image_envelope["privacy_epoch"] == self.privacy_epoch:
+                self.image_reply.emit(image_envelope)
         for _ in range(8):
             with self._lock:
                 if not self._outbox:
-                    return
+                    break
                 envelope, size = self._outbox.popleft()
                 self._outbox_bytes -= size
                 command = self._pending.get(envelope["request_id"])
@@ -255,7 +280,7 @@ class ApplicationBridge(QObject):
             if valid:
                 self.reply.emit(envelope)
         with self._lock:
-            if self._outbox and not self._wake_posted:
+            if (self._outbox or self._image_outbox) and not self._wake_posted:
                 self._wake_posted = True
                 self._delivery_wakeup.emit()
 
@@ -291,6 +316,10 @@ class ApplicationBridge(QObject):
                         self._epoch += 1
                         delivery_epoch = self._epoch
                         envelope["privacy_epoch"] = delivery_epoch
+                        self._outbox.clear(); self._outbox_bytes = 0
+                        self._image_outbox.clear(); self._image_pending.clear()
+                        self._pending = {key: item for key, item in self._pending.items() if item.privacy_epoch == delivery_epoch}
+                        self._read_keys.clear()
                         # The command's own receipt crosses this barrier only as
                         # a new-epoch acknowledgement; all prior reads expire.
                         self.privacy_changed.emit(delivery_epoch)
@@ -377,10 +406,12 @@ class ApplicationBridge(QObject):
                     self._stopped.set()
                     with self._lock:
                         self._pending.clear()
+                        self._image_pending.clear()
+                        self._image_outbox.clear()
                         self._read_keys.clear()
                         self._outbox.clear()
                         self._outbox_bytes = 0
-                        for lane in (self._commands, self._reads, self._controls):
+                        for lane in (self._commands, self._reads, self._controls, self._images):
                             while True:
                                 try:
                                     lane.get_nowait()
@@ -399,3 +430,58 @@ class ApplicationBridge(QObject):
                 self._run(command)
             finally:
                 self._controls.task_done()
+
+    def send_image(self, operation: str, parameters: dict[str, Any], generation: int = 0) -> str:
+        """Dedicated bounded binary lane. Only the receiving GUI creates QPixmap."""
+        if operation != "asset_preview":
+            raise ValueError("Unsupported image operation")
+        copied = json.loads(json.dumps(parameters, allow_nan=False))
+        if set(copied) - {"token", "asset_id", "max_edge"} or len(json.dumps(copied)) > 4096:
+            raise ValueError("Invalid preview parameters")
+        with self._lock:
+            if self._closing.is_set() or self._state != "Ready" or len(self._image_pending) >= 7:
+                raise BufferError("Image lane unavailable")
+            command = _Command(str(uuid4()), operation, copied, generation, self._epoch)
+            self._images.put_nowait(command)
+            self._image_pending[command.request_id] = command
+            return command.request_id
+
+    def _image_loop(self) -> None:
+        self._initialized.wait()
+        while not self._stopped.is_set():
+            try:
+                command = self._images.get(timeout=0.1)
+            except Empty:
+                continue
+            try:
+                with self._lock:
+                    if self._closing.is_set() or command.privacy_epoch != self._epoch:
+                        self._image_pending.pop(command.request_id, None)
+                        continue
+                    self._inflight += 1
+                envelope = {"request_id": command.request_id, "operation": command.operation,
+                            "generation": command.generation, "privacy_epoch": command.privacy_epoch}
+                try:
+                    if self._app is None:
+                        raise RuntimeError("Not ready")
+                    preview = self._app.asset_preview(**command.parameters)
+                    from dataclasses import asdict
+                    value = asdict(preview) if not isinstance(preview, dict) else dict(preview)
+                    if not isinstance(value.get("png"), bytes) or len(value["png"]) > 5 * 1024 * 1024:
+                        raise ValueError("Invalid preview")
+                    envelope.update(ok=True, image=value)
+                except Exception as exc:
+                    envelope.update(ok=False, error=_error(exc))
+                finally:
+                    with self._lock:
+                        self._inflight -= 1
+                with self._lock:
+                    if not self._closing.is_set() and command.privacy_epoch == self._epoch and len(self._image_outbox) < 7:
+                        self._image_outbox.append(envelope)
+                        if not self._wake_posted:
+                            self._wake_posted = True
+                            self._delivery_wakeup.emit()
+                    else:
+                        self._image_pending.pop(command.request_id, None)
+            finally:
+                self._images.task_done()

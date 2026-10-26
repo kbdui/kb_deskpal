@@ -54,7 +54,9 @@ def assert_code(code, action):
 def test_roundtrip_has_four_verified_stores_and_explicit_scope(source, tmp_path):
     path = backup(source, tmp_path)
     receipt = archives.inspect_backup(path)
-    assert receipt["manifest"]["scope"] == "four_sqlite_stores_only"
+    assert receipt["format_version"] == 2
+    assert receipt["manifest"]["scope"] == "four_sqlite_stores_and_managed_assets"
+    assert receipt["manifest"]["assets"] == []
     assert receipt["manifest"]["exclusions"] == archives.EXCLUSIONS
     assert receipt["manifest"]["hashes_prove_authenticity"] is False
     assert [entry["name"] for entry in receipt["manifest"]["databases"]] == list(archives.DATABASES)

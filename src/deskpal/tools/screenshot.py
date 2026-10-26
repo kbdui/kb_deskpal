@@ -76,6 +76,18 @@ class ScreenshotCaptureTool:
         self._backend = backend if backend is not None else MSSScreenshotBackend()
         self._max_pixels = max_pixels
 
+    def catalog_availability(self) -> dict[str, str]:
+        """Dependency discovery only; never open MSS, enumerate or capture."""
+        if isinstance(self._backend, MSSScreenshotBackend):
+            from importlib.util import find_spec
+            try:
+                installed = find_spec("mss") is not None
+            except (ImportError, ValueError, AttributeError):
+                return {"availability": "check_at_execution", "reason": "截图依赖状态未能确定；执行时检查依赖、显示器和权限"}
+            if not installed:
+                return {"availability": "unavailable", "reason": "缺少截图依赖，请安装 deskpal[screenshot]"}
+        return {"availability": "check_at_execution", "reason": "执行时检查显示器、桌面会话和截图权限"}
+
     @property
     def spec(self) -> ToolSpec:
         return ToolSpec("screenshot_capture", "Capture an authorized screen region to a local workspace PNG.", {
