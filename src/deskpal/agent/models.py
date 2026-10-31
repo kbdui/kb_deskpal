@@ -1,3 +1,5 @@
+"""Agent 对外返回的数据结构；只描述结果，不负责执行或持久化。"""
+
 from dataclasses import dataclass
 
 from deskpal.tasks.models import TaskStatus
@@ -7,7 +9,7 @@ from typing import Any, Mapping
 
 @dataclass(frozen=True)
 class AuthorizationRequest:
-    """Concrete call preview; its data is a copy of the private pending plan."""
+    """需要用户确认的单次工具调用预览，不包含可变的内部计划对象。"""
 
     name: str
     arguments: Mapping[str, Any]
@@ -17,6 +19,8 @@ class AuthorizationRequest:
 
 @dataclass(frozen=True)
 class AgentResult:
+    """一次 Agent 请求的最终状态、回复及可供界面展示的执行信息。"""
+
     task_id: str
     status: TaskStatus
     response: str

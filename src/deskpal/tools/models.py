@@ -43,4 +43,5 @@ class ToolResult:
     error: str | None = None
     tool_name: str = ""
     call_id: str = ""
+    outcome: str = "known"
 

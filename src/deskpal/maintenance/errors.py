@@ -1,6 +1,8 @@
 """Public maintenance failures contain fixed, credential-free messages only."""
 
 MESSAGES = {
+    "profile_not_found": "角色档案不存在，请刷新档案列表。",
+    "profile_selection_required": "请选择要打开的角色档案。",
     "invalid_config": "配置无效，请检查非秘密设置；损坏文件需明确确认修复。",
     "config_missing": "尚未创建配置，请先完成首次配置。",
     "revision_conflict": "内容已变化，请刷新后重新确认。",

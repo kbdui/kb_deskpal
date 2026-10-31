@@ -129,7 +129,7 @@ class SmokeWorker(RunningWorker):
 
 def _fingerprints() -> dict[str, str]:
     paths = ("scripts/diagnose_appcontainer_integrity_smoke.py",
-             "tests/unit/test_appcontainer_integrity_smoke_diagnostic.py")
+             "tests/unit/execution_sandbox/test_appcontainer_integrity_smoke_diagnostic.py")
     return mic._fingerprints() | limits.source_fingerprints() | {
         path: sha256((ROOT / path).read_bytes()).hexdigest() for path in paths}
 

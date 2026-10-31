@@ -1,53 +1,11 @@
-# GUI 与桌宠实现
+# GUI 接入
 
-GUI 是可选 PySide6 Widgets 前端。CLI 和领域模块不依赖 Qt；没有 GUI 依赖仍可运行后端。
+Qt 主线程仅呈现有界 DTO 和管理交互。ApplicationBridge 把初始化、读取、业务命令和关闭送到后台，DesktopFacade 连接应用服务；UI 不直接访问数据库、模型或工具。主窗口和桌宠小窗共用任务控制与聊天服务。
 
-2026-10-26 重构增量见[聊天桌宠源码接口](gui-refactor.md)；D1–D5 范围见[开发记录](../planning/gui-refactor/development-status.md)，本轮自动化结果与实机未验证边界见[测试记录](../planning/gui-refactor/test-report.md)。下述早期模块职责随新入口演进，不沿用旧测试结论。
+P6 使用 PySide6 + QFluentWidgets 的 FluentWindow，导航分聊天、安排、记忆、工具插件和设置。角色切换、人格、模型连接、通知及形象配置都集中设置；聊天保留就地授权和任务控制。会话目录从聊天标题按需打开，不常驻其他页面。执行记录为工作区内部右侧栏，窄窗可收起返回；桌宠小窗由桌宠或托盘打开，没有导航项和技术详情按钮。记忆在数据库分页前按事实、经历和缓冲筛选，依赖所选项的操作在对应记录菜单/侧栏提供。
 
-下一聊天的协作约定见[2026-10-24 工作方式交接](../handoffs/2026-10-24-gui-refactor.md)，只说明 Agent 管理等工作方式，不提供页面重构设计。
+`components.py` 统一 Fluent 控件和 Pivot 页签，`theme.py` 仅定制业务表面及必要原生对话框调色板，不整段覆盖组件库样式。角色切换和连接编辑仍由 Launcher 等待旧 Host 完全释放，再交给同一风格的设置维护外壳；保存和重开分开，不绕过凭据服务或伪装热更新。
 
-## 文件与所有权
+刷新、切换角色、清空和关闭时重查请求身份、generation、档案/运行实例和隐私边界。旧读取、重复回执或晚到模型结果不能覆盖新内容，也不能复活已清除资料。所有权与关闭顺序独立验证，不把 offscreen 通过当作实机通过。
 
-| 文件 | 职责 |
-| --- | --- |
-| [main.py](../../src/deskpal/gui/main.py) | 参数解析、Qt 初始化、默认配置路径与离线覆盖 |
-| [launcher.py](../../src/deskpal/gui/launcher.py) | `DesktopLauncher` 切换生产 Host 和独立维护，等待旧阶段实际结束 |
-| [host.py](../../src/deskpal/gui/host.py) | 主窗口、桥接、托盘、通知、桌宠的生命周期总协调 |
-| [bridge.py](../../src/deskpal/gui/bridge.py) | `ApplicationBridge` 后台初始化、命令/查询/控制通道、回执和关闭 |
-| [window.py](../../src/deskpal/gui/window.py)、[views.py](../../src/deskpal/gui/views.py) | 主窗口与任务/记忆/目标等视图及交互 |
-| [channel.py](../../src/deskpal/gui/channel.py)、[chat.py](../../src/deskpal/gui/chat.py) | 有界回执协调与版本化共享聊天状态；旧请求追踪器已删除 |
-| [chat.py](../../src/deskpal/gui/chat.py)、[task_card.py](../../src/deskpal/gui/task_card.py) | 共享持久会话投影、双窗草稿、原地审核与稳定消息 |
-| [settings.py](../../src/deskpal/gui/settings.py)、[appearance.py](../../src/deskpal/gui/appearance.py) | 唯一配置中心、身份偏好和本地图片预览/应用 |
-| [management.py](../../src/deskpal/gui/management.py)、[catalog.py](../../src/deskpal/gui/catalog.py) | 安排、记忆、目标和真实工具目录 |
-| [pet_chat.py](../../src/deskpal/gui/pet_chat.py)、[channel.py](../../src/deskpal/gui/channel.py) | 可聚焦小窗与页面有界回执协调 |
-| [persona_settings.py](../../src/deskpal/gui/persona_settings.py)、[interaction_state.py](../../src/deskpal/gui/interaction_state.py)、[companion_state.py](../../src/deskpal/gui/companion_state.py) | 新设置内人格组件、互动 DTO 和共享模拟情绪元数据；不保留旧独立页面 |
-| [preferences.py](../../src/deskpal/gui/preferences.py) | QSettings 中的窗口、显示器、托盘、通知和桌宠偏好 |
-| [tray.py](../../src/deskpal/gui/tray.py)、[notifications.py](../../src/deskpal/gui/notifications.py) | 托盘动作、通知基线/去重/静默/点击复查 |
-| [maintenance.py](../../src/deskpal/gui/maintenance.py) | 独立维护窗口及其后台操作 |
-| [pet_controller.py](../../src/deskpal/gui/pet_controller.py)、[pet_window.py](../../src/deskpal/gui/pet_window.py)、[pet_assets.py](../../src/deskpal/gui/pet_assets.py) | 元数据驱动表现、透明窗口和有界图片准备 |
-
-## 后台边界
-
-调用方向为 `Qt Widget → ApplicationBridge → DesktopFacade → ApplicationService`。主线程只做展示、局部状态和 Qt 对象操作，不调用 Core、SQL 或同步等待服务。
-
-bridge 将命令、查询和控制分成有界后台通道；取消/诊断/遗忘控制不能排在一个慢普通请求之后。当前 `MAX_PENDING=32`，参数上限 128 KiB、回执上限 4 MiB；这些是边界保护，不能靠无限队列修复压力问题。
-
-`DesktopFacade.execute(operation, parameters)` 是 Qt-free 的操作分发表，输出 JSON 风格深复制 DTO。查询可以并发，但只有生产 dispatcher 执行 Core。添加操作时同时检查 bridge 的 READ/CONTROL 分类，避免阻塞或错误顺序。
-
-桥接 request ID、页面 generation、记录 revision 和 privacy epoch 共同决定回调是否可用。隐私操作先清空界面正文/授权，迟到的旧 epoch 结果必须丢弃。收到回执不能直接把请求参数当作已持久状态，应按回执或重新查询更新页面。
-
-## 桌宠表现层
-
-`presentation/` 提供严格元数据 DTO 和固定状态映射，不传任务正文或参数。PetController 经既有 bridge 查询，处理新鲜度与代际；角色点击请求附近小窗，聊天与审核由共享 ChatView/Coordinator 处理，不增加 Core 或执行入口。
-
-图片在有界后台单 worker 准备 QImage，GUI 线程创建 QPixmap、QPainter 和透明窗口。关闭必须等待图片 worker 真正退出。静态素材位于 `gui/assets/pet/`，`provenance.json` 记录来源；资源打包声明在 `pyproject.toml`。
-
-默认禁用时不加载素材或启动专用轮询。隐藏保留有限缓存，禁用释放窗口/缓存。任务关键状态文字优先，表情不能将失败显示为成功；过期/故障必须显示未知并提供有限诊断。
-
-## 通知和关闭
-
-通知默认关闭，开启时建立当前基线，不补历史；投递前再次检查状态、TTL 和来源。QSettings 保存去重 ID/revision/channel、游标等，不保存私人正文、密钥或授权。通知点击只导航并重读。
-
-Host 负责等待后台 Closed、图片线程退出和宠物窗口销毁；Launcher 收到生产阶段实际结束后才打开维护。维护窗口也需等待其 worker 完成才能重开应用。关闭超时不能先释放实例锁或强退 Qt；保留 Closing 让用户查看诊断、等待或重试。
-
-验证时区分 Qt offscreen、原生窗口脚本和用户实际物理交互；前两者不能推定真实托盘、通知、混合 DPI 和休眠全部通过。详见[验证指南](development-and-testing.md)。
+测试按[GUI 子目录](../../tests/README.md)组织；更细的状态原则见[GUI 状态边界](gui-refactor.md)。旧 D1–D5 全量设计保存在[历史区](../archive/gui-refactor/README.md)。

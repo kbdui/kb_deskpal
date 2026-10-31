@@ -1,128 +1,43 @@
-# Deskpal 架构
+# 当前后端架构
 
-按主题阅读当前实现，请从[开发者指南](docs/developer-guide/README.md)进入，其中包含[仓库文件导航](docs/developer-guide/repository-map.md)、[核心代码说明](docs/developer-guide/modules.md)和[请求生命周期](docs/developer-guide/request-lifecycle.md)。面向实际操作的说明见[用户指南](docs/user-guide/README.md)。
-
-2026-10-25 GUI 重构：工作库 schema3 加入持久会话/时间线、素材元数据与独立提醒收件箱；GUI 使用共享 ChatCoordinator、五入口设置中心、原地审核卡和桌宠小窗。默认云连接、真实本机模式与离线演示分开，凭据沿独立维护敏感通道保存；静态图片通过有界二进制预览通道装配，新备份格式2包含当前托管 PNG。实现与边界见[源码接口](docs/developer-guide/gui-refactor.md)及[开发记录](docs/planning/gui-refactor/development-status.md)。此次 D1–D5 开发整合尚未启动集中产品测试；下列历史阶段说明及报告保留当时事实，不能覆盖本次行为。
-
-2026-10-23 产品化增量：新增 Qt-free `maintenance`（配置、模型缓存、四库归档恢复）和 `credentials`。独立维护阶段不构造生产 Core；GUI `DesktopLauncher` 等待 Host/桌宠完整结束后才能进入维护，并等待维护 worker 真正退出再重开应用。配置采用文件 CAS 与原文保留；FastEmbed 持共享缓存 OS 租约，准备/清理持独占租约；备份与恢复使用既有 data_dir 实例锁。生产工厂在构造四库前检查恢复标记，避免初始化半成品。见[实际接口](docs/versions/v0.9/interfaces.md)、[开发记录](docs/versions/v0.9/development-status.md)及[集中测试记录](docs/versions/v0.9/test-report.md)。隔离执行/精细授权/无人值守执行已按用户决定延至正式版后，不扩大现有工具权限。
-
-2026-10-22：拟人化增量已完成 H0–H5 源码整合和 H6 验收准备，并获用户授权集中测试。新增进程内有界 conversation、独立 response、用途化模型网关和工作库 schema 2；规划与表达保留不同来源投影，遗忘控制入口先持久阻断再清理。云默认仍仅固定预设，显式字段许可与来源用途共同决定新增表达数据。当前实现、迁移和与原提案的调整见[开发记录](docs/versions/v0.8/humanization-development-status.md)，[最小验收](docs/planning/v0.8/humanization-minimal-test-plan.md)的首败、修补和实际限制见[本轮测试报告](docs/versions/v0.8/humanization-test-report.md)；真实模型体验未通过。下文 V0.8 最小版段落保留历史边界，不能将旧测试结论推广到本轮代码。
-
-V0.4 以“显式目标 → 本地提议 → 持久任务 → 计划确认 → 步骤账本 → 审查恢复”为主线。当前验收状态见 [V0.4 进度](docs/versions/v0.4/development-status.md)，实际接口见 [接口契约](docs/versions/v0.4/interfaces.md)。Python 3.11+，Windows 单机、单数据目录运行实例。
-
-2026-10-23 HM08 改进：表达协议统一 schema/局部审核与固定诊断；会话表达投影保留未确认草稿来源并将全部元数据计入预算；偏好范围按证据分句校验。原生 JSON 为可选 expression 能力，与普通调用共享原任务额度和隐私屏障，默认 prompt；未增加执行权限或自动修复请求。[实现与验证记录](docs/versions/v0.8/hm08-improvement-report.md)保留真实调用失败，相关问题按用户要求[暂缓](docs/versions/v0.8/hm08-deferred-issues.md)，不能以离线通过宣称真实体验已验收。
-
-## 调用方向
-
-V0.5 候选版新增 gui（Widgets、bridge、host、preferences、tray、notifications）和 application.desktop 的 Qt-free 查询/命令边界。界面不调用 Core/SQL，命令/查询/控制在后台分通道，仍复用唯一 Core worker。具体接口、隐私 epoch 与最终关闭所有权见 [V0.5 接口](docs/versions/v0.5/interfaces.md)；实机与长测状态以 [测试报告](docs/versions/v0.5/test-report.md)为准。
-
-V0.7静态PNG桌宠已实现，2026-10-21按用户要求带未决项[归档](docs/versions/v0.7/delivery.md)，未全部验收通过；见[接口](docs/versions/v0.7/interfaces.md)与[测试报告](docs/versions/v0.7/test-report.md)。PetController只经既有bridge读取七字段任务元数据，角色点击只请求打开主窗口，不拥有Core或授权入口。后台单worker有界准备QImage，GUI线程拥有QPixmap、QPainter和透明窗口；关闭由Host等待后台Closed、图片worker退出及宠物窗口销毁后统一结束Qt。CLI不导入Qt，默认关宠不加载图片或专用轮询。
-
-V0.8 新增可选 `companion` 领域（见[接口](docs/versions/v0.8/interfaces.md)、[最小测试报告](docs/versions/v0.8/test-report.md)和[开发记录](docs/versions/v0.8/development-status.md)）：工厂在实例锁后拥有独立 SQLite，Core 仅通过 Protocol 读取有限表达指令及提交真实终态汇总；Planner 不接收人格/情绪。云表达仅使用固定人格预设，本地偏好/cue/affect 不出云。GUI 经既有后台桥访问独立 companion 端点，不改变七字段 presentation；Idle 或已结束有限完成反馈的 Completed 可采用静态情绪图，真实状态文字和关键状态优先。隐私重置与终态效果通过锁及代际排序；运行中的真实遗忘仍受Busy门禁。没有新权限、新执行者或周期性云任务，不扩大最小测试证据为完整版本验收。
+2026-10-30，按 Phase 01–05 源码整理。旧版类调用表和机制审计见[历史审计](docs/archive/README.md)，更细的契约见[公共架构](docs/planning/companion-redesign/architecture-and-contracts.md)。
 
 ```mermaid
 flowchart TD
-  CLI[CLI] --> App[ApplicationService / OS 实例锁]
-  GUI[Qt Widgets 主线程] --> Bridge[有界后台命令 / 查询 / 控制]
-  Bridge --> Desktop[DesktopFacade / 深复制 DTO]
-  Desktop --> App
-  App --> Commands[Goal / Proposal / Memory 管理]
-  App --> Queue[持久提交队列 / 单 worker]
-  Queue --> Core[Agent Core]
-  Core --> Planner
-  Planner --> LLM[LLMProvider]
-  Core --> LLM
-  Core --> Tools[Tool Manager → Sandbox → Tools]
-  Core --> Memory[MemoryRuntime / Coordinator]
-  Memory --> MemoryDB[(memory.sqlite3)]
-  Memory --> Retriever[词法 / 可选 CPU Embedding]
-  Commands --> Work[(workflow.sqlite3)]
-  Queue --> Work
-  Core --> Journal[ExecutionJournalPort]
-  Journal --> Work
-  App --> Scheduling[SchedulingService]
-  Scheduling --> Events[公开事件 / 来源快照]
-  Events --> Rules[默认关闭的本地规则]
-  Rules --> Work
-  Work --> Audit[Audit outbox → JSONL]
+    GUI[Qt 主窗口 / 桌宠小窗] --> Bridge[ApplicationBridge / DesktopFacade]
+    CLI[CLI] --> App[ApplicationService]
+    Bridge --> App
+    App --> Dispatcher[SubmissionDispatcher：唯一执行队列]
+    Proactive[ProactiveCoordinator：主动机会与复查] --> Dispatcher
+    Dispatcher --> Core[AgentCore：模型多轮决策]
+    Core --> Turn[InteractionCoordinator：角色、历史、来源与调用预算]
+    Core --> Tools[ToolManager：参数与权限检查]
+    Tools --> Business[文件 / 日程 / 定时器 / 内部管理接口]
+    Business --> Core
+    Core --> Learning[FeedbackLearning：同步学习与缓冲保存]
+    Dispatcher --> Learning
+    Turn --> Stores[当前档案的四个数据库]
+    Learning --> Stores
+    Core --> Stores
+    Business --> Stores
+    Stores --> Publish[真实结果、任务状态与聊天发布]
 ```
 
-Core 依赖 DTO/Protocol，不访问 SQL、Goal 实现、调度私有连接或线程控制。Tool Manager 检查可信权限和 Sandbox 后执行工具；模型不能注册工具或提高权限。领域业务不能反向引用 Core/Application。
+用户请求和普通主动聊天都经过同一个 Core。内部记忆复核由同一 Dispatcher 调用反馈服务；确定的日程提醒沿调度服务履约，不额外调用模型批准。协调器只发现和登记机会，不独立规划或执行工具。
 
-## 模块与生命周期
+角色卡、学到的习惯、当前情绪、用户状态理解、互动方式和表达调节共同准备为有范围、有来源的上下文。助手建议进入历史用于理解指代，但不自动成为事实或授权。模型观察每轮实际结果再判断下一步；程序维护参数、权限、预算、有效来源和持久记录。
 
-| 模块 | 职责 |
-| --- | --- |
-| application | 生产工厂、实例锁、单 worker、CLI、管理/恢复/删除/关闭协调 |
-| maintenance / credentials | 独立离线配置与维护、固定失败引导、四库归档/恢复屏障、Windows 可选凭据；不依赖 GUI 或启动生产 Core |
-| gui | 可选 Qt Widgets、后台桥/宿主、版本化视图、遗忘清屏、偏好/托盘/本地通知；不反向成为领域依赖 |
-| presentation | Qt-free严格元数据DTO与固定状态/表情文字映射；GUI自行检查新鲜度和代际，不执行工具 |
-| companion | Qt-free声明式人格、显式偏好/cue、有限情绪/风格、独立持久化与重置；不拥有权限或事实权威，证据按V0.8最小报告划界 |
-| agent / planner / llm | Observe/Think/Plan/Act/Reflect、有界静态 Plan、厂商无关 Provider |
-| workflow / tasks | 单工作库、持久 Task/Submission/Plan/attempt、依赖索引、outbox、删除 job；兼容内存 TaskManager |
-| conversation / assets | 持久会话目录与时间线、有界上下文重建、清理闭包；静态图片导入/元数据、CAS 与受控托管文件 |
-| goals | 显式 Goal/Milestone/SourceBinding、CAS、执行条件版本、完成证据 |
-| proactive | 本地 Proposal、规则、独立 cursor、持久 inbox/continuation、原子接受 |
-| memory | 来源/revision/用途、候选审核、三字段画像、词法和可选 FastEmbed |
-| scheduling | 独立日程/计时库、到期事件、来源身份/快照/锚点 |
-| tools / sandbox | 19 个可信工具、schema/契约版本、三级权限、工作区文件策略 |
-| config / execution_log | TOML/.env/env、时区验证、JSONL 观察副本 |
+暂停在下次模型判断前生效，不强行终止当前调用或已决定的步骤组。继续使用原任务和累计预算，重新读取当前有效状态；取消停止后续工作，已完成操作保留。生成最终回复后，先同步评估记忆并保存缓冲，再提交并发布；有限重试耗尽后仍如实保留实际工作结果。
 
-`create_application(...)` 为生产 facade，`run/handle_request` 是 submit + wait。worker 调用 `Core.execute_task(task_id)`，不再次提交或创建重复 Task。取消直接写短事务，不排在执行队列后面。
+| 数据/资源 | 归属 |
+|---|---|
+| workflow schema 5 | 任务、轮次、步骤、调用预算、追加要求、暂停与主动关注 |
+| companion schema 4 | 开放角色卡、学习习惯、当前理解及其修订 |
+| memory schema 3 | 长期理解、来源、学习缓冲、学习记录及相关索引 |
+| scheduling schema 1 | 日程、计时器及提醒状态 |
+| 受管头像、桌宠图片 | 当前角色档案 |
+| 模型连接、API 凭据、外部工作区、模型缓存 | 应用级共用 |
 
-`create_agent(...) -> AgentCore` 保留 V0.3 同步、进程内任务行为，供嵌入和旧测试使用，不具备生产实例锁/持久队列/恢复保证。直接构造 Core 不自动关闭外部依赖。生产 UI 经 Application，不直接修改底层 store、TaskManager 或 Core。
+全部业务库随角色整体切换，未激活角色没有运行后台。切换先关闭旧服务和连接，再创建新后台；旧结果不得进入新档案。数据库表和迁移集中在存储 schema 层，不能由业务服务临时建表。详见[数据库设计](docs/planning/companion-redesign/database-design.md)。
 
-Application 在任何数据库初始化前取得规范 data_dir 的 OS 文件锁；Windows 持有 msvcrt fd，非 Windows 分支用 fcntl。第二工厂、路径别名、另一进程不能同时拥有目录；异常退出由 OS 释放锁，不依赖 PID 或时间租约接管。
-
-关闭先停止提交/本地提议/领取，协作取消并等待 Core，join worker，再关闭 Core 拥有的 Scheduling/Memory/模型，最后关闭 workflow、释放实例锁。`close(timeout)` 超时返回 False，保留在用资源与锁，可查诊断并再次关闭；不强杀同步工具线程。
-
-## 事务与权威
-
-Goal/Milestone/Binding/Proposal、Task/Submission/Plan/attempt、依赖索引、inbox/cursor、删除 job 和 audit outbox 同属 workflow.sqlite3。接受提议与创建唯一 Task/Submission 同事务。SQLite WAL、foreign keys、FULL synchronous；嵌套事务复用连接，内部失败使外层回滚。未知 schema 拒绝打开，备份使用 SQLite online backup。
-
-Memory 保留 schema v2 独立库，Scheduling 保留原库。跨库预检不是全局事务；接受、出队、规划/云出口、每步前重复复核来源。同库取消/版本/遗忘阻断与 Started 提交原子排序。外部查询、LLM、工具不占用工作库写事务。
-
-Goal revision 每次写入递增，execution_version 只随状态/执行条件改变；备注不使兄弟工作全部失效。Milestone/Binding 独立作用域。Proposal Accepted、Task Completed、Goal Completed 是不同事实；Goal/Milestone 完成须用户证据，模型回复不改权威状态。
-
-新 Goal/Binding 默认 local_only，派生用途取来源中最严格限制。云 key 或接受建议不构成出云许可；受限工作在云规划前阻断。使用明确离线模式，或修改原来源用途、产生新版本/新意图后再处理。
-
-## 计划、授权与恢复
-
-Plan 保存完整 canonical JSON 的 SHA-256，覆盖准确参数、reply、稳定 call ID、工具 contract_version/schema/权限、workspace、用途及依赖版本。工具行为改变须升级 contract_version。请求/计划超限在执行前拒绝；结果超限明确省略正文并保留 outcome。
-
-全计划先预检权限，不足则 Waiting、零工具执行。Level 1/Level 2 分别检查普通/高危授权。grant 仅在进程内绑定 Task/原 Plan，重启全部清空，不能由审计重建。恢复未执行计划须复核 hash、契约、路径和依赖，再确认，不暗换参数。
-
-每步先提交 Started，调用工具后提交 Succeeded/Failed。前置写入失败不调用工具；后置结果未知不重试。已知失败也不能推断没有部分效果。
-
-| 重启证据 | 动作 |
-| --- | --- |
-| Queued/Planning/Waiting，没有 attempt | NeedsReview，零自动 LLM/工具；原计划可重新展示确认 |
-| 部分成功，后续未开始 | NeedsReview；剩余意图另建任务，不重放旧完整 Plan |
-| Started 无结果或账本不一致 | Uncertain；人工判断与证据不赋予原步骤执行资格 |
-| 全部可靠成功，仅收尾中断 | 复核来源/取消后据账本收尾，零补云/重放；取消优先 |
-| 可靠终态 | 历史查询，不再执行 |
-
-运行中取消先持久 cancel_requested，在边界禁止后续步骤。Started 若先于取消提交，当前工具仍可能产生效果；未知仍为 Uncertain，不能伪称撤回。
-
-## 本地提议与事件
-
-主动默认关闭，无后台云建议生成器。首批规则只用显式 Goal 截止窗口、绑定日程/计时到期、关联 Task 完成后的里程碑复核。不扫描私人文件、采屏或从全部记忆猜测目标。
-
-timer/calendar 独立 cursor；接收 inbox 与 cursor 同事务，处理另有持久 offset/outcome。每流每批最多 100、每轮新提议最多 10；剩余 inbox/扇出 continuation 跨轮继续。投递键含来源库身份/世代，业务键含执行版本和准确作用域。
-
-首次开启默认 tail。显式 bounded_history 必须给该流 event ID/0 与条数上限。身份、ID 回退、锚点变化停止消费待人工复核，不自动 reset。历史 label 不是当前来源事实，标题/提醒版本/删除都查当前完整快照。
-
-TTL 从 due_at 起算。静默窗口只约束命令边界展示，结束后重检 TTL/来源，不是后台执行授权。退出期间无系统通知。
-
-## 遗忘与审计
-
-遗忘先提交 job、永久 Memory 使用阻断和待执行计划失效，再幂等删 Memory 共享来源闭包，擦除明确依赖的请求/计划/结果/证据/未投递副本，最后完成 job。启动先续办再显示/派发；失败保持 Pending，不伪称全完成。独立 Goal/Calendar 不按相似文本删除；历史日志、备份、导出和云端副本有独立保留边界。
-
-生产日志只投递结构化元数据，业务状态与 outbox 同事务。JSONL 失败不抹掉真实效果、不触发重放；同 event_id 可重复物理行。删除未完成时停止投递并清缓存。V0.3 低层日志行为见历史接口。
-
-## 验证边界
-
-当前基础能力以 [V0.5 验收矩阵](docs/planning/v0.5/acceptance-boundaries.md)和[实际报告](docs/versions/v0.5/test-report.md)为准；V0.4 是持久后端的历史证据。双 Python/strict、权限/记忆/调度回归、真实进程竞争与崩溃、Windows 锁、安装与资源测量均须有证据。Qt 主窗口及通用状态通知已在候选版实现，实机缺项独立记录。人格情绪按 V0.8 独立待验收；Live2D、自动 Goal DAG、后台云规划、完整 WorkingContext/OS 隔离、多实例及外部效果 exactly-once 属于后续范围。
-
-V0.7新增验收按[静态桌宠T01–T08](docs/planning/v0.7/acceptance-boundaries.md)独立记录，不覆盖V0.5未结项。V0.6隔离执行仍暂停、阶段0未通过；静态表现层不证明已有隔离执行能力。Live2D明确延期至正式版后更新，人格情绪主要留V0.8，产品版本仍0.5.0rc1。
-
+工具目前为可信进程内代码，工作区路径保护和必要授权继续有效；这不构成 OS 沙箱。高级隔离、Live2D、完整云端类别许可及快捷绕过规划属于[长期方向](docs/roadmap/post-release.md)。

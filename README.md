@@ -1,155 +1,32 @@
-# Personal AI Agent Desktop Companion — V0.5 候选版
+# Deskpal
 
-## 使用与开发文档
+面向 Windows 的角色聊天与桌宠 Agent，提供 Qt 图形界面和命令行。Python 3.11+；包版本仍为 `0.5.0rc1`，历史文档中的版本编号不表示当前发布版本。
 
-- **用户**：从[用户指南](docs/user-guide/README.md)开始，按安装、配置、桌面操作、任务授权、记忆隐私和数据维护分篇查阅。
-- **开发者**：从[开发者指南](docs/developer-guide/README.md)开始，查阅文件架构、核心代码、执行链路、GUI、存储、扩展和验证说明。
-- **版本与证据**：[文档总导航](docs/README.md)保留各版本接口、计划、测试和交付记录。
-
-两套指南随源码更新；2026-10-26 GUI 重构 D1–D5 源码已整合，旧 GUI 实现已删除，范围见[开发记录](docs/planning/gui-refactor/development-status.md)，本轮自动化结果与修补见[测试记录](docs/planning/gui-refactor/test-report.md)。实机交互待用户自行验证。下文历史版本状态保留当时的验收边界。
-
-## 当前状态
-
-后续补验已通过：[真实 BGE 下载、托管登记、新进程离线 CPU 推理](docs/versions/v0.9/managed-embedding-live-report.md)，512 维向量有效且归一化，离线网络尝试为 0。模型现位于 `data/models/bge-small-zh-v1.5`，本地 `config.toml` 已启用引用，使用 `deskpal_env` 无需再次下载；内置默认未改，真实配置和模型不随 Git 分发。使用见[用户维护指南](docs/user-guide/maintenance.md)，装配与验证见[开发者指南](docs/developer-guide/storage-and-maintenance.md)。GUI 物理桌面交互仍单独验收。
-
-2026-10-23：首次配置向导、可选 Windows 系统凭据、语义检索模型缓存管理、固定失败指引和四库备份/可续办恢复已完成开发及集中自动化修补复测，原集中批次为 **主环境去重 1,289 项通过、2 项权限跳过，兼容环境 169 项通过**；后续 BGE 实测见上段，物理桌面交互仍未验收。见[测试记录](docs/versions/v0.9/test-report.md)、[开发记录](docs/versions/v0.9/development-status.md)、[操作说明](docs/versions/v0.9/operations.md)与[最小测试清单](docs/planning/v0.9/productization-minimal-test-plan.md)。隔离执行、细粒度授权和有限无人值守执行按用户决定移至正式版后；产品版本未调整，发布和稳定性门槛仍需单独验收。
-
-Windows 个人智能 Agent 桌宠项目。当前版本 **0.5.0rc1**：在既有持久任务、来源化记忆、目标与本地提议后端上，加入 Qt Widgets 主窗口、后台交互、准确授权、托盘与通知。Python 3.11+。实机验收缺项见 [V0.5 状态](docs/versions/v0.5/delivery.md)，不宣称全部版本门槛已通过。
-
-提供 GUI 与命令行入口。本轮重构加入持久日常/专项聊天、原地授权、五入口界面、桌宠小窗与静态形象导入，进度见[GUI 开发记录](docs/planning/gui-refactor/development-status.md)；Live2D 和无人值守执行继续暂缓。V0.8 拟人化历史测试及真实模型限制见[测试报告](docs/versions/v0.8/humanization-test-report.md)，不能扩大到本次源码。架构见 [ARCHITECTURE.md](ARCHITECTURE.md)，新界面用法见[用户指南](docs/user-guide/desktop.md)，CLI 继续参考 [V0.4 操作指南](docs/versions/v0.4/operations.md)。
-
-V0.5 [开工前评估](docs/planning/v0.5/environment-assessment.md)与[计划](docs/planning/v0.5/development-plan.md)保留为规划快照；实际证据见 [测试报告](docs/versions/v0.5/test-report.md)。
-
-2026-10-23 的 [HM08 改进与验证](docs/versions/v0.8/hm08-improvement-report.md)另行记录结构协议、偏好范围、草稿来源、工具补充表达和显式原生 JSON 通道；离线复测通过，真实模型问题按用户要求[记录并暂缓](docs/versions/v0.8/hm08-deferred-issues.md)，未标为整体通过。原始失败记录保留，Git 由用户提交。
-
-V0.7静态图片桌宠已实现，2026-10-21按用户要求带未决项[归档](docs/versions/v0.7/delivery.md)，未全部验收通过。主窗口设置可启用原创机器人及有限表情差分，支持拖动、显示/隐藏、置顶和鼠标穿透；原生混合DPI、安装及30分钟运行已有证据，长测预览诊断失败与内存增长归因仍保留。使用与验证范围见[V0.7运行说明](docs/versions/v0.7/operations.md)和[测试报告](docs/versions/v0.7/test-report.md)。不新增运行依赖或第二Core；产品仍0.5.0rc1，Live2D延期至正式版后更新，V0.6隔离实验仍暂停。
+截至 2026-10-30，人格、记忆与多轮执行重构 **Phase 01–05 已实现并完成各阶段定向隔离验证，Phase 06 整体验收待进行**。真实模型效果、原生桌面操作与完整回归不能由阶段通过数替代。当前全量测试基线及整理后的结果见[整理记录](docs/maintenance/2026-10-30-repository-cleanup.md)。
 
 ## 安装与运行
 
-GUI（可选依赖，与 CLI 同数据目录互斥）：
+在仓库根目录的独立 Python 环境中执行；下面约束适用于 Windows CPython 3.12：
 
 ```powershell
-conda activate deskpal_env
 python -m pip install -r requirements-gui.txt -c constraints/windows-py312-gui.txt
 python -m deskpal.gui --config config.toml
 ```
 
-加 --offline 可明确使用本次固定命令演示。新安装默认云连接，在设置中配置模型与密钥；缺配置可浏览但不能发送。聊天不逐条切换云/本地，用途与类别许可集中设置，旧来源限制保留。聊天存档跨重启保留，模型上下文仍有界。无 GUI 依赖仍可运行后端：
+缺配置时可启动配置向导。默认使用云模型连接，在设置中填写服务、模型和 API 密钥；本地模型连接也在设置中选择。凭据、模型权重及业务数据库不随仓库分发。截图和本地语义检索分别使用可选依赖分组，见[快速开始](docs/user-guide/quick-start.md)。
 
-```powershell
-conda activate deskpal_env
-python -m pip install -r requirements-dev.txt -c constraints/windows-py312.txt
-python -m deskpal --request "帮我执行一个任务" --json
-python -m deskpal --list-tools
-```
+仅后端可安装 `requirements.txt`，执行 `python -m deskpal --help`。固定命令演示需要明确选择 offline provider，不等同于模型理解能力。
 
-基础安装用 requirements.txt；截图和本地 embedding 分别用 requirements-screenshot.txt、requirements-embedding.txt。直接声明统一在 pyproject.toml，requirements 只引用分组；Windows 还会安装 tzdata。约束包含 Windows CPython 3.12 的 44 项观察版本，不是跨平台哈希锁。见 [依赖维护](docs/guides/dependencies.md)与 [Embedding 安装](docs/guides/embedding-setup.md)。
+## 当前功能
 
-新默认 provider 为云连接，尚未配置时不生成回复。若要运行上述固定命令演示，先在配置明确设 `provider="offline"`；该演示无需 key/网络，不具备真实模型的自然语言理解能力。也可用安装后的 deskpal 命令。
+- 每个角色保存独立的聊天、人格、记忆、任务、日程和受管形象；切换时关闭旧后台再打开新后台。连接、凭据、外部工作区与模型缓存应用级共用。
+- 角色卡与学到的习惯参与理解、规划和表达；模型按工具实际结果多轮判断。授权、追加要求、暂停、继续和取消由任务链路落实。
+- 默认开启自动学习，以待确认缓冲承接不确定理解，由模型复核；工具明细留在执行账本。聊天清空与长期记忆遗忘分别处理。
+- 普通主动聊天统一经过 AgentCore；内部整理使用同一调度器。提醒由调度履约，主动聊天与提醒可以分别暂停。
+- 主窗口集中聊天、安排、记忆、工具插件和设置；静态桌宠提供小对话窗。Live2D、OS 沙箱与完整云端类别许可属于[正式版后规划](docs/roadmap/post-release.md)。
 
-## 工具与确认
+## 文档与测试
 
-工厂注册 19 个工具：基础 echo/time/read_text/write_text、Calendar、Timer、Document 及授权截图。完整参数用 `--list-tools --json` 查看。路径仅限配置工作区，拒绝符号链接/Junction，不递归删除。截图依赖可选，PNG 不自动上传。
+从[文档导航](docs/README.md)、[当前架构](ARCHITECTURE.md)和[测试说明](tests/README.md)开始。开发与验收按[六阶段计划](docs/planning/companion-redesign/README.md)推进；后续短报告统一追加到[实施日志](docs/reports/implementation-log.md)。
 
-```powershell
-python -m deskpal --request "write note.txt 你好" --json
-# Waiting，零工具调用；退出后查看持久计划：
-python -m deskpal --workflow task --id TASK_ID
-# 用上一步真实 hash 确认原 Task：
-python -m deskpal --workflow confirm --id TASK_ID --plan-hash HASH --authorize write_text
-python -m deskpal --request "read note.txt" --json
-```
-
-交互模式支持 /confirm TASK_ID、/confirm-high-risk TASK_ID、/cancel TASK_ID。Level 1 使用普通授权；移动/删除等 Level 2 需要独立高危授权，普通 --authorize 不能放行。单次请求也可明确预授权工具：
-
-```powershell
-python -m deskpal --request "write another.txt 内容" --authorize write_text
-python -m deskpal --tool timer_create --arguments '{"duration_seconds":60,"label":"休息"}' --authorize timer_create --json
-```
-
-同一进程同一 Plan 的授权可累积；重启清空普通/高危授权。恢复不会重放工具或自动补云。单次请求退出码 Completed=0、Failed/Uncertain=1、Waiting/NeedsReview=2（管理命令返回自身回执）。部分执行与未知步骤需人工复核，不能直接重跑原完整 Plan。
-
-## 目标、本地建议与恢复
-
-```powershell
-python -m deskpal --workflow goal-create --title "整理项目" --criteria "用户检查目录并明确确认"
-python -m deskpal --workflow goals
-python -m deskpal --workflow tasks --limit 100
-python -m deskpal --workflow proposals --state all
-python -m deskpal --workflow diagnostics
-```
-
-Goal/Milestone 由用户显式创建、关联日程或 Task，并用 revision 修改/完成。Task 成功只形成进展证据，不自动完成目标。新 Goal/来源绑定默认 local_only；配置云 key、接受建议均不扩大来源用途。
-
-主动默认关闭；显式启用 [proactive] enabled 后，仅按本地规则生成待查看 Proposal，不后台调用云、采屏或执行工具。首次开启从事件尾部开始，历史补读与来源库重建必须显式复核。每流每批最多 100 条、每轮最多 10 个新提议；TTL 从到期时间起算，静默只影响命令边界展示。
-
-接受提议原子创建唯一 Task/Submission，随后仍检查来源用途和工具权限。在云模式中 local_only 意图会 NeedsReview；明确选择离线模式可本地处理。详细 Goal→绑定→提议→接受→用户完成证据示例见 [操作指南](docs/versions/v0.4/operations.md)。
-
-任务/计划/步骤持久化到 workflow.sqlite3。Queued、Planning、Waiting 重启后先 NeedsReview；没有 attempt 的任务可 resume/重新确认。部分完成只复核，剩余意图另建任务；Started 无可靠结果则 Uncertain，人工复核不授予重试资格。
-
-## 记忆与隐私
-
-```powershell
-python -m deskpal --memory remember --content "叫我小明" --local-only
-python -m deskpal --memory list --history
-python -m deskpal --memory profile
-python -m deskpal --memory correct --memory-id ID --revision 1 --content "叫我小林"
-python -m deskpal --memory forget --memory-id ID --revision REV
-```
-
-默认 explicit_only，普通聊天不自动入长期库；“记住：内容”在 LLM 前保存。candidate_review 须显式启用，候选仍须用户审核。画像仅 preferred_name、reply_language、verbosity。可选 cache-only FastEmbed 不自动下载模型；真实模型/检索历史证据见 [V0.3 报告](docs/versions/v0.3/test-report.md)。
-
-遗忘先持久阻断，再删除 Memory 与明确派生工作副本；失败保持 Pending，启动先续办，完成前不展示/派发相关内容。独立 Goal/Calendar 不按相似文字删除；已写历史日志、备份、导出与外部/云端副本有独立保留范围。生产 JSONL 仅元数据，outbox 失败可重投同 event ID，绝不重放工具。
-
-## 本地人格与情绪设置（V0.8 开发中）
-
-人格与模拟情绪默认关闭；使用本地管理命令查看当前 `revision`，写操作必须携带该值。示例中的 `REV` 需替换为最近一次查询或修改回执中的整数。
-
-```powershell
-python -m deskpal --companion show
-python -m deskpal --companion configure --companion-parameters '{"expected_revision":REV,"enabled":true,"emotions_enabled":true,"preset":"warm"}'
-python -m deskpal --companion preference --companion-parameters '{"expected_revision":REV,"scope":"today","verbosity":"brief","humor_allowed":false}'
-python -m deskpal --companion cue --companion-parameters '{"expected_revision":REV,"mode":"focused","ttl_seconds":600}'
-python -m deskpal --companion reset --companion-parameters '{"expected_revision":REV,"target":"affect"}'
-python -m deskpal --companion rollback --companion-parameters '{"expected_revision":REV,"persona_version":1}'
-```
-
-预设为 `balanced/warm/concise`；风格仅接受 `formality/warmth/humor/verbosity/expressiveness/curiosity` 六项 0..1 数值。偏好作用域为 `session/today/persistent`，长度为 `brief/normal/detailed`；`today` 按配置的 `proactive.timezone` 到当地下一午夜结束。cue 为 `neutral/supportive/focused`，最多 1800 秒，会话偏好和 cue 不跨重启保存。所有管理命令强制离线，无需模型 key，不经过规划或执行工具；运行任务期间设置写操作会明确拒绝，可在任务结束后重试。
-
-已有工具结果的 Reflect 追加受限风格指令；当前请求中的明确表达要求优先。通常工具路径仍为一次 Planner + 一次 Reflect。禁用人格时无工具路径沿用 Planner 普通回复，仅一次请求；启用且有有效风格时最多增加一次无工具表达调用，Planner 草稿明确视为未验证的 assistant 输出，表达失败回原回复并附警告。`candidate_review` 的可选记忆评估调用按原设置执行。风险确认、失败、取消和待复核文字保持中性。云表达不接收本地互动偏好、cue 或任务情绪；工具权限、任务事实和状态独立于人格。
-
-生产状态在实例锁后保存到 `companion.sqlite3`，低层 `create_agent` 的人格状态只在内存中。可选人格读取、样式或情绪写入失败时回退中性，不阻断工具、不重复执行；损坏存储不会自动覆盖，管理写入会拒绝。遗忘先重置派生表达状态，重置失败则清理保持 Pending，重试或启动续办成功后才报告完成。任务情绪只接收已提交的 Completed/Failed 及最小结果摘要；不保存请求正文、工具参数或结果内容。
-
-## 配置与数据
-
-`--config config.toml` 显式选择配置；字段优先级为进程环境变量 > 配置目录 .env > TOML > 默认值。相对路径以配置目录为准，密钥禁止写 TOML 或 Git。GUI 缺配置进入设置，可用 `python -m deskpal.gui --setup` 主动进入。默认路径优先当前目录已有文件，其次 Windows 用户配置目录；新默认云连接须配置就绪。完整流程见[模型配置](docs/user-guide/configuration.md)。
-
-API 模式仅兼容 Responses 协议，执行位置由 `execution_location` 区分云和本机回环。新连接默认系统凭据库，也可明确选择环境来源；旧配置保留原实际来源。密钥在设置经专用后台通道保存，现有密钥不回显。请求和允许使用的来源才进入所选模型；切换云不放宽旧来源用途。本地 embedding 独立配置。字段见 [config.example.toml](config.example.toml)。
-
-```text
-src/deskpal/
-  application/   装配、实例锁、队列、恢复与 CLI
-  agent/         Core 请求编排
-  planner/ llm/  计划与模型接口
-  workflow/      持久任务/计划/步骤、依赖、outbox、删除工作单
-  goals/         Goal/Milestone/SourceBinding
-  proactive/     本地提议与可靠事件消费
-  companion/     可选声明式人格、显式互动偏好与有限情绪模拟（V0.8待验收）
-  tasks/ memory/ scheduling/ tools/ sandbox/ config/ execution_log/
-tests/
-docs/
-doc/             原始设计资料
-```
-
-默认 data/ 内含 workflow.sqlite3、memory.sqlite3、scheduling.sqlite3、companion.sqlite3、execution.jsonl；文件工具根为 workspace/。一个规范 data_dir 只允许一个生产实例。关闭超时会保留在用资源/锁，不强杀同步工具；程序退出期间无系统通知。
-
-生产集成使用 `create_application`；`create_agent` 保留 V0.3 同步进程内任务契约，用于低层嵌入与兼容测试，不提供 V0.4 持久恢复保证。Git 提交由用户处理。
-
-## 开发与验证
-
-```powershell
-python -m pytest -q
-python -m mypy --strict src scripts/check_memory_api.py scripts/benchmark_memory.py scripts/benchmark_workflow.py
-```
-
-离线测试使用合成数据，不调用真实 API；真实 API 需新的单独授权。当前证据见 [V0.5 测试报告](docs/versions/v0.5/test-report.md)与[候选版交付说明](docs/versions/v0.5/delivery.md)；[V0.4 报告](docs/versions/v0.4/test-report.md)保留为历史后端证据。[文档导航](docs/README.md)、[分阶段路线](docs/planning/roadmap.md)、[长期记忆/人格/情绪设计](docs/planning/companion-model/README.md)区分已实现与未来规划。
+历史接口、失败证据和交接统一放在 [docs/archive](docs/archive/README.md)。存档不作为当前操作指令，也不意味着原先未通过的验收已经完成。

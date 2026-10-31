@@ -23,13 +23,13 @@ def _eligible(item: MemoryItem, now: datetime, *, include_local: bool, as_of: da
     when = now if as_of is None else as_of
     start = draft.valid_from if draft.valid_from is not None else item.source.created_at
     return (
-        item.status == MemoryStatus.ACCEPTED
+        item.status in (MemoryStatus.ACCEPTED, MemoryStatus.CANDIDATE, MemoryStatus.DISPUTED)
         and item.source.owner_id == "local"
         and draft.claim_type != ClaimType.LEGACY
         and draft.scope == "global"
         and (include_local or item.source.use_policy == UsePolicy.CLOUD_ALLOWED)
         and start <= when
-        and (draft.valid_to is None or when < draft.valid_to)
+        and (as_of is None or draft.valid_to is None or when < draft.valid_to)
         and (draft.expires_at is None or now < draft.expires_at)
     )
 
@@ -37,7 +37,7 @@ def _eligible(item: MemoryItem, now: datetime, *, include_local: bool, as_of: da
 def _indexable(item: MemoryItem, now: datetime) -> bool:
     # Current accepted heads may describe historical periods. Keep their
     # vectors available for explicit as_of, while retrieval applies validity.
-    return (item.status == MemoryStatus.ACCEPTED and item.draft.claim_type != ClaimType.LEGACY
+    return (item.status in (MemoryStatus.ACCEPTED, MemoryStatus.CANDIDATE, MemoryStatus.DISPUTED) and item.draft.claim_type != ClaimType.LEGACY
             and item.draft.scope == "global"
             and (item.draft.expires_at is None or now < item.draft.expires_at))
 
@@ -49,7 +49,7 @@ def _profile(item: MemoryItem) -> bool:
         or (draft.profile_key == "reply_language" and draft.value in {"zh", "en"})
         or (draft.profile_key == "verbosity" and draft.value in {"brief", "detailed"})
     )
-    return (draft.claim_type == ClaimType.USER_REPORT and draft.subject == "user" and value_valid
+    return (item.status == MemoryStatus.ACCEPTED and draft.claim_type == ClaimType.USER_REPORT and draft.subject == "user" and value_valid
             and item.source.origin in {"user_message", "user_confirmation"})
 
 
@@ -64,7 +64,8 @@ def profile_entries(
             continue
         current = repo.get(item.id)
         if (current is None or current.revision != item.revision
-                or not _eligible(current, now, include_local=include_local) or not _profile(current)):
+                or not _eligible(current, now, include_local=include_local) or not _profile(current)
+                or (current.draft.valid_to is not None and current.draft.valid_to <= now)):
             continue
         grouped.setdefault(current.draft.profile_key, []).append(current)
     entries: list[ProfileEntry] = []
@@ -112,25 +113,14 @@ def _lexical(query: str, content: str) -> float:
     terms = _terms(query)
     if not terms:
         return 0.0
-    common = terms & _terms(content)
-    return len(common) / len(terms) if common else 0.0
-
-
-def _compatible(query: str, content: str) -> bool:
-    """Exact numeric constraints beat cosine; preserve explicit negation."""
-    numbers = set(re.findall(r"\d+(?:\.\d+)?", _plain(query)))
-    if numbers and not numbers.issubset(set(re.findall(r"\d+(?:\.\d+)?", _plain(content)))):
-        return False
-    # Questions asking about polarity remain eligible on either side. A direct
-    # negative query must not match a positive assertion by shared nouns alone.
-    question = any(word in query for word in ("是否", "是不是", "有没有", "吗", "？", "?"))
-    if not question and _negative(_plain(query)) and not _negative(_plain(content)):
-        return False
-    return True
-
-
-def _negative(text: str) -> bool:
-    return bool(re.search(r"不|没|无|never|\bnot\b|\bno\b", text))
+    content_terms = _terms(content)
+    common = terms & content_terms
+    if not common:
+        return 0.0
+    score = len(common) / min(len(terms), len(content_terms))
+    # 原句匹配只提高相关排序，不排除反例，也不据此判断事实或极性。
+    query_text, content_text = _plain(query.strip()), _plain(content.strip())
+    return score + (1.0 if query_text in content_text or content_text in query_text else 0.0)
 
 
 def _cosine(vector: tuple[float, ...], indexed: tuple[float, ...]) -> float:
@@ -162,6 +152,8 @@ def _record(item: MemoryItem, reasons: tuple[str, ...]) -> MemoryRecord:
         "valid_to": draft.valid_to.isoformat() if draft.valid_to else None,
         "expires_at": draft.expires_at.isoformat() if draft.expires_at else None,
         "selected_by": reasons, "content": draft.content,
+        "status": item.status.value, "reason": draft.reason, "uncertainty": draft.uncertainty,
+        "destination": draft.destination, "verified": False,
     }
     if "profile" in reasons:
         evidence["profile"] = {"key": draft.profile_key, "value": draft.value}
@@ -221,7 +213,7 @@ class MemoryRetriever:
         try:
             manifest = self.embedding.manifest
             existing = {(memory_id, revision) for memory_id, revision, _ in self.repository.embeddings(manifest)} if only_missing else set()
-            items = self.repository.list_items(status=MemoryStatus.ACCEPTED)
+            items = tuple(item for item in self.repository.list_items() if _indexable(item, self.clock()))
             if not include_profiles:
                 items = tuple(item for item in items if not item.draft.profile_key)
             for offset in range(0, len(items), 8):
@@ -287,7 +279,7 @@ class MemoryRetriever:
         # Read each snapshot once on the common, already-indexed path. This is
         # query-local data, never a cross-query cache: TTL, deletion and changes
         # made by another connection are observed again on every retrieval.
-        accepted = self.repository.list_items(status=MemoryStatus.ACCEPTED)
+        accepted = tuple(item for item in self.repository.list_items() if item.status in (MemoryStatus.ACCEPTED, MemoryStatus.CANDIDATE, MemoryStatus.DISPUTED))
         if not include_profiles:
             accepted = tuple(item for item in accepted if not item.draft.profile_key)
         indexed_rows: tuple[tuple[str, int, tuple[float, ...]], ...] = ()
@@ -300,7 +292,7 @@ class MemoryRetriever:
                 if any(_indexable(item, now) and (item.id, item.revision) not in existing for item in accepted):
                     warnings.extend(self.ensure_index() if include_profiles else
                                     self._build_index(only_missing=True, include_profiles=False))
-                    accepted = self.repository.list_items(status=MemoryStatus.ACCEPTED)
+                    accepted = tuple(item for item in self.repository.list_items() if item.status in (MemoryStatus.ACCEPTED, MemoryStatus.CANDIDATE, MemoryStatus.DISPUTED))
                     if not include_profiles:
                         accepted = tuple(item for item in accepted if not item.draft.profile_key)
                     indexed_rows = self.repository.embeddings(index_manifest)
@@ -311,8 +303,7 @@ class MemoryRetriever:
         if not include_profiles:
             indexed_rows = tuple(row for row in indexed_rows if row[0] in items)
         profiles = _profile_ids(items) if include_profiles and as_of is None else set()
-        lexical = [(item.id, _lexical(query, item.draft.content)) for item in items.values()
-                   if _compatible(query, item.draft.content)]
+        lexical = [(item.id, _lexical(query, item.draft.content)) for item in items.values()]
         lexical = sorted(((id_, score) for id_, score in lexical if score >= 0.25),
                          key=lambda pair: (-pair[1], pair[0]))
         semantic: list[tuple[str, float]] = []
@@ -326,7 +317,7 @@ class MemoryRetriever:
                 vector = normalized_vector(self.embedding.embed_query(query), manifest.dimensions)
                 for memory_id, revision, indexed in indexed_rows:
                     item = items.get(memory_id)
-                    if item is None or item.revision != revision or not _compatible(query, item.draft.content):
+                    if item is None or item.revision != revision:
                         continue
                     try:
                         score = _cosine(vector, indexed)

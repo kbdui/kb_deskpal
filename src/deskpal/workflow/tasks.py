@@ -218,6 +218,8 @@ class PersistentTaskManager:
         refs = tuple(sorted((dependency_ref(value) for value in dependencies), key=lambda ref: (ref.kind, ref.object_id)))
         payload_hash = sha256(canonical({"request": request, "dependencies": [(r.kind, r.object_id, r.revision) for r in refs], "use_policy": use_policy}).encode()).hexdigest()
         with self.store.transaction() as conn:
+            if conn.execute('SELECT 1 FROM task_control_receipt WHERE command_id=? UNION SELECT 1 FROM notification_policy_receipt WHERE command_id=?', (command_id, command_id)).fetchone():
+                raise ValueError('Submission command conflicts with a control receipt')
             previous = conn.execute("SELECT * FROM command WHERE id=?", (command_id,)).fetchone()
             if previous:
                 if previous["payload_hash"] != payload_hash:
@@ -237,13 +239,20 @@ class PersistentTaskManager:
             self.store.record_event("submission_queued", task.id)
             return task
 
-    def page_summaries(self, *, limit: int = 50, offset: int = 0) -> dict[str, Any]:
+    def page_summaries(self, *, limit: int = 50, offset: int = 0,
+                       statuses: tuple[TaskStatus, ...] | None = None) -> dict[str, Any]:
         """Bounded metadata query never reads request or result body columns."""
         if type(limit) is not int or not 1 <= limit <= 100 or type(offset) is not int or offset < 0:
             raise ValueError("Task page limit must be 1..100 and offset non-negative")
+        if statuses is not None and (not isinstance(statuses, tuple) or not 1 <= len(statuses) <= len(TaskStatus)
+                or any(not isinstance(status, TaskStatus) for status in statuses)
+                or len(set(statuses)) != len(statuses)):
+            raise ValueError("Task statuses must be a bounded tuple of unique TaskStatus members")
+        where = " WHERE status IN (" + ",".join("?" for _ in statuses) + ")" if statuses is not None else ""
+        parameters = tuple(status.value for status in statuses) if statuses is not None else ()
         with self.store.transaction() as conn:
             rows = conn.execute("SELECT id,status,revision,cancel_requested,created_at,updated_at "
-                "FROM task ORDER BY created_at,id LIMIT ? OFFSET ?", (limit + 1, offset)).fetchall()
+                "FROM task" + where + " ORDER BY created_at,id LIMIT ? OFFSET ?", (*parameters, limit + 1, offset)).fetchall()
             items = [{**dict(row), "cancel_requested": bool(row["cancel_requested"])} for row in rows[:limit]]
             version = int(conn.execute("SELECT COALESCE(MAX(sequence),0) FROM audit_outbox").fetchone()[0])
             return {"items": items, "offset": offset, "has_more": len(rows) > limit, "version": version}
@@ -396,8 +405,13 @@ class PersistentTaskManager:
             conn.execute("UPDATE immutableplan SET canonical_json='{}',scrubbed=1 WHERE task_id=?", (task_id,))
             conn.execute("UPDATE attempt SET result=NULL,review_evidence=NULL WHERE task_id=?", (task_id,))
             conn.execute("UPDATE audit_outbox SET data='{}' WHERE task_id=?", (task_id,))
+            conn.execute('DELETE FROM conversation_context_summary WHERE conversation_id IN (SELECT conversation_id FROM turn_ref WHERE task_id=?)', (task_id,))
             conn.execute("DELETE FROM context_snapshot WHERE task_id=?", (task_id,))
+            for table in ("decision_round", "task_amendment", "task_origin", "context_history", "context_archive_source"):
+                if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)).fetchone():
+                    conn.execute(f"DELETE FROM {table} WHERE task_id=?", (task_id,))
             conn.execute("DELETE FROM companion_effect_outbox WHERE task_id=?", (task_id,))
+            conn.execute("UPDATE attention SET goal='',basis='',refs='[]',status='cancelled' WHERE task_id=? OR id IN (SELECT a.id FROM attention a,json_each(a.refs) r WHERE json_extract(r.value,'$.id') IN (?,?))", (task_id, task_id+":user", task_id+":assistant"))
             conn.execute("UPDATE dependency_version SET active=0,revision=revision+1 WHERE kind='dialogue_turn' AND object_id IN (?,?,?)", (task_id, task_id + ":user", task_id + ":assistant"))
             conn.execute("UPDATE submission SET status='Blocked' WHERE task_id=? AND status IN ('Queued','Claimed')", (task_id,))
             task = self.get(task_id)
@@ -412,7 +426,7 @@ class PersistentTaskManager:
                 raise KeyError(task_id)
             if task.status != TaskStatus.NEEDS_REVIEW:
                 raise WorkflowBlocked("Only unstarted tasks awaiting review can be resumed")
-            if conn.execute("SELECT 1 FROM attempt WHERE task_id=?", (task_id,)).fetchone():
+            if conn.execute("SELECT 1 FROM attempt WHERE task_id=? AND status NOT IN ('Succeeded','Failed')", (task_id,)).fetchone():
                 raise WorkflowBlocked("A task with previous attempts cannot be resumed")
             self.store.check_dependencies(conn, task_id)
             if task.cancel_requested:

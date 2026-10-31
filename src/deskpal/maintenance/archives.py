@@ -37,7 +37,7 @@ SCOPE = "four_sqlite_stores_only"
 ASSET_SCOPE = "four_sqlite_stores_and_managed_assets"
 EXCLUSIONS = ["workspace_files", "configuration", ".env", "credentials", "model_cache", "logs"]
 # Frozen, recognized on-disk versions. Reading these never performs a migration.
-VERSIONS = {DATABASES[0]: {1, 2, 3}, DATABASES[1]: {1, 2}, DATABASES[2]: {1}, DATABASES[3]: {1, 2}}
+VERSIONS = {DATABASES[0]: {1, 2, 3, 4, 5}, DATABASES[1]: {1, 2, 3}, DATABASES[2]: {1}, DATABASES[3]: {1, 2, 3, 4}}
 _TABLES = {
     DATABASES[0]: {"schema_version", "task", "submission", "immutableplan", "attempt", "audit_outbox", "deletionjob", "memory_block"},
     DATABASES[1]: {"memory_meta", "memory_sources", "memory_revisions", "memory_heads", "memory_tombstones"},
@@ -160,11 +160,16 @@ def _schema(connection: sqlite3.Connection, name: str) -> int:
     required = _TABLES[name]
     if name == DATABASES[1] and version == 1:
         required = {"memories"}
+    if name == DATABASES[3] and version == 3:
+        required = {"role_state", "role_receipt"}
+    if name == DATABASES[3] and version == 4:
+        from deskpal.companion.schema import FIELDS
+        required = set(FIELDS)
     if not required <= tables:
         raise MaintenanceError("archive_schema_unsupported")
     if name == DATABASES[0] and version >= 2 and not {"privacy_control", "context_snapshot", "task_call_attempt", "companion_effect_outbox"} <= tables:
         raise MaintenanceError("archive_schema_unsupported")
-    if name == DATABASES[0] and version == 3 and not {
+    if name == DATABASES[0] and version >= 3 and not {
         "conversation", "conversation_item", "conversation_item_source", "conversation_receipt",
         "conversation_turn", "conversation_cleanup", "asset", "appearance_profile",
         "desktop_reminder_cursor", "desktop_reminder_inbox", "desktop_resource_link",
@@ -172,6 +177,21 @@ def _schema(connection: sqlite3.Connection, name: str) -> int:
         raise MaintenanceError("archive_schema_unsupported")
     if name == DATABASES[3] and version == 2 and not {"interaction_settings", "command_receipts"} <= tables:
         raise MaintenanceError("archive_schema_unsupported")
+    try:
+        if name == DATABASES[1] and version == 3:
+            from deskpal.memory.schema_v3 import validate as validate_memory
+            validate_memory(connection)
+        if name == DATABASES[0] and version >= 4:
+            from deskpal.workflow.schema_v4 import validate
+            validate(connection)
+            if version == 5:
+                from deskpal.workflow.schema_v5 import validate as validate_p5
+                validate_p5(connection)
+        if name == DATABASES[3] and version == 4:
+            from deskpal.companion.schema import validate as validate_character
+            validate_character(connection)
+    except (ValueError, sqlite3.Error):
+        raise MaintenanceError("archive_schema_unsupported") from None
     return int(version)
 
 

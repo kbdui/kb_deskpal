@@ -156,6 +156,8 @@ class BuiltinToolManager:
             result = entry.tool.execute(arguments, context)
             if not isinstance(result, ToolResult) or type(result.success) is not bool:
                 raise ArgumentError("Tool returned an invalid result")
+            if result.outcome not in {"known", "unknown"}:
+                raise ArgumentError("Tool returned an invalid outcome")
             if result.success:
                 output = snapshot_json(result.output)
                 normalized = ToolResult(True, output=output, tool_name=entry.spec.name, call_id=call.call_id)
@@ -164,7 +166,10 @@ class BuiltinToolManager:
                     raise ArgumentError("Tool returned an invalid error")
                 normalized = ToolResult(False, output=snapshot_json(result.output),
                                         error=result.error or "Tool execution failed",
-                                        tool_name=entry.spec.name, call_id=call.call_id)
+                                        tool_name=entry.spec.name, call_id=call.call_id, outcome=result.outcome)
+            if result.outcome == "unknown":
+                normalized = ToolResult(False, normalized.output, "Operation outcome is unknown",
+                                        entry.spec.name, call.call_id, "unknown")
         except (PathViolation, PermissionDenied) as exc:
             self._log.record("tool_failed", context.task_id,
                              {"tool_name": entry.spec.name, "call_id": call.call_id,

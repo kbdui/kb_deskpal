@@ -1,34 +1,5 @@
-# Deskpal 用户指南
+# 用户指南
 
-适用代码版本：`0.5.0rc1`，随 2026-10-26 GUI 重构源码更新。此次 D1–D5 范围见[开发记录](../planning/gui-refactor/development-status.md)，自动化结果与实机未验证边界见[测试记录](../planning/gui-refactor/test-report.md)。
+[快速开始](quick-start.md)介绍安装与启动；[配置](configuration.md)说明模型和凭据。日常使用见[桌面与聊天](desktop.md)、[任务与授权](tasks-and-permissions.md)、[记忆与隐私](memory-and-privacy.md)、[安排与关注](goals-and-proposals.md)。
 
-Deskpal 是围绕人格模拟与日常聊天构建的 Windows 桌宠 Agent，提供图形界面、命令行和受控工具。新安装默认云连接，在设置配置后使用；也可切换真实本机端点或明确使用固定命令离线演示。本地 BGE 独立用于记忆语义检索。当前仍是候选版，真实模型体验和物理桌面边界保留待验收事项。
-
-## 从这里开始
-
-| 你想做什么 | 阅读文档 |
-| --- | --- |
-| 安装并完成第一次运行 | [安装与快速开始](quick-start.md) |
-| 配置模型、密钥、目录和离线模式 | [配置与模型连接](configuration.md) |
-| 使用会话、桌宠、托盘和通知 | [桌面界面与聊天](desktop.md) |
-| 确认计划、取消任务、处理重启后的任务 | [任务与授权](tasks-and-permissions.md) |
-| 保存、更正、遗忘记忆，管理云用途 | [记忆与隐私](memory-and-privacy.md) |
-| 建立目标、里程碑和本地建议 | [目标与提议](goals-and-proposals.md) |
-| 使用终端操作 | [命令行使用](cli.md) |
-| 准备检索模型、备份和恢复 | [数据维护](maintenance.md) |
-| 解决启动、权限、模型和关闭问题 | [常见问题与排错](troubleshooting.md) |
-
-第一次使用建议依次阅读快速开始、配置、桌面界面、任务与授权。后续按需要查阅其他主题。示例中的 `TASK_ID`、`MEMORY_ID`、`GOAL_ID`、`HASH`、`REV` 都是占位符，必须替换为实际回执中的值。
-
-## 当前能力与限制
-
-- 会话目录、聊天、任务、记忆与目标在本地保存，原始上下文按会话隔离；日常聊天固定不可删除，历史浏览与模型近期预算分开。
-- 云连接保存后普通新输入按已保存的默认用途处理；旧来源与类别限制仍有效，相关配置只在设置中调整。
-- 写文件、创建计时器等需要普通确认；移动、删除文档需要独立高风险确认。
-- 主动提议、人格/模拟情绪、桌宠和系统通知默认关闭，按需启用。
-- 当前工作区的 BGE 语义检索已启用，模型在 `data/models/bge-small-zh-v1.5`，使用项目 `deskpal_env` 加载；内置默认仍关闭，权重和本地配置不随 Git 分发。使用与校验见[数据维护](maintenance.md)，聊天模型另行配置。
-- 同一数据目录仅允许一个 GUI 或 CLI 实例。当前同步调用使用协作取消，操作系统隔离、强制停止、细粒度授权、无人值守执行和 Live2D 仍属后续范围。
-
-版本目录里的 `v0.7/v0.8/v0.9` 是增量工作资料分类，软件包版本仍为 `0.5.0rc1`。验收范围可查阅[产品化测试记录](../versions/v0.9/test-report.md)、[拟人化测试记录](../versions/v0.8/humanization-test-report.md)和[静态桌宠交付说明](../versions/v0.7/delivery.md)。旧版操作说明中的功能限制可能已被后续代码更新，本指南按当前实现组织。
-
-返回[文档总导航](../README.md)；开发者请读[开发者指南](../developer-guide/README.md)。
+[维护](maintenance.md)、[CLI](cli.md)和[排错](troubleshooting.md)用于进阶操作。当前 Phase 01–05 已完成开发和定向验证，Phase 06 整体验收待进行；操作效果仍以实际状态为准。旧版手工人格预设、偏好候选和复杂云许可说明已移入历史区。

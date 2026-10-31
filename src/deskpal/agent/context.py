@@ -1,7 +1,7 @@
-"""Immutable per-turn inputs and the optional application interaction boundary.
+"""单轮上下文及应用层交互协议。
 
-Execution receives reference data, never expression policy or assistant prose.
-Concrete persistence and lifecycle remain in Application.
+规划与表达共用角色背景、有效要求和有来源的双方历史；
+具体持久化、隐私生命周期和上下文发布由 Application 负责。
 """
 
 from collections.abc import Mapping
@@ -11,10 +11,13 @@ from typing import Any, Protocol
 
 from deskpal.llm.ports import LLMProvider
 from deskpal.memory.contracts import RetrievalBundle
+from deskpal.memory.models import MemoryRecord
 
 
 @dataclass(frozen=True)
 class PreparedTurn:
+    """应用层为一次请求准备的不可变快照，供规划、表达和发布阶段使用。"""
+
     task_id: str
     privacy_epoch: int
     conversation_id: str = ""
@@ -24,19 +27,29 @@ class PreparedTurn:
     history: tuple[Mapping[str, Any], ...] = ()
     style: str = ""
     memories: tuple[str, ...] = ()
+    memory_records: tuple[MemoryRecord, ...] = ()
     warnings: tuple[str, ...] = ()
     use_policy: str = "cloud_allowed"
-    expression_epoch: int = 0
-    consumed_profile_keys: frozenset[str] = frozenset()
-    allowed_cloud_categories: frozenset[str] = frozenset()
+    profile_id: str = ""
+    runtime_id: str = ""
+    role_id: str = ""
+    role_revision: int = 0
+    role_json: str = ""
+    origin: str = "user"
 
 
 class TurnInteractionPort(Protocol):
+    """AgentCore 与应用交互协调器之间的边界，避免核心层依赖具体服务。"""
+
     def source_policy(self, task_id: str) -> str: ...
+
+    def current_turn(self, task_id: str) -> PreparedTurn: ...
 
     def retrieve(self, request: str) -> RetrievalBundle: ...
 
     def prepare(self, task_id: str, request: str, bundle: RetrievalBundle) -> PreparedTurn: ...
+
+    def prepare_continuation(self, task_id: str) -> None: ...
 
     def calls(self, task_id: str, purpose: str) -> LLMProvider: ...
 

@@ -10,12 +10,39 @@ from typing import Any, Protocol
 from uuid import uuid4
 
 from PySide6.QtCore import QObject, Qt, QTimer, Signal, Slot
-from PySide6.QtGui import QCloseEvent
-from PySide6.QtWidgets import (
-    QCheckBox, QComboBox, QFileDialog, QFormLayout, QHBoxLayout, QInputDialog, QLabel,
-    QLineEdit, QMainWindow, QPlainTextEdit, QPushButton, QScrollArea,
-    QTabWidget, QVBoxLayout, QWidget,
-)
+from PySide6.QtGui import QCloseEvent, QGuiApplication
+from PySide6.QtWidgets import (QFileDialog, QFormLayout, QHBoxLayout, QInputDialog, QLabel, QSizePolicy, QVBoxLayout, QWidget)
+from .components import (ChoiceBox as QComboBox, PushButton as QPushButton, CheckBox as QCheckBox, LineEdit as QLineEdit, PlainTextEdit as QPlainTextEdit, ScrollArea as QScrollArea, ToolButton as QToolButton, Tabs as QTabWidget)
+
+from .display_text import compact_path
+from .widgets import ArrowComboBox
+
+
+def _selected(data: Any, keys: Any) -> dict[str, Any]:
+    """Select safe scalar fields, without serializing unknown service content."""
+    if not isinstance(data, dict):
+        return {}
+    return {key: data[key] for key in keys if key in data
+            and (data[key] is None or type(data[key]) in {str, bool, int, float})}
+
+
+def _backup_receipt(data: dict[str, Any]) -> dict[str, Any]:
+    result = _selected(data, ("archive_path", "archive_sha256", "target_dir", "status",
+                             "format_version", "startup_review_required", "privacy_deletion_completed"))
+    manifest = data.get("manifest")
+    if isinstance(manifest, dict):
+        safe = _selected(manifest, ("format_version", "scope", "contains_sensitive_data",
+                                   "hashes_prove_authenticity", "rollback_may_restore_forgotten_data"))
+        for name, keys in (("databases", ("name", "present", "bytes", "sha256", "schema_version")),
+                           ("assets", ("name", "bytes", "sha256", "width", "height", "media_type"))):
+            entries = manifest.get(name)
+            if isinstance(entries, list):
+                safe[name] = [_selected(entry, keys) for entry in entries]
+        exclusions = manifest.get("exclusions")
+        if isinstance(exclusions, list):
+            safe["exclusions"] = [value for value in exclusions if isinstance(value, str)]
+        result["manifest"] = safe
+    return result
 
 
 class MaintenancePort(Protocol):
@@ -177,7 +204,10 @@ class MaintenanceBridge(QObject):
                 self.stopped.emit()
 
 
-class MaintenanceWindow(QMainWindow):
+from .components import SettingsWindow
+
+
+class MaintenanceWindow(SettingsWindow):
     """Only safe, selected DTO fields are displayed; credential input is write-only."""
 
     finished = Signal(str)
@@ -203,23 +233,35 @@ class MaintenanceWindow(QMainWindow):
         self._config_valid = False
         self._status_loaded = False
         self.setWindowTitle("Deskpal · 设置")
-        self.setStyleSheet("QWidget { background: #f8f7f2; color: #293b32; font-size: 14px; } "
-                           "QLineEdit, QComboBox, QPlainTextEdit { background: #ffffff; border: 1px solid #ccd7cc; padding: 7px; border-radius: 6px; } "
-                           "QPushButton { background: #dbe8dc; border: 1px solid #bdcdbf; padding: 8px 14px; border-radius: 7px; } "
-                           "QPushButton:disabled { color: #89938b; background: #edf0e9; }")
-        self.resize(820, 720)
         root = QWidget()
         layout = QVBoxLayout(root)
-        self.status = QLabel("首次配置、语义检索模型缓存及四库备份恢复。维护期间应用未启动。")
+        self.status = QLabel("连接、密钥、工作区和模型缓存共用；备份针对当前选择档案。维护期间角色后台未启动。")
         self.status.setWordWrap(True)
         self.status.setTextFormat(Qt.TextFormat.PlainText)
+        self.status.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Maximum)
         layout.addWidget(self.status)
-        self.config_label = QLabel("配置文件：" + str(getattr(bridge, "config_path", "")))
+        config_path = str(getattr(bridge, "config_path", ""))
+        self.config_label = QLabel("配置文件：" + (compact_path(config_path) or "未指定"))
         self.config_label.setWordWrap(True)
         self.config_label.setTextFormat(Qt.TextFormat.PlainText)
+        self.config_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Maximum)
         layout.addWidget(self.config_label)
+        config_toggle = QToolButton()
+        config_toggle.setText("查看 / 复制完整配置文件位置")
+        config_toggle.setCheckable(True)
+        self.config_location = QLineEdit(config_path)
+        self.config_location.setReadOnly(True)
+        self.config_location.hide()
+        config_toggle.toggled.connect(self.config_location.setVisible)
+        layout.addWidget(config_toggle)
+        layout.addWidget(self.config_location)
+        self.config_copy = QPushButton("复制完整配置文件位置")
+        self.config_copy.clicked.connect(lambda: QGuiApplication.clipboard().setText(config_path))
+        self.config_copy.hide()
+        config_toggle.toggled.connect(self.config_copy.setVisible)
+        layout.addWidget(self.config_copy)
         self.tabs = QTabWidget()
-        layout.addWidget(self.tabs)
+        layout.addWidget(self.tabs, 1)
         self.fields: dict[str, QLineEdit | QComboBox] = {}
         self._build_setup()
         self._build_cache()
@@ -227,24 +269,49 @@ class MaintenanceWindow(QMainWindow):
         self.output = QPlainTextEdit()
         self.output.setReadOnly(True)
         self.output.document().setMaximumBlockCount(200)
+        self.output.setMinimumHeight(78)
+        self.output.setMaximumHeight(144)
         layout.addWidget(self.output)
+        self.details_toggle = QToolButton()
+        self.details_toggle.setText("查看精确回执（完整位置、版本及归档校验值）")
+        self.details_toggle.setCheckable(True)
+        layout.addWidget(self.details_toggle)
+        self.details_panel = QWidget()
+        details_layout = QVBoxLayout(self.details_panel)
+        details_layout.setContentsMargins(0, 0, 0, 0)
+        self.technical_output = QPlainTextEdit()
+        self.technical_output.setReadOnly(True)
+        self.technical_output.setMinimumHeight(96)
+        self.technical_output.setMaximumHeight(170)
+        details_layout.addWidget(self.technical_output)
+        self.copy_receipt = QPushButton("复制完整精确回执")
+        self.copy_receipt.clicked.connect(lambda: QGuiApplication.clipboard().setText(self.technical_output.toPlainText()))
+        details_layout.addWidget(self.copy_receipt)
+        self.details_panel.hide()
+        self.details_toggle.toggled.connect(self.details_panel.setVisible)
+        layout.addWidget(self.details_panel)
         controls = QHBoxLayout()
         self.start_button = QPushButton("启动应用")
         self.start_button.setEnabled(False)
         self.stop_button = QPushButton("退出 / 请求停止")
         self.browse_button = QPushButton("暂不配置，浏览本地内容")
         self.browse_button.setEnabled(False)
+        self.profiles_button = QPushButton("角色档案 / 导入恢复")
+        self.profiles_button.clicked.connect(self._profiles)
         controls.addWidget(self.start_button)
         controls.addWidget(self.browse_button)
+        controls.addWidget(self.profiles_button)
         controls.addWidget(self.stop_button)
         layout.addLayout(controls)
-        self.setCentralWidget(root)
+        self.set_settings_content(root)
         self.start_button.clicked.connect(self._start)
         self.browse_button.clicked.connect(self._browse)
         self.stop_button.clicked.connect(self.close)
         bridge.reply.connect(self._reply)
         bridge.stopped.connect(self._stopped)
         self.tabs.currentChanged.connect(self._section_changed)
+        for button in self.findChildren(QPushButton):
+            button.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
 
     def open(self) -> None:
         self.show()
@@ -259,6 +326,9 @@ class MaintenanceWindow(QMainWindow):
         self.tabs.addTab(scroll, name)
         return layout
 
+    def _receipt(self, data: dict[str, Any]) -> None:
+        self.technical_output.setPlainText(json.dumps(data, ensure_ascii=False, indent=2, allow_nan=False))
+
     def _button(self, layout: QVBoxLayout, text: str, callback: Callable[[], Any]) -> QPushButton:
         button = QPushButton(text)
         button.clicked.connect(callback)
@@ -267,15 +337,18 @@ class MaintenanceWindow(QMainWindow):
 
     def _build_setup(self) -> None:
         layout = self._page("模型与连接")
-        hint = QLabel("云连接默认使用系统凭据库；保存后新的聊天输入由所配置服务处理，历史、人格和记忆仍受各自许可限制。保存仅在本机校验，不自动联网。本地连接仅支持已部署的回环 Responses 端点，不会回退到云。离线演示仅返回固定示例。")
+        hint = QLabel("默认使用云模型，密钥写入系统凭据库且不回显。保存后重新打开后台生效；连接检查由你单独发起。本地模型可在此切换，仅支持已部署的兼容 Responses 端点。离线演示仅返回固定示例。")
         hint.setWordWrap(True)
+        hint.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Maximum)
         layout.addWidget(hint)
         form = QFormLayout()
+        form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
+        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
         choices = {"provider": ["openai", "offline"],
                    "execution_location": ["cloud", "local"], "protocol": ["responses"],
                    "credential_mode": ["system_vault", "environment", "none"],
                    "request_use_default": ["true", "false"],
-                   "memory_mode": ["explicit_only", "candidate_review", "paused"],
+                   "memory_mode": ["automatic", "paused"],
                    "embedding_provider": ["disabled", "fastembed"],
                    "expression_output_format": ["prompt", "json_object"]}
         labels = {"provider": "模型适配器 / 高级离线演示", "execution_location": "执行位置",
@@ -289,7 +362,7 @@ class MaintenanceWindow(QMainWindow):
         for key, label in labels.items():
             field: QLineEdit | QComboBox
             if key in choices:
-                field = QComboBox()
+                field = ArrowComboBox()
                 from .widgets import label as enum_label
                 for option in choices[key]: field.addItem(enum_label(option), option)
             else:
@@ -306,7 +379,7 @@ class MaintenanceWindow(QMainWindow):
         self.secret.setEchoMode(QLineEdit.EchoMode.Password)
         self.secret.textChanged.connect(self._edited)
         form.addRow("保存新密钥到 Windows 凭据库", self.secret)
-        self.secret_action = QComboBox()
+        self.secret_action = ArrowComboBox()
         for option, title in [("keep", "保留当前凭据"), ("replace", "替换为本次输入"), ("remove", "移除当前凭据")]: self.secret_action.addItem(title, option)
         self.secret_action.currentTextChanged.connect(self._edited)
         self.secret.textChanged.connect(self._secret_edited)
@@ -327,6 +400,7 @@ class MaintenanceWindow(QMainWindow):
         layout.addLayout(form)
         repair_hint = QLabel("修复会重建受支持的配置，其他设置会重置；原文恢复副本可能包含曾误填的秘密，请妥善保管。确认前请检查上述设置。")
         repair_hint.setWordWrap(True)
+        repair_hint.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Maximum)
         layout.addWidget(repair_hint)
         self.repair_confirm = QCheckBox("我理解配置重建、其他设置重置及原文副本的秘密风险，确认修复")
         layout.addWidget(self.repair_confirm)
@@ -337,6 +411,7 @@ class MaintenanceWindow(QMainWindow):
         layout.addWidget(self.test_confirm)
         self._button(layout, "测试已保存的连接", self._test_connection)
         self._connection_fields()
+        layout.addStretch()
 
     def _section_changed(self, index: int) -> None:
         if index != 0:
@@ -379,8 +454,9 @@ class MaintenanceWindow(QMainWindow):
 
     def _build_cache(self) -> None:
         layout = self._page("语义检索模型缓存")
-        hint = QLabel("此模型仅用于语义检索，与聊天模型分开。缓存操作使用已保存的路径。ready 仅表示曾成功验证；点击离线校验才会执行本次验证，且仅用 CPU。准备模型需要显式允许下载。缺少依赖时按结果提示安装可选依赖，或换新缓存目录并重新保存配置。清理仅限 Deskpal 自有资产。")
+        hint = QLabel("此模型仅用于语义检索，与聊天模型分开。缓存操作使用已保存的路径。就绪状态仅表示曾成功验证；点击离线校验才会执行本次验证，且仅用 CPU。准备模型需要显式允许下载。缺少依赖时按结果提示安装可选依赖，或换新缓存目录并重新保存配置。清理仅限 Deskpal 自有资产。")
         hint.setWordWrap(True)
+        hint.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Maximum)
         layout.addWidget(hint)
         self.download_confirm = QCheckBox("允许本次联网下载语义检索模型")
         self.clear_confirm = QCheckBox("确认清理当前版本的 Deskpal 自有模型资产")
@@ -390,6 +466,7 @@ class MaintenanceWindow(QMainWindow):
         self._button(layout, "离线校验", lambda: self.request("cache_verify"))
         self._button(layout, "准备模型", self._prepare)
         self._button(layout, "清理自有缓存", self._clear_cache)
+        layout.addStretch()
 
     def _path(self, layout: QVBoxLayout, label: str, mode: str) -> QLineEdit:
         row = QHBoxLayout()
@@ -413,13 +490,14 @@ class MaintenanceWindow(QMainWindow):
 
     def _build_backups(self) -> None:
         layout = self._page("备份与恢复")
-        hint = QLabel("备份包含工作、记忆、调度及人格四个数据库；不含工作区原文件、密钥配置、模型或日志。恢复到新的数据目录，保留旧数据；恢复不会自动修改配置或启动应用。中断后使用同一归档和目标继续恢复，完成前不能启动该目录。")
+        hint = QLabel("备份当前选择档案的四个数据库及受管图片；不含工作区原文件、密钥配置、模型或日志。使用备份须通过“角色档案 / 导入恢复”注册为独立新档案。本页恢复到新目录仅供离线维护，不能将该目录设为应用数据根；中断后须使用同一归档和目标继续恢复。")
         hint.setWordWrap(True)
+        hint.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Maximum)
         layout.addWidget(hint)
         self.destination = self._path(layout, "选择备份输出文件", "save")
         self.sensitive_confirm = QCheckBox("我知道备份含敏感数据，会妥善保管")
         layout.addWidget(self.sensitive_confirm)
-        self._button(layout, "创建四库备份", self._backup)
+        self._button(layout, "备份当前选择档案", self._backup)
         self.archive = self._path(layout, "选择恢复归档", "open")
         self.target = QLineEdit()
         self.target.setMaxLength(4096)
@@ -433,8 +511,9 @@ class MaintenanceWindow(QMainWindow):
         layout.addWidget(self.resume_confirm)
         self._button(layout, "检查归档", lambda: self.request("backup_inspect", {"archive": self.archive.text()}))
         self._button(layout, "恢复到所选新目录", self._restore)
-        self.use_restore_button = self._button(layout, "使用恢复目录（填入配置后需明确保存）", self._use_restore)
+        self.use_restore_button = self._button(layout, "进入角色档案，导入原备份", self._use_restore)
         self.use_restore_button.setEnabled(False)
+        layout.addStretch()
 
     def _choose_restore_target(self) -> None:
         parent = QFileDialog.getExistingDirectory(self, "选择新恢复目录的父目录")
@@ -531,13 +610,10 @@ class MaintenanceWindow(QMainWindow):
             "acknowledge_data_rollback": True, "resume": self.resume_confirm.isChecked()})
 
     def _use_restore(self) -> None:
-        field = self.fields["data_dir"]
-        if isinstance(field, QLineEdit) and self._restore_target:
-            field.setText(self._restore_target)
-            self.tabs.setCurrentIndex(0)
-            self._can_start = False
-            self.start_button.setEnabled(False)
-            self.status.setText("恢复目录已填入。请检查并明确保存配置后启动。")
+        # An offline recovery directory is not an application root. Only the
+        # profile service may import and register a backup for normal startup.
+        if self._restore_target:
+            self._profiles()
 
     def request(self, operation: str, parameters: dict[str, Any] | None = None,
                 *, credential_secret: str | None = None) -> None:
@@ -569,6 +645,7 @@ class MaintenanceWindow(QMainWindow):
             error = envelope.get("error", {})
             steps = error.get("next_steps", [])
             self.output.setPlainText(str(error.get("message", "维护失败。")) + "\n" + "\n".join(str(x) for x in steps))
+            self._receipt(_selected(error, ("code", "message")))
             self.status.setText("操作失败；按下方指引修正后重试。")
             self._starting = False
             self.start_button.setEnabled(self._can_start)
@@ -588,6 +665,8 @@ class MaintenanceWindow(QMainWindow):
                 raw_value = values.get(key, "")
                 value = str(raw_value).lower() if type(raw_value) is bool else str(raw_value)
                 if isinstance(field, QComboBox):
+                    if key == 'memory_mode' and value in ('explicit_only', 'candidate_review'):
+                        value = 'automatic'
                     field.setCurrentIndex(field.findData(value))
                 else:
                     field.setText(value)
@@ -601,15 +680,30 @@ class MaintenanceWindow(QMainWindow):
             self._can_start = bool(data.get("can_start", bool(data.get("config_exists"))
                 and bool(data.get("config_valid")) and not blocking))
             self.start_button.setText("启动应用" if data.get("llm_ready") else "启动浏览（聊天待配置）")
-            # Safe source labels/issue messages only, never arbitrary provider DTO JSON.
+            # Only allowlisted safe fields enter the optional exact receipt.
             sources = data.get("sources", {})
-            lines = [f"{key}: {str(sources.get(key, ''))[:160]}" for key in self.fields]
             effective = data.get("effective", {})
-            if isinstance(effective, dict):
-                lines.extend(f"下次启动采用 {key}: {str(effective[key])[:500]}"
-                             for key in self.fields if key in effective)
-            lines.append("已有凭据：" + ("是" if data.get("credential_present") else "否 / 离线无需"))
-            lines.append("有效凭据来源：" + str(data.get("credential_source", "missing")))
+            receipt = _selected(data, ("revision", "config_exists", "config_valid", "can_start", "llm_ready",
+                                       "credential_present", "credential_source", "credential_cleanup_pending",
+                                       "configuration_reset", "local_recovery_copy"))
+            receipt["sources"] = _selected(sources, self.fields)
+            receipt["effective"] = _selected(effective, self.fields)
+            receipt["values"] = _selected(values, self.fields)
+            receipt["issues"] = [_selected(issue, ("code", "message")) for issue in data.get("issues", [])[:20]]
+            self._receipt(receipt)
+            current = effective if isinstance(effective, dict) and effective else values
+            location = ("离线演示" if current.get("provider") == "offline" else
+                        "本机模型" if current.get("execution_location") == "local" else "云模型")
+            lines = [("配置可供启动" if self._can_start else "配置仍需处理，请查看提示") + " · " + location,
+                     "聊天模型：" + str(current.get("model") or "尚未选择")]
+            source = {"system_vault": "Windows 系统凭据库", "environment": "环境变量", "dotenv": "本地环境文件",
+                      "none": "无需凭据", "missing": "尚未提供凭据"}.get(str(data.get("credential_source")), "来源待确认")
+            lines.append("凭据：" + source)
+            if isinstance(sources, dict) and any(value in {"environment", "dotenv"}
+                                                for value in sources.values() if isinstance(value, str)):
+                lines.append("部分设置由环境覆盖，下次启动采用的完整值可展开查看。")
+            else:
+                lines.append("下次启动采用的完整设置与来源可展开查看。")
             if data.get("credential_cleanup_pending"):
                 lines.append("配置已移除凭据引用，但系统凭据库清理尚未完成。")
             lines.extend(str(issue.get("message", "配置需修正"))[:500] for issue in data.get("issues", [])[:20])
@@ -633,26 +727,45 @@ class MaintenanceWindow(QMainWindow):
         elif operation == "connection_test":
             self.status.setText("连接验证成功；已验证保存版本的 Responses 文本响应。")
             self.output.setPlainText("固定公共文本请求成功；未发送聊天、历史、人格或记忆。配置是否生效取决于应用是否已重新启动。")
+            self._receipt(_selected(data, ("status", "revision", "protocol", "execution_location", "model")))
         elif operation.startswith("cache_"):
             self._cache_revision = str(data.get("revision", ""))
-            keys: tuple[str, ...] = ("status", "verification", "dependency_available", "managed", "files", "bytes",
+            keys: tuple[str, ...] = ("status", "revision", "verification", "dependency_available", "managed", "files", "bytes",
                     "model", "purpose", "install_command")
-            self.output.setPlainText("\n".join(f"{key}: {str(data.get(key, ''))[:1000]}" for key in keys))
-            self.output.appendPlainText("ready 仅表示曾成功验证；离线校验才会执行本次验证。")
+            self._receipt(_selected(data, keys))
+            cache_state = {"missing": "尚未准备模型缓存", "ready": "模型缓存已准备",
+                           "unmanaged": "发现未托管的模型缓存", "invalid": "模型缓存校验不通过",
+                           "optional_dependency_missing": "缺少语义检索依赖"}.get(str(data.get("status")), "模型缓存状态待确认")
+            evidence = {"previously_verified": "只记录曾成功验证；本次尚未验证。",
+                        "verified_offline": "本次已完成离线校验与固定文本推理。",
+                        "failed": "本次验证失败，请先修复缓存。",
+                        "not_checked": "尚未执行本次离线校验。"}.get(str(data.get("verification")), "校验证据待确认。")
+            lines = [cache_state + "。", evidence,
+                     "语义检索依赖" + ("已安装。" if data.get("dependency_available") else "尚未安装；安装命令见精确回执。"),
+                     "缓存" + ("由本应用托管；清理仍需明确确认。" if data.get("managed") else "未取得托管清理资格。")]
+            if type(data.get("files")) is int and type(data.get("bytes")) is int:
+                lines.append(f"共 {data['files']} 个文件，约 {data['bytes'] / 1048576:.1f} MiB。")
+            self.output.setPlainText("\n".join(lines))
         elif operation.startswith("backup_"):
-            keys = ("archive_path", "archive_sha256", "target_dir", "status")
-            lines = [f"{key}: {str(data.get(key, ''))[:1000]}" for key in keys]
+            self._receipt(_backup_receipt(data))
+            lines = [{"backup_create": "备份已创建。", "backup_inspect": "归档完整性检查已完成。",
+                      "backup_restore": "恢复操作已完成。"}.get(str(operation), "备份维护操作已完成。")]
+            if data.get("archive_path"):
+                lines.append("归档：" + compact_path(data["archive_path"]))
+            if data.get("target_dir"):
+                lines.append("恢复目录：" + compact_path(data["target_dir"]))
             manifest = data.get("manifest", {})
             if isinstance(manifest, dict):
                 lines.append("归档格式版本：" + str(manifest.get("format_version", ""))[:80])
                 entries = manifest.get("databases", manifest.get("entries", []))
                 if isinstance(entries, list):
                     lines.append("数据库条目数：" + str(len(entries)))
+            lines.append("展开精确回执可查看 / 复制完整位置、归档哈希与逐库校验值。哈希用于校验完整性，不证明来源可信。")
             self.output.setPlainText("\n".join(lines))
             if operation == "backup_restore" and data.get("status") in {"completed", "complete", "restored", "ready"}:
                 self._restore_target = str(data.get("target_dir", ""))
                 self.use_restore_button.setEnabled(bool(self._restore_target))
-                self.output.appendPlainText("恢复后仍需启动审核原有任务；恢复不代表历史遗忘已完成。请先明确保存恢复目录配置。")
+                self.output.appendPlainText("离线恢复已完成，该目录不能直接作为应用数据根。要在应用中使用，请进入角色档案并导入原备份，注册为新档案。恢复不代表历史遗忘已完成。")
         self.start_button.setEnabled(self._can_start)
         self.browse_button.setEnabled(self._status_loaded and (not self._config_exists or self._can_start))
 
@@ -667,6 +780,13 @@ class MaintenanceWindow(QMainWindow):
         if self._can_start and not self.bridge.busy:
             self._starting = True
             self.request("setup_status")
+
+    def _profiles(self) -> None:
+        if self._dirty:
+            self.status.setText("请先保存更改，或重新读取配置以放弃编辑后进入角色档案。")
+            return
+        if not self.bridge.busy and not self._closing:
+            self._shutdown("profiles")
 
     def _shutdown(self, action: str) -> None:
         self._closing = True

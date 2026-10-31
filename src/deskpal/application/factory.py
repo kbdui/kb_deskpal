@@ -99,7 +99,7 @@ def _create_core(config: AppConfig | None = None, *, planner: Planner | None = N
                                    semantic_threshold=settings.memory.semantic_threshold,
                                    startup_warnings=startup_warnings)
         evaluator = memory_evaluator
-        if evaluator is None and settings.memory.mode == "candidate_review":
+        if evaluator is None and settings.memory.mode != "paused":
             evaluation_llm: LLMProvider = llm
             if settings.llm.provider == "openai" and settings.llm.ready:
                 evaluation_llm = OpenAILLMProvider(settings.llm,
@@ -155,20 +155,28 @@ def create_application(config: AppConfig | None = None, *, planner: Planner | No
     if not isinstance(settings, AppConfig):
         raise ConfigError("config must be an AppConfig")
     with ExitStack() as resources:
+        # Keep the original application root locked across every selected
+        # profile. Selection and maintenance use this same ownership gate.
+        from .profiles import resolve_profile_config
         instance = InstanceLock(settings.storage.data_dir).acquire()
         resources.callback(instance.release)
+        settings = resolve_profile_config(settings, initialize=True)
+        if settings.storage.data_dir.resolve() != instance.data_dir:
+            profile_instance = InstanceLock(settings.storage.data_dir).acquire()
+            resources.callback(profile_instance.release)
+            instance_data_dir = profile_instance.data_dir
+        else:
+            instance_data_dir = instance.data_dir
         from deskpal.maintenance.archives import assert_restore_ready
-        assert_restore_ready(instance.data_dir)
+        assert_restore_ready(instance_data_dir)
         companion: CompanionPort | None = None
         companion_unavailable = False
-        try:
-            companion = CompanionRuntime(instance.data_dir / "companion.sqlite3", timezone=settings.proactive.timezone)
-            resources.callback(companion.close)
-        except Exception:
-            # Never overwrite a damaged store or prevent ordinary tool work.
-            companion_unavailable = True
+        # A damaged profile must fail opening as a whole. Do not silently run
+        # three stores while losing the selected character's persistent state.
+        companion = CompanionRuntime(instance_data_dir / "companion.sqlite3", timezone=settings.proactive.timezone)
+        resources.callback(companion.close)
         limits = settings.workflow
-        store = WorkflowStore(instance.data_dir / "workflow.sqlite3", queue_capacity=limits.queue_capacity,
+        store = WorkflowStore(instance_data_dir / "workflow.sqlite3", queue_capacity=limits.queue_capacity,
                               request_max_bytes=limits.request_max_bytes, plan_max_bytes=limits.plan_max_bytes,
                               result_max_bytes=limits.result_max_bytes)
         resources.callback(store.close)
@@ -188,7 +196,7 @@ def create_application(config: AppConfig | None = None, *, planner: Planner | No
         owned = resources
         service = ApplicationService(config=settings, core=core, store=store, tasks=tasks, journal=journal,
             scheduling=scheduling[0], goals=goals, proposals=proposals, rules=rules,
-            audit_sink=JsonlExecutionLog(instance.data_dir / "execution.jsonl"),
+            audit_sink=JsonlExecutionLog(instance_data_dir / "execution.jsonl"),
             release_resources=lambda: owned.close())
         application.append(service)
         service.start()

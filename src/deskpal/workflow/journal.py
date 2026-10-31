@@ -18,13 +18,102 @@ from .tasks import PersistentTaskManager, dependency_ref
 
 def _result_dict(result: ToolResult) -> dict[str, Any]:
     return {"success": result.success, "output": result.output, "error": result.error,
-            "tool_name": result.tool_name, "call_id": result.call_id}
+            "tool_name": result.tool_name, "call_id": result.call_id, "outcome": result.outcome}
 
 
 class ExecutionJournal:
     def __init__(self, store: WorkflowStore) -> None:
         self.store = store
         self.tasks = PersistentTaskManager(store)
+
+    def set_origin(self, task_id: str, kind: str, basis: str) -> None:
+        if kind not in {"user", "proactive"} or len(basis.encode("utf-8")) > 8192:
+            raise ValueError("Invalid task origin")
+        with self.store.transaction() as conn:
+            prior = conn.execute("SELECT kind,basis FROM task_origin WHERE task_id=?", (task_id,)).fetchone()
+            if prior:
+                if (prior["kind"], prior["basis"]) != (kind, basis):
+                    raise WorkflowBlocked("Task origin cannot change")
+                return
+            conn.execute("INSERT INTO task_origin VALUES(?,?,?)", (task_id, kind, basis))
+
+    def origin(self, task_id: str) -> dict[str, Any]:
+        with self.store.read_connection() as conn:
+            row = conn.execute("SELECT kind,basis FROM task_origin WHERE task_id=?", (task_id,)).fetchone()
+            return dict(row) if row else {"kind": "user", "basis": "current user request"}
+
+    def append_amendment(self, task_id: str, content: str, command_id: str) -> dict[str, Any]:
+        if not isinstance(content, str) or not content.strip() or len(content.encode("utf-8")) > 8192 or not isinstance(command_id, str) or not command_id or len(command_id) > 200:
+            raise ValueError("Invalid task amendment")
+        with self.store.transaction() as conn:
+            self.store.check_privacy(conn, task_id)
+            task = self.tasks.get(task_id)
+            if task is None:
+                raise KeyError(task_id)
+            prior = conn.execute("SELECT * FROM task_amendment WHERE command_id=?", (command_id,)).fetchone()
+            if prior:
+                if prior["task_id"] != task_id or prior["content"] != content:
+                    raise ValueError("Amendment command conflict")
+                return {"task_id": task_id, "sequence": prior["sequence"], "accepted": True, "consumed_round": prior["consumed_round"]}
+            if task.status in {TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED}:
+                return {"task_id": task_id, "accepted": False, "reason": "任务已收尾，修改未纳入本次执行。"}
+            sequence = conn.execute("SELECT COALESCE(MAX(sequence),0)+1 FROM task_amendment WHERE task_id=?", (task_id,)).fetchone()[0]
+            if sequence > 64:
+                raise WorkflowBlocked("Amendment capacity reached")
+            used = conn.execute("SELECT COALESCE(SUM(length(CAST(content AS BLOB))),0) FROM task_amendment WHERE task_id=?", (task_id,)).fetchone()[0]
+            if used + len(content.encode("utf-8")) > 32768:
+                raise WorkflowBlocked("Amendment byte budget reached")
+            conn.execute("INSERT INTO task_amendment VALUES(?,?,?,?,NULL)", (task_id, sequence, command_id, content))
+            return {"task_id": task_id, "sequence": sequence, "accepted": True, "consumed_round": None}
+
+    def consume_amendments(self, task_id: str, round_index: int) -> tuple[dict[str, Any], ...]:
+        with self.store.transaction() as conn:
+            rows = conn.execute("SELECT sequence,content FROM task_amendment WHERE task_id=? AND consumed_round IS NULL ORDER BY sequence", (task_id,)).fetchall()
+            conn.execute("UPDATE task_amendment SET consumed_round=? WHERE task_id=? AND consumed_round IS NULL", (round_index, task_id))
+            return tuple(dict(row) for row in conn.execute("SELECT sequence,content,consumed_round FROM task_amendment WHERE task_id=? ORDER BY sequence", (task_id,)))
+
+    def round_count(self, task_id: str) -> int:
+        with self.store.read_connection() as conn:
+            return int(conn.execute("SELECT COUNT(*) FROM decision_round WHERE task_id=?", (task_id,)).fetchone()[0])
+
+    def unconsumed_amendments(self, task_id: str) -> int:
+        with self.store.read_connection() as conn:
+            return int(conn.execute("SELECT COUNT(*) FROM task_amendment WHERE task_id=? AND consumed_round IS NULL", (task_id,)).fetchone()[0])
+
+    def save_round(self, task_id: str, plan: Plan, tool_specs: tuple[ToolSpec, ...], workspace_dir: str,
+                   memory_refs: tuple[tuple[str, int], ...] = (), *, replace_unstarted: bool = False) -> PlanSnapshot:
+        """追加新的不可变快照；旧计划与已执行步骤从不覆盖。"""
+        with self.store.transaction() as conn:
+            prior = self.get_plan(task_id)
+            if prior is None:
+                return self.save_plan(task_id, plan, tool_specs, workspace_dir, memory_refs)
+            data = json.loads(prior.canonical_json)
+            previous = list(data["steps"])
+            if replace_unstarted:
+                attempts = self.attempts(task_id)
+                if any(attempt.status not in {'Succeeded', 'Failed'} for attempt in attempts):
+                    raise WorkflowBlocked('Unknown operation cannot be retired or replayed')
+                # 原快照保持字节不变；新快照只继承真实已执行前缀。
+                previous = previous[:len(attempts)]
+            round_index = self.round_count(task_id) + 1
+            data["steps"] = previous + [{"name": call.name, "arguments": dict(call.arguments),
+                "call_id": f"round-{round_index}-step-{i}"} for i, call in enumerate(plan.steps)]
+            data["reply"] = plan.reply
+            data["action"] = plan.action
+            data["memory_refs"] = list(memory_refs)
+            data["use_policy"] = conn.execute("SELECT use_policy FROM task WHERE id=?", (task_id,)).fetchone()[0]
+            data["dependencies"] = [(ref.kind, ref.object_id, ref.revision) for ref in self.get_dependencies(task_id)]
+            context = conn.execute("SELECT digest FROM context_snapshot WHERE task_id=? AND purpose='planning'", (task_id,)).fetchone()
+            data["context_digest"] = context[0] if context else ""
+            data["context_refs"] = [tuple(row) for row in conn.execute("SELECT kind,object_id,revision FROM context_dependency WHERE task_id=? AND purpose='planning' ORDER BY kind,object_id", (task_id,))]
+            data["decision_complete"] = not plan.steps and plan.action == "answer"
+            body = canonical(data)
+            if len(body.encode("utf-8")) > self.store.plan_max_bytes:
+                raise WorkflowBlocked("Decision history budget exceeded")
+            conn.execute("INSERT INTO decision_round VALUES(?,?,?,?)", (task_id, round_index, sha256(body.encode()).hexdigest(), body))
+            snapshot = self.get_plan(task_id)
+            assert snapshot is not None
+            return snapshot
 
     def add_validator(self, callback: Callable[[str, tuple[DependencyRef, ...]], None]) -> None:
         self.store.add_validator(callback)
@@ -67,8 +156,8 @@ class ExecutionJournal:
         specs = [{"name": spec.name, "description": spec.description, "parameters": dict(spec.parameters),
                   "permission_level": int(spec.permission_level), "contract_version": getattr(spec, "contract_version", "1")}
                  for spec in tool_specs]
-        value = {"task_id": task_id, "reply": plan.reply, "steps": calls, "tool_specs": specs,
-                 "workspace_dir": str(workspace_dir), "memory_refs": list(memory_refs), "policy_version": "2"}
+        value = {"task_id": task_id, "reply": plan.reply, "action": plan.action, "steps": calls, "tool_specs": specs,
+                 "workspace_dir": str(workspace_dir), "memory_refs": list(memory_refs), "policy_version": "2", "loop_version": 1}
         with self.store.transaction() as conn:
             self.set_dependencies(task_id, memory_refs)
             self.store.check_dependencies(conn, task_id)
@@ -108,13 +197,16 @@ class ExecutionJournal:
             row = conn.execute("SELECT * FROM immutableplan WHERE task_id=?", (task_id,)).fetchone()
             if row is None or row["scrubbed"]:
                 return None
+            latest = conn.execute("SELECT hash,body FROM decision_round WHERE task_id=? ORDER BY round DESC LIMIT 1", (task_id,)).fetchone()
+            if latest is not None:
+                row = {**dict(row), "hash": latest["hash"], "canonical_json": latest["body"]}
             if sha256(row["canonical_json"].encode("utf-8")).hexdigest() != row["hash"]:
                 raise WorkflowBlocked("Persisted plan integrity failed")
             data = json.loads(row["canonical_json"])
             policy_version = str(data.get("policy_version", "1"))
             if policy_version not in {"1", "2"}:
                 raise WorkflowBlocked("Unsupported immutable plan policy version")
-            plan = Plan(data["reply"], tuple(ToolCall(call["name"], call["arguments"], call["call_id"]) for call in data["steps"]))
+            plan = Plan(data["reply"], tuple(ToolCall(call["name"], call["arguments"], call["call_id"]) for call in data["steps"]), data.get("action", "answer"))
             specs = tuple(ToolSpec(spec["name"], spec["description"], spec["parameters"],
                                    PermissionLevel(spec["permission_level"]), spec["contract_version"])
                           for spec in data["tool_specs"])
@@ -145,7 +237,7 @@ class ExecutionJournal:
             if snapshot is None or not 0 <= index < len(snapshot.plan.steps):
                 raise WorkflowBlocked("No matching immutable plan step")
             prior = conn.execute("SELECT step_index,status FROM attempt WHERE task_id=? ORDER BY step_index", (task_id,)).fetchall()
-            if len(prior) != index or any(row["step_index"] != i or row["status"] != "Succeeded" for i, row in enumerate(prior)):
+            if len(prior) != index or any(row["step_index"] != i or row["status"] not in {"Succeeded", "Failed"} for i, row in enumerate(prior)):
                 raise WorkflowBlocked("A previous step is incomplete, failed, uncertain, or already executed")
             attempt_id = str(uuid4())
             conn.execute("INSERT INTO attempt(id,task_id,step_index,status) VALUES(?,?,?,'Started')", (attempt_id, task_id, index))
@@ -183,7 +275,7 @@ class ExecutionJournal:
                 encoded = canonical({"success": result.success, "output": {"output_omitted": True},
                                      "error": None, "tool_name": "" if row["scrubbed"] else body["tool_name"],
                                      "call_id": "" if row["scrubbed"] else body["call_id"]})
-            status = "Succeeded" if result.success else "Failed"
+            status = "Uncertain" if result.outcome == "unknown" else "Succeeded" if result.success else "Failed"
             conn.execute("UPDATE attempt SET status=?,result=? WHERE id=?", (status, encoded, attempt_id))
             self.store.record_event("step_finished", row["task_id"], {"attempt_id": attempt_id, "status": status})
 
@@ -258,7 +350,7 @@ class ExecutionJournal:
                     elif attempt.status not in {"Started", "Uncertain"}:
                         consistent = False
                         break
-                    if index < len(attempts) - 1 and attempt.status != "Succeeded":
+                    if index < len(attempts) - 1 and attempt.status not in {"Succeeded", "Failed"}:
                         consistent = False
                         break
                 if not consistent or any(attempt.status in {"Started", "Uncertain"} for attempt in attempts):
@@ -266,13 +358,20 @@ class ExecutionJournal:
                     continue
                 if task.status in {TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED, TaskStatus.UNCERTAIN}:
                     continue
+                if task.status == TaskStatus.PAUSED:
+                    self.tasks.finish_submission(task.id, "Blocked")
+                    continue
+                if task.status == TaskStatus.AWAITING_INPUT and plan is not None and plan.plan.action == "clarify":
+                    self.tasks.finish_submission(task.id, "Blocked")
+                    continue
                 all_succeeded = plan is not None and len(attempts) == len(plan.plan.steps) and all(a.status == "Succeeded" for a in attempts)
                 valid = external_valid
                 try:
                     self.store.check_dependencies(conn, task.id)
                 except WorkflowBlocked:
                     valid = False
-                if all_succeeded and valid:
+                loop_complete = plan is not None and plan.plan.action == "answer" and bool(json.loads(plan.canonical_json).get("decision_complete", False))
+                if all_succeeded and valid and loop_complete:
                     status = TaskStatus.CANCELLED if task.cancel_requested else TaskStatus.COMPLETED
                     recovered_result = {"reply": plan.plan.reply if plan else "", "tool_results": [_result_dict(a.result) for a in attempts if a.result],
                               "warning": "Recovered from committed tool outcomes; reflection was not replayed"}
@@ -327,6 +426,7 @@ class ExecutionJournal:
             raise ValueError("Deletion requires memory ID and positive revision")
         with self.store.transaction() as conn:
             conn.execute("INSERT OR IGNORE INTO memory_block VALUES(?)", (memory_id,))
+            conn.execute("UPDATE attention SET goal='',basis='',refs='[]',status='cancelled' WHERE id IN (SELECT a.id FROM attention a,json_each(a.refs) r WHERE json_extract(r.value,'$.kind')='memory' AND json_extract(r.value,'$.id')=?)", (memory_id,))
             affected = conn.execute("SELECT id,status FROM task WHERE id IN (SELECT task_id FROM dependency WHERE kind='memory' AND object_id=? UNION SELECT task_id FROM context_dependency WHERE kind='memory' AND object_id=?)", (memory_id, memory_id)).fetchall()
             for task in affected:
                 conn.execute("UPDATE audit_outbox SET data='{}' WHERE task_id=?", (task["id"],))
@@ -348,18 +448,20 @@ class ExecutionJournal:
     def scrub_memory(self, memory_id: str) -> tuple[str, ...]:
         with self.store.transaction() as conn:
             conn.execute("INSERT OR IGNORE INTO memory_block VALUES(?)", (memory_id,))
+            conn.execute("UPDATE attention SET goal='',basis='',refs='[]',status='cancelled' WHERE id IN (SELECT a.id FROM attention a,json_each(a.refs) r WHERE json_extract(r.value,'$.kind')='memory' AND json_extract(r.value,'$.id')=?)", (memory_id,))
             # Derived replies keep conservative refs; follow dialogue-turn links
             # too, so missing an inherited direct memory ref cannot revive text.
             ids = tuple(row[0] for row in conn.execute("""WITH RECURSIVE affected(task_id) AS (
                 SELECT task_id FROM dependency WHERE kind='memory' AND object_id=?
                 UNION SELECT task_id FROM context_dependency WHERE kind='memory' AND object_id=?
+                UNION SELECT task_id FROM context_archive_source WHERE kind='memory' AND object_id=?
                 UNION SELECT i.task_id FROM conversation_item_source s JOIN conversation_item i ON i.id=s.item_id WHERE s.source_kind='memory' AND s.source_id=? AND i.task_id IS NOT NULL
                 UNION SELECT d.task_id FROM context_dependency d JOIN affected a
                     ON d.kind='dialogue_turn' AND d.object_id IN (a.task_id,a.task_id||':user',a.task_id||':assistant')
                 UNION SELECT d.task_id FROM dependency d JOIN affected a
                     ON d.kind='dialogue_turn' AND d.object_id IN (a.task_id,a.task_id||':user',a.task_id||':assistant')
                 UNION SELECT i.task_id FROM conversation_item_source s JOIN conversation_item i ON i.id=s.item_id JOIN affected a ON s.source_kind='dialogue_turn' AND s.source_id IN (a.task_id,a.task_id||':user',a.task_id||':assistant') WHERE i.task_id IS NOT NULL
-                ) SELECT task_id FROM affected ORDER BY task_id""", (memory_id, memory_id, memory_id)))
+                ) SELECT task_id FROM affected ORDER BY task_id""", (memory_id, memory_id, memory_id, memory_id)))
             for task_id in ids:
                 self.tasks.scrub(task_id)
             return ids

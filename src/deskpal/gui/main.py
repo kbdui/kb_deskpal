@@ -14,8 +14,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                         help="启动独立配置、模型缓存和备份恢复维护界面")
     args = parser.parse_args(argv)
     try:
-        from PySide6.QtCore import QCoreApplication
+        from PySide6.QtCore import QCoreApplication, Qt
         from PySide6.QtWidgets import QApplication
+        from qfluentwidgets import FluentWindow
     except ImportError:
         print("GUI 依赖未安装：请在项目环境运行 python -m pip install -r requirements-gui.txt", file=sys.stderr)
         return 2
@@ -25,6 +26,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     from .launcher import DesktopLauncher
 
     app = QApplication([sys.argv[0]])
+    QApplication.setEffectEnabled(Qt.UIEffect.UI_AnimateCombo, False)
     QCoreApplication.setOrganizationName("Deskpal")
     QCoreApplication.setApplicationName("Deskpal")
     app.setQuitOnLastWindowClosed(False)

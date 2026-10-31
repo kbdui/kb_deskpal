@@ -27,6 +27,7 @@ def _tray_icon() -> QIcon:
 
 class TrayController(QObject):
     restore_requested = Signal()
+    chat_requested = Signal()
     quit_requested = Signal()
     message_clicked = Signal()
 
@@ -48,6 +49,9 @@ class TrayController(QObject):
             quit_action = QAction("退出", self._menu)
             quit_action.triggered.connect(self.quit_requested)
             self._menu.addAction(restore)
+            chat = QAction('打开桌宠聊天小窗', self._menu)
+            chat.triggered.connect(self.chat_requested)
+            self._menu.addAction(chat)
             self._menu.addSeparator()
             self._menu.addAction(quit_action)
             self._tray.setContextMenu(self._menu)

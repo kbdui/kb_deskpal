@@ -367,7 +367,7 @@ def _assess(result: WorkerResult, mode: str, host: dict[str, Any], report: dict[
 
 
 def _fingerprints() -> dict[str, str]:
-    paths = ("scripts/diagnose_appcontainer_token_regain.py", "tests/unit/test_appcontainer_token_regain_diagnostic.py",
+    paths = ("scripts/diagnose_appcontainer_token_regain.py", "tests/unit/execution_sandbox/test_appcontainer_token_regain_diagnostic.py",
              "tests/fixtures/windows/native_integrity_probe_v4.c", "data/v06-stage0/native-integrity-fixture-v4/fixture.exe")
     return smoke._fingerprints() | {path: sha256((ROOT / path).read_bytes()).hexdigest() for path in paths}
 

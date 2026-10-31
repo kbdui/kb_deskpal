@@ -6,7 +6,8 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from PySide6.QtCore import QObject, QSettings, QTimer, Signal, Slot
-from PySide6.QtWidgets import QApplication, QMenu
+from PySide6.QtWidgets import QApplication
+from .components import Menu as QMenu
 
 from deskpal.application.service import ApplicationService
 
@@ -42,6 +43,9 @@ class DesktopHost(QObject):
         self._pet_menu.addAction("打开主窗口", self.restore)
         self._pet_menu.addAction("收起小窗", self._hide_pet_chat)
         self._pet_menu.addAction("暂时隐藏桌宠", self.pet.hide_temporarily)
+        self._pet_menu.addSeparator()
+        self._pet_menu.addAction('调整桌宠大小…', self._resize_pet)
+        self._pet_menu.addAction('通知与免打扰设置', self._notification_settings)
         self.pet.navigation_requested.connect(self._toggle_pet_chat)
         self.pet.context_requested.connect(self._show_pet_menu)
         self.pet.anchor_changed.connect(self._reanchor_pet_chat)
@@ -74,6 +78,7 @@ class DesktopHost(QObject):
         self.window.close_requested.connect(self._window_close)
         self.window.privacy_cleared.connect(self.notifications.clear_pending)
         self.tray.restore_requested.connect(self.restore)
+        self.tray.chat_requested.connect(self._open_pet_chat)
         self.tray.quit_requested.connect(self._request_quit)
         self.notifications.navigation_requested.connect(self._navigate)
         self.notifications.revalidation_requested.connect(self._validate_notifications)
@@ -95,12 +100,34 @@ class DesktopHost(QObject):
 
     @Slot()
     def _open_pet_chat(self) -> None:
-        if self.bridge.state != "Ready" or self.pet.window is None or not self.pet.window.isVisible():
+        if self.bridge.state != "Ready":
             return
         if self.pet_chat is None:
             self.pet_chat = PetChatWindow(self.window.chat_coordinator)
             self.pet_chat.expand_requested.connect(self._expand_pet_chat)
-        self.pet_chat.open_for(self.pet.window)
+        self.pet_chat.open_for(self.pet.window if self.pet.window is not None else self.window)
+
+    @Slot()
+    def _notification_settings(self) -> None:
+        self.restore(); self.window.set_page(4); self.window.settings_page.tabs.setCurrentIndex(2)
+
+    @Slot()
+    def _resize_pet(self) -> None:
+        from PySide6.QtCore import Qt
+        from PySide6.QtWidgets import QDialog, QVBoxLayout
+        from .components import Slider, PushButton
+        from .widgets import text_label
+        dialog = QDialog(self.window); dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        dialog.setWindowTitle('桌宠大小'); layout = QVBoxLayout(dialog)
+        value = text_label(f'{round(self.preferences.pet_scale * 100)}%'); layout.addWidget(value)
+        slider = Slider(Qt.Orientation.Horizontal); slider.setRange(60, 160)
+        slider.setValue(round(self.preferences.pet_scale * 100))
+        slider.valueChanged.connect(lambda percent: value.setText(f'{percent}%'))
+        layout.addWidget(slider)
+        def apply_size() -> None:
+            if self.preferences.set_pet_scale(slider.value() / 100): dialog.accept()
+        save = PushButton('应用'); save.clicked.connect(apply_size)
+        layout.addWidget(save); dialog.resize(320, 160); dialog.open()
 
     @Slot()
     def _hide_pet_chat(self) -> None:

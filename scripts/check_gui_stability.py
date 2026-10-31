@@ -21,7 +21,7 @@ from typing import Any
 from uuid import uuid4
 
 ROOT = Path(__file__).resolve().parents[1]
-PREFIXES = ("tests/gui/test_bridge.py::", "tests/gui/test_desktop.py::", "tests/gui/test_host.py::")
+PREFIXES = ("tests/gui/desktop/test_bridge.py::", "tests/gui/desktop/test_desktop.py::", "tests/gui/desktop/test_host.py::")
 
 
 def fingerprint(*, tests: bool = False) -> str:

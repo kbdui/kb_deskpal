@@ -30,7 +30,7 @@ def publish_task_state(store: WorkflowStore, conn: sqlite3.Connection, task_id: 
         text = ""
     if not text:
         text = {"Waiting": "这项安排需要你确认后继续。", "NeedsReview": "这项工作需要重新审阅。",
-                "Uncertain": "执行结果需要人工核实。", "Failed": error or "这次请求未能完成。",
+                "Uncertain": "执行结果需要人工核实。", "Failed": "这次请求未能完成，具体原因请查看执行详情。",
                 "Cancelled": "已取消这次请求。"}.get(status, "")
     if not text and "memory_id" in data and status == "Completed":
         text = "已保存这条记忆。"
@@ -44,7 +44,8 @@ def publish_task_state(store: WorkflowStore, conn: sqlite3.Connection, task_id: 
         # a restrictive policy here unless the entire task is cloud eligible.
         policy = str(version[0]) if version is not None else task["use_policy"]
         refs[(row["kind"], row["object_id"])] = {"kind": row["kind"], "id": row["object_id"], "revision": row["revision"], "use_policy": policy}
-    for role in ("user", "assistant"):
+    origin = conn.execute("SELECT kind FROM task_origin WHERE task_id=?", (task_id,)).fetchone()
+    for role in (("assistant",) if origin and origin[0] == "proactive" else ("user", "assistant")):
         source_id = task_id + ":" + role
         store.set_dependency_version("dialogue_turn", source_id, link["sequence"], use_policy=task["use_policy"])
         refs[("dialogue_turn", source_id)] = {"kind": "dialogue_turn", "id": source_id, "revision": link["sequence"], "use_policy": task["use_policy"]}

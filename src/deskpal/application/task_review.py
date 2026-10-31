@@ -14,11 +14,11 @@ if TYPE_CHECKING:
     from .service import ApplicationService
 
 
-def required_permissions(snapshot: PlanSnapshot) -> tuple[frozenset[str], frozenset[str]]:
+def required_permissions(snapshot: PlanSnapshot, completed: int = 0) -> tuple[frozenset[str], frozenset[str]]:
     specs = {spec.name: spec for spec in snapshot.tool_specs}
     ordinary: set[str] = set()
     high: set[str] = set()
-    for call in snapshot.plan.steps:
+    for call in snapshot.plan.steps[completed:]:
         spec = specs.get(call.name)
         if spec is None:
             raise WorkflowBlocked("Persisted plan has an unknown tool contract")
@@ -80,14 +80,17 @@ class TaskReviewService:
         high: frozenset[str] = frozenset()
         steps: list[dict[str, Any]] = []
         blocked: str | None = None
+        pause_control = app.task_control.snapshot(task_id)
         execution_candidate = task.status in {TaskStatus.WAITING, TaskStatus.NEEDS_REVIEW}
         if snapshot is not None:
             try:
-                ordinary, high = required_permissions(snapshot)
+                ordinary, high = required_permissions(snapshot, len(attempts))
             except WorkflowBlocked:
                 blocked = "持久计划缺少可信工具契约，请重新提出意图。"
             specs = {spec.name: spec for spec in snapshot.tool_specs}
             for index, call in enumerate(snapshot.plan.steps):
+                if index < len(attempts):
+                    continue
                 spec = specs.get(call.name)
                 steps.append({"call_id": call.call_id, "tool_name": call.name, "display_name": display_name(call.name),
                     "index": index, "permission_level": None if spec is None else int(spec.permission_level),
@@ -111,7 +114,7 @@ class TaskReviewService:
             steps = []
             ordinary, high = frozenset(), frozenset()
             snapshot = None
-        if attempts and execution_candidate:
+        if any(item.status not in {"Succeeded", "Failed"} for item in attempts) and execution_candidate:
             blocked = "该计划已有执行记录，不能整份重放；请仅创建尚未完成的新意图。"
         if task.cancel_requested or task.status == TaskStatus.CANCELLED:
             blocked = "任务已取消或正在取消。"
@@ -141,8 +144,13 @@ class TaskReviewService:
             raise WorkflowBlocked("Task review changed while reading; refresh the selected task")
         granted = (grants[0] | frozenset(state["ordinary_tools"]), grants[1] | frozenset(state["high_risk_tools"]))
         actions: list[str] = []
-        if task.status in {TaskStatus.CREATED, TaskStatus.PLANNING, TaskStatus.RUNNING, TaskStatus.WAITING, TaskStatus.NEEDS_REVIEW} and not task.cancel_requested:
+        if task.status in {TaskStatus.PAUSED, TaskStatus.CREATED, TaskStatus.PLANNING, TaskStatus.RUNNING, TaskStatus.WAITING, TaskStatus.AWAITING_INPUT, TaskStatus.NEEDS_REVIEW} and not task.cancel_requested:
             actions.append("cancel")
+        if not task.cancel_requested:
+            if task.status == TaskStatus.PAUSED and app._dispatcher.diagnostics()["active_task_id"] != task_id:
+                actions.append("task_continue")
+            elif task.status in {TaskStatus.CREATED, TaskStatus.PLANNING, TaskStatus.RUNNING, TaskStatus.WAITING, TaskStatus.AWAITING_INPUT} and not pause_control["requested"]:
+                actions.append("task_pause")
         if task.status == TaskStatus.UNCERTAIN:
             actions.append("review_uncertain")
         if can_resume:
@@ -154,7 +162,7 @@ class TaskReviewService:
         if cleared:
             task_value.update(request="", result=None, error=None)
         return {"schema_version": 1, "task": task_value, "task_id": task.id, "task_revision": task.revision,
-            "status": task.status.value, "title": "已清理任务" if cleared else task.request[:120], "conversation_id": None if turn is None else turn[0],
+            "status": task.status.value, "pause_control": pause_control, "title": "已清理任务" if cleared else task.request[:120], "conversation_id": None if turn is None else turn[0],
             "plan_hash": None if snapshot is None else snapshot.hash, "workspace": None if snapshot is None else snapshot.workspace_dir,
             "steps": steps, "required_permissions": permissions(ordinary, high),
             "granted_in_current_process": permissions(granted[0] & ordinary, granted[1] & high),
@@ -186,6 +194,6 @@ class TaskReviewService:
             # Incremental polling carries bounded metadata; selected-card detail
             # uses task_review and preserves the user's unchanged grant choices.
             items.append({"task_id": identity, "task_revision": task.revision, "status": task.status.value,
-                "cancel_requested": task.cancel_requested, "confirmation_state": state["state"], "confirmation": state,
+                "pause_control": app.task_control.snapshot(identity), "cancel_requested": task.cancel_requested, "confirmation_state": state["state"], "confirmation": state,
                 "confirmation_revision": state["revision"]})
         return {"schema_version": 1, "items": items, "missing_ids": missing}

@@ -87,7 +87,7 @@ class ScreenshotConfig:
 
 @dataclass(frozen=True)
 class MemoryConfig:
-    mode: str = "explicit_only"
+    mode: str = "automatic"
     embedding_provider: str = "disabled"
     model_cache_dir: Path = Path("data/models/fastembed")
     max_context_bytes: int = 8000
@@ -108,7 +108,7 @@ class WorkflowConfig:
 
 @dataclass(frozen=True)
 class ProactiveConfig:
-    enabled: bool = False
+    enabled: bool = True
     poll_interval_seconds: float = 1.0
     event_batch_size: int = 100
     max_proposals_per_poll: int = 10
@@ -239,7 +239,7 @@ def load_config(path: str | Path | None = None, *, environ: Mapping[str, str] | 
 
     def proactive_boolean() -> bool:
         env_key = "DESKPAL_PROACTIVE_ENABLED"
-        candidate = value("proactive", "enabled", False, env_key)
+        candidate = value("proactive", "enabled", True, env_key)
         if env_key in env:
             if isinstance(candidate, str) and candidate.strip().lower() in {"true", "false"}:
                 return candidate.strip().lower() == "true"
@@ -335,10 +335,12 @@ def load_config(path: str | Path | None = None, *, environ: Mapping[str, str] | 
         "scheduling", "poll_interval_seconds", 1.0, "DESKPAL_SCHEDULING_POLL_INTERVAL_SECONDS")
     if poll_interval > 60:
         raise ConfigError("scheduling.poll_interval_seconds must not exceed 60")
-    memory_mode = string("memory", "mode", "explicit_only", "DESKPAL_MEMORY_MODE")
+    memory_mode = string("memory", "mode", "automatic", "DESKPAL_MEMORY_MODE")
     embedding_provider = string("memory", "embedding_provider", "disabled", "DESKPAL_EMBEDDING_PROVIDER")
-    if memory_mode not in {"explicit_only", "candidate_review", "paused"}:
-        raise ConfigError("memory.mode must be explicit_only, candidate_review, or paused")
+    if memory_mode not in {"automatic", "explicit_only", "candidate_review", "paused"}:
+        raise ConfigError("memory.mode must be automatic or paused")
+    if memory_mode in {"explicit_only", "candidate_review"}:
+        memory_mode = "automatic"
     if embedding_provider not in {"disabled", "fastembed"}:
         raise ConfigError("memory.embedding_provider must be disabled or fastembed")
     max_context_bytes = positive_number(

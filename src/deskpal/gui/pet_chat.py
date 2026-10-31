@@ -2,11 +2,12 @@
 
 from PySide6.QtCore import QEvent, QObject, QPoint, Qt, QTimer, Signal
 from PySide6.QtGui import QCloseEvent, QKeySequence, QScreen, QShortcut
-from PySide6.QtWidgets import QApplication, QHBoxLayout, QPushButton, QVBoxLayout, QWidget
+from PySide6.QtWidgets import (QApplication, QHBoxLayout, QVBoxLayout, QWidget)
+from .components import (PushButton as QPushButton)
 
 from .chat import ChatCoordinator, ChatView
 from .pet_window import clamp_position
-from .theme import STYLE
+from .theme import apply as apply_theme
 
 
 class PetChatWindow(QWidget):
@@ -16,7 +17,8 @@ class PetChatWindow(QWidget):
         # A separate native focusable window; never inherits the canvas's no-focus flags.
         super().__init__(parent, Qt.WindowType.Tool | Qt.WindowType.WindowCloseButtonHint)
         self.setWindowTitle("DeskPal · 聊天")
-        self.setStyleSheet(STYLE)
+        self.setObjectName('deskpalWorkspace')
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground)
         self.resize(410, 520)
         self._disposing = False
         self._deactivate_timer = QTimer(self)
@@ -32,6 +34,9 @@ class PetChatWindow(QWidget):
         self.chat_view = ChatView(coordinator, compact=True, parent=self)
         self.chat_view.expand_requested.connect(self.expand_requested)
         layout.addWidget(self.chat_view, 1)
+        apply_theme(self)
+        from qfluentwidgets import qconfig
+        qconfig.themeChanged.connect(self._apply_theme)
         self._escape = QShortcut(QKeySequence(Qt.Key.Key_Escape), self)
         self._escape.activated.connect(self.hide)
         self._anchor: QWidget | None = None
@@ -42,6 +47,9 @@ class PetChatWindow(QWidget):
             app.screenAdded.connect(self._screen_added)
             for screen in app.screens():
                 self._screen_added(screen)
+
+    def _apply_theme(self) -> None:
+        apply_theme(self)
 
     def _screen_added(self, screen: QScreen) -> None:
         screen.availableGeometryChanged.connect(self.reanchor)

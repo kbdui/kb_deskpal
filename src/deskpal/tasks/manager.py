@@ -13,9 +13,10 @@ from .models import Task, TaskStatus, utc_now
 
 
 _TRANSITIONS: dict[TaskStatus, frozenset[TaskStatus]] = {
+    TaskStatus.AWAITING_INPUT: frozenset((TaskStatus.RUNNING, TaskStatus.WAITING, TaskStatus.CANCELLED, TaskStatus.NEEDS_REVIEW, TaskStatus.FAILED)),
     TaskStatus.CREATED: frozenset((TaskStatus.PLANNING, TaskStatus.CANCELLED, TaskStatus.FAILED, TaskStatus.NEEDS_REVIEW)),
-    TaskStatus.PLANNING: frozenset((TaskStatus.RUNNING, TaskStatus.WAITING, TaskStatus.FAILED, TaskStatus.CANCELLED, TaskStatus.NEEDS_REVIEW, TaskStatus.UNCERTAIN)),
-    TaskStatus.RUNNING: frozenset((TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED, TaskStatus.NEEDS_REVIEW, TaskStatus.UNCERTAIN)),
+    TaskStatus.PLANNING: frozenset((TaskStatus.AWAITING_INPUT, TaskStatus.RUNNING, TaskStatus.WAITING, TaskStatus.FAILED, TaskStatus.CANCELLED, TaskStatus.NEEDS_REVIEW, TaskStatus.UNCERTAIN)),
+    TaskStatus.RUNNING: frozenset((TaskStatus.AWAITING_INPUT, TaskStatus.WAITING, TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED, TaskStatus.NEEDS_REVIEW, TaskStatus.UNCERTAIN)),
     TaskStatus.WAITING: frozenset((TaskStatus.RUNNING, TaskStatus.FAILED, TaskStatus.CANCELLED, TaskStatus.NEEDS_REVIEW)),
     TaskStatus.NEEDS_REVIEW: frozenset((TaskStatus.CREATED, TaskStatus.PLANNING, TaskStatus.WAITING, TaskStatus.CANCELLED, TaskStatus.FAILED, TaskStatus.UNCERTAIN)),
     TaskStatus.UNCERTAIN: frozenset(),
@@ -23,6 +24,11 @@ _TRANSITIONS: dict[TaskStatus, frozenset[TaskStatus]] = {
     TaskStatus.FAILED: frozenset(),
     TaskStatus.CANCELLED: frozenset(),
 }
+
+# 暂停是非终态；只允许受控恢复，不赋予工具许可。
+for _state in (TaskStatus.CREATED, TaskStatus.PLANNING, TaskStatus.RUNNING, TaskStatus.WAITING, TaskStatus.AWAITING_INPUT):
+    _TRANSITIONS[_state] = _TRANSITIONS[_state] | {TaskStatus.PAUSED}
+_TRANSITIONS[TaskStatus.PAUSED] = frozenset((TaskStatus.CREATED, TaskStatus.WAITING, TaskStatus.AWAITING_INPUT, TaskStatus.CANCELLED, TaskStatus.NEEDS_REVIEW, TaskStatus.FAILED))
 
 
 def _copy_json(value: Any, active: set[int] | None = None) -> Any:

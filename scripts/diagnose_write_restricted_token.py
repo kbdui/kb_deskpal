@@ -141,7 +141,7 @@ def _save(output: TextIO, report: dict[str, Any]) -> None:
 def _fingerprints() -> dict[str, str]:
     # No project modules are imported or used by this standalone diagnostic.
     paths = ("scripts/diagnose_write_restricted_token.py",
-             "tests/unit/test_write_restricted_token_diagnostic.py")
+             "tests/unit/execution_sandbox/test_write_restricted_token_diagnostic.py")
     return {path: sha256((ROOT / path).read_bytes()).hexdigest() for path in paths}
 
 

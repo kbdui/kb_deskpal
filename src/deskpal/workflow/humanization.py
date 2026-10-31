@@ -10,12 +10,39 @@ from .store import WorkflowStore, canonical
 from .tasks import dependency_ref
 
 
-_PURPOSES = frozenset({"planning", "expression", "memory_evaluation"})
+_PURPOSES = frozenset({"context_understanding", "planning", "expression", "memory_evaluation"})
 
 
 class HumanizationStore:
     def __init__(self, store: WorkflowStore) -> None:
         self.store = store
+
+    def renew_memory(self, task_id: str, memory_id: str, revision: int,
+                     planning_items: Sequence[Any], replacement_id: str | None = None,
+                     extra_refs: Sequence[tuple[str, str, int]] = ()) -> None:
+        """已记账的显式更正后换用新来源；旧上下文移入不可变历史。"""
+        from hashlib import sha256
+        with self.store.transaction() as conn:
+            self.store.check_privacy(conn, task_id)
+            for purpose in ("planning", "expression"):
+                prior = self.context(task_id, purpose)
+                if prior is None:
+                    continue
+                generation = conn.execute("SELECT COALESCE(MAX(generation),0)+1 FROM context_history WHERE task_id=? AND purpose=?", (task_id, purpose)).fetchone()[0]
+                conn.execute("INSERT INTO context_history VALUES(?,?,?,?,?,?)", (task_id, purpose, generation,
+                    prior["digest"], canonical(prior["items"]), canonical(prior["refs"])))
+                for kind, identity, old_revision in prior["refs"]:
+                    conn.execute("INSERT OR IGNORE INTO context_archive_source VALUES(?,?,?,?)", (task_id, kind, identity, old_revision))
+                refs = tuple(sorted({(kind, (replacement_id or identity) if kind == "memory" and identity == memory_id else identity,
+                                      revision if kind == "memory" and identity == memory_id else old_revision)
+                                     for kind, identity, old_revision in prior["refs"]} | set(extra_refs)))
+                items = canonical(list(planning_items) if purpose == "planning" else [])
+                digest = sha256(canonical({"items": items, "refs": refs}).encode()).hexdigest()
+                conn.execute("UPDATE context_snapshot SET digest=?,items=? WHERE task_id=? AND purpose=?", (digest, items, task_id, purpose))
+                conn.execute("DELETE FROM context_dependency WHERE task_id=? AND purpose=?", (task_id, purpose))
+                for kind, identity, current_revision in refs:
+                    conn.execute("INSERT INTO context_dependency VALUES(?,?,?,?,?)", (task_id, purpose, kind, identity, current_revision))
+            conn.execute("UPDATE dependency SET revision=?,object_id=? WHERE task_id=? AND kind='memory' AND object_id=?", (revision, replacement_id or memory_id, task_id, memory_id))
 
     def privacy(self) -> dict[str, Any]:
         with self.store.read_connection() as conn:
@@ -85,7 +112,7 @@ class HumanizationStore:
                 raise WorkflowBlocked("Task has an unsupported use policy")
             return policy
 
-    def tighten_policy(self, task_id: str) -> None:
+    def tighten_policy(self, task_id: str, *, observed: bool = False) -> None:
         """Source restrictions may narrow a new intent, never widen it."""
         with self.store.transaction() as conn:
             row = conn.execute("SELECT use_policy FROM task WHERE id=?", (task_id,)).fetchone()
@@ -93,7 +120,7 @@ class HumanizationStore:
                 raise KeyError(task_id)
             if row[0] == "local_only":
                 return
-            if conn.execute("SELECT 1 FROM immutableplan WHERE task_id=?", (task_id,)).fetchone():
+            if not observed and conn.execute("SELECT 1 FROM immutableplan WHERE task_id=?", (task_id,)).fetchone():
                 raise WorkflowBlocked("A persisted plan cannot change its source policy")
             conn.execute("UPDATE task SET use_policy='local_only' WHERE id=?", (task_id,))
             conn.execute("UPDATE conversation_item SET use_policy='local_only' WHERE task_id=?", (task_id,))
@@ -157,9 +184,6 @@ class HumanizationStore:
         with self.store.transaction() as conn:
             return tuple(dict(row) for row in conn.execute("SELECT id,task_id,status,success,failure,epoch,terminal_revision,created_at,appraisal_version FROM companion_effect_outbox ORDER BY sequence LIMIT ?", (limit,)))
 
-    def ack_effect(self, effect_id: str) -> None:
-        with self.store.transaction() as conn:
-            conn.execute("DELETE FROM companion_effect_outbox WHERE id=?", (effect_id,))
 
     def discard_effects(self) -> None:
         with self.store.transaction() as conn:
@@ -168,6 +192,7 @@ class HumanizationStore:
     def reserve_call(self, task_id: str, purpose: str, limit: int = 1) -> str:
         if purpose not in _PURPOSES or type(limit) is not int or not 1 <= limit <= 1:
             raise ValueError("A model purpose has one attempt per root task")
+        limit = 24 if purpose == "planning" else 3 if purpose == "memory_evaluation" else 1
         with self.store.transaction() as conn:
             self.store.check_dependencies(conn, task_id)
             self.store.check_context_dependencies(conn, task_id, purpose)

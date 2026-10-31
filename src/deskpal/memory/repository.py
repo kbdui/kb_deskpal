@@ -22,7 +22,7 @@ from .contracts import (
 from .models import MemoryKind
 
 
-_VERSION = 2
+_VERSION = 3
 _ORIGINS = frozenset(("user_message", "user_confirmation", "tool_result", "imported_document",
                       "assistant_output", "legacy"))
 
@@ -110,7 +110,8 @@ def _draft_data(draft: MemoryDraft) -> dict[str, object]:
             "importance": draft.importance, "extraction_confidence": draft.extraction_confidence,
             "valid_from": _stamp(draft.valid_from), "valid_to": _stamp(draft.valid_to),
             "expires_at": _stamp(draft.expires_at), "pinned": draft.pinned,
-            "half_life_days": draft.half_life_days}
+            "half_life_days": draft.half_life_days, "destination": draft.destination,
+            "reason": draft.reason, "uncertainty": draft.uncertainty, "review_after": _stamp(draft.review_after)}
 
 
 def _source_from(data: dict[str, object]) -> MemorySource:
@@ -133,6 +134,8 @@ def _draft_from(data: dict[str, object]) -> MemoryDraft:
         valid_from=_load_time(data["valid_from"]), valid_to=_load_time(data["valid_to"]),
         expires_at=_load_time(data["expires_at"]), pinned=data["pinned"] is True,
         half_life_days=_finite(data["half_life_days"], "Stored half life", positive=True),
+        destination=str(data.get("destination", "facts")), reason=str(data.get("reason", "")),
+        uncertainty=str(data.get("uncertainty", "")), review_after=_load_time(data.get("review_after")),
     )
 
 
@@ -174,7 +177,7 @@ def _normalize_draft(source: MemorySource, draft: MemoryDraft, now: datetime,
         ClaimType.USER_REPORT: ("user_message", "user_confirmation"),
         ClaimType.OBSERVED_EVENT: ("tool_result",),
         ClaimType.EXTERNAL_CLAIM: ("imported_document", "user_message", "user_confirmation"),
-        ClaimType.HYPOTHESIS: ("assistant_output", "user_message", "user_confirmation"),
+        ClaimType.HYPOTHESIS: ("assistant_output", "user_message", "user_confirmation", "tool_result", "imported_document"),
         ClaimType.LEGACY: ("legacy",),
     }
     if source.origin not in permitted[draft.claim_type]:
@@ -182,7 +185,7 @@ def _normalize_draft(source: MemorySource, draft: MemoryDraft, now: datetime,
     if draft.profile_key and (draft.claim_type != ClaimType.USER_REPORT or draft.subject != "user"
                               or not draft.value.strip()):
         raise MemoryError("Profile fields require a user self-report and explicit value")
-    if accepted and (draft.claim_type in (ClaimType.LEGACY, ClaimType.HYPOTHESIS)
+    if accepted and (draft.claim_type == ClaimType.LEGACY
                      or source.origin == "assistant_output"):
         raise MemoryError("This source cannot be automatically accepted")
     begin = _optional_utc(draft.valid_from, "valid_from")
@@ -190,12 +193,16 @@ def _normalize_draft(source: MemorySource, draft: MemoryDraft, now: datetime,
     expiry = _optional_utc(draft.expires_at, "expires_at")
     if begin is not None and end is not None and begin >= end:
         raise MemoryError("Memory validity must be a non-empty half-open interval")
-    if (expiry is not None and expiry <= now) or (accepted and end is not None and end <= now):
+    if expiry is not None and expiry <= now:
         raise MemoryError("Memory is already expired")
-    default_expiry = not accepted and expiry is None
+    if draft.destination not in ('facts', 'episode', 'habit'):
+        raise MemoryError('Invalid memory destination')
+    _text(draft.reason, 'Reason', 4000, empty=True)
+    _text(draft.uncertainty, 'Uncertainty and scope', 2000, empty=True)
+    default_expiry = False
     return replace(
         draft, valid_from=begin, valid_to=end,
-        expires_at=now + timedelta(days=7) if default_expiry else expiry,
+        expires_at=expiry, review_after=_optional_utc(draft.review_after, 'review_after'),
         importance=_finite(draft.importance, "importance", bounded=True),
         extraction_confidence=_finite(draft.extraction_confidence, "extraction_confidence", bounded=True),
         half_life_days=_finite(draft.half_life_days, "half_life_days", positive=True),
@@ -226,7 +233,7 @@ class SQLiteMemoryRepository:
         self._db.execute("PRAGMA foreign_keys = ON")
         try:
             version = int(self._db.execute("PRAGMA user_version").fetchone()[0])
-            if version not in (0, 1, _VERSION):
+            if version not in (0, 1, 2, _VERSION):
                 raise MemoryError("Unsupported memory database schema version")
             tables = {str(row[0]) for row in self._db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
             if version == 0 and "memories" in tables:
@@ -234,9 +241,13 @@ class SQLiteMemoryRepository:
             if version == 1 and path != ":memory:":
                 self._backup_v1(Path(path))
             with self._transaction():
-                self._schema()
-                if version == 1:
-                    self._migrate_v1()
+                from .schema_v3 import migrate, validate
+                if version != _VERSION:
+                    self._schema()
+                    if version == 1:
+                        self._migrate_v1()
+                    migrate(self._db)
+                validate(self._db)
                 self._db.execute(f"PRAGMA user_version = {_VERSION}")
         except BaseException:
             self._db.close()
@@ -319,6 +330,17 @@ class SQLiteMemoryRepository:
 
     @contextmanager
     def _transaction(self) -> Iterator[None]:
+        if self._db.in_transaction:
+            name = 'nested_' + uuid4().hex
+            self._db.execute(f'SAVEPOINT {name}')
+            try:
+                yield
+            except BaseException:
+                self._db.execute(f'ROLLBACK TO {name}')
+                raise
+            finally:
+                self._db.execute(f'RELEASE {name}')
+            return
         self._db.execute("BEGIN IMMEDIATE")
         try:
             yield
@@ -327,6 +349,14 @@ class SQLiteMemoryRepository:
             if self._db.in_transaction:
                 self._db.execute("ROLLBACK")
             raise
+
+    @contextmanager
+    def batch(self) -> Iterator[None]:
+        """学习结果与完成标记共用本库事务，模型调用必须在此边界之外。"""
+        with self._lock:
+            self._open()
+            with self._transaction():
+                yield
 
     def _epoch(self) -> int:
         return int(self._db.execute("SELECT value FROM memory_meta WHERE name='epoch'").fetchone()[0])
@@ -429,22 +459,33 @@ class SQLiteMemoryRepository:
             return tuple(item for item in items if status is None or item.status == status)
 
     def page_items(self, *, status: MemoryStatus | None = None, limit: int = 100,
-                   offset: int = 0) -> MemoryPage:
+                   offset: int = 0, group: str = 'all') -> MemoryPage:
         """Page current heads and erased tombstones in SQL under one epoch."""
         if type(limit) is not int or not 1 <= limit <= 100 or type(offset) is not int or offset < 0:
             raise MemoryError("limit must be 1..100 and offset non-negative")
         if status is not None and not isinstance(status, MemoryStatus):
             raise MemoryError("status must be a MemoryStatus")
+        if group not in {'all', 'facts', 'episode', 'buffer'}:
+            raise MemoryError('Unknown memory display group')
         with self._lock:
             self._open()
             self._expire_candidates(self._now())
             query = ("SELECT r.id,r.revision,r.recorded_at AS ordering,0 AS erased FROM memory_revisions r "
                      "JOIN memory_heads h ON r.id=h.id AND r.revision=h.revision")
             parameters: tuple[object, ...] = ()
+            clauses: list[str] = []
             if status is not None:
-                query += " WHERE r.status=?"
+                clauses.append('r.status=?')
                 parameters = (status.value,)
-            if status in (None, MemoryStatus.DELETED):
+            if group == 'buffer':
+                clauses.append("r.status IN ('candidate','disputed')")
+            elif group == 'facts':
+                clauses.append("r.status='accepted' AND json_extract(r.draft,'$.kind')='semantic' AND COALESCE(json_extract(r.draft,'$.destination'),'facts')='facts'")
+            elif group == 'episode':
+                clauses.append("r.status='accepted' AND json_extract(r.draft,'$.kind')='episodic' AND json_extract(r.draft,'$.destination')='episode'")
+            if clauses:
+                query += ' WHERE ' + ' AND '.join(clauses)
+            if group == 'all' and status in (None, MemoryStatus.DELETED):
                 query += " UNION ALL SELECT id,revision,deleted_at AS ordering,1 AS erased FROM memory_tombstones"
             rows = self._db.execute("SELECT * FROM (" + query +
                 ") ORDER BY ordering DESC,id ASC,revision DESC LIMIT ? OFFSET ?",
@@ -556,6 +597,26 @@ class SQLiteMemoryRepository:
                                           (token, _stamp(self._now())))
                 return cursor.rowcount == 1
 
+    def update_understanding(self, memory_id: str, expected_revision: int, source: MemorySource,
+                             draft: MemoryDraft, status: MemoryStatus) -> MemoryItem:
+        """模型复核的同一理解修订；没有人工审批或固定分数提升。"""
+        if status not in (MemoryStatus.CANDIDATE, MemoryStatus.ACCEPTED, MemoryStatus.ARCHIVED):
+            raise MemoryError('Invalid understanding state')
+        with self.batch():
+            previous = self._current(memory_id, expected_revision)
+            if previous.status not in (MemoryStatus.CANDIDATE, MemoryStatus.DISPUTED, MemoryStatus.ACCEPTED):
+                raise MemoryError('Understanding is no longer available')
+            source = _normalize_source(source)
+            normalized, _ = _normalize_draft(source, draft, self._now(), accepted=status == MemoryStatus.ACCEPTED)
+            source = self._store_source(source)
+            updated = replace(previous, revision=previous.revision + 1, source=source, draft=normalized,
+                status=status, recorded_at=self._now(), accepted_at=self._now() if status == MemoryStatus.ACCEPTED else None,
+                change_reason=draft.reason)
+            self._append(updated)
+            self._db.execute('DELETE FROM memory_embeddings WHERE memory_id=?', (memory_id,))
+            self._bump()
+            return updated
+
     def accept(self, memory_id: str, expected_revision: int) -> MemoryItem:
         return self._review(memory_id, expected_revision, accept=True)
 
@@ -659,6 +720,8 @@ class SQLiteMemoryRepository:
         # fingerprints. Every member of an explicit shared-source deletion
         # retains the full closure's task scope for later idempotent receipts.
         # Unrelated candidates expiring in one sweep retain their own scopes.
+        from .learning_store import LearningStore
+        LearningStore(self).erase_copies(ids, tasks)
         for memory_id, affected in item_tasks.items():
             self._db.executemany("INSERT OR IGNORE INTO memory_deletion_tasks VALUES (?, ?)",
                                  ((memory_id, task_id) for task_id in sorted(tasks if shared_closure else affected)))
@@ -707,6 +770,9 @@ class SQLiteMemoryRepository:
                     for source_id in tuple(sources):
                         ids.update(str(row[0]) for row in self._db.execute(
                             "SELECT id FROM memory_revisions WHERE source_id=?", (source_id,)))
+                    for item_id in tuple(ids):
+                        ids.update(str(row[0]) for row in self._db.execute(
+                            "SELECT memory_id FROM learning_link WHERE kind='memory' AND object_id=?", (item_id,)))
                     if before == (len(ids), len(sources)):
                         break
                 epoch, tasks = self._delete_ids(ids, now, shared_closure=True)
@@ -772,14 +838,14 @@ class SQLiteMemoryRepository:
             self._check_manifest(manifest)
             now = self._now()
             self._expire_candidates(now)
-            # Only current accepted heads can confer index eligibility. Push the
+            # Current usable heads include uncertain review-buffer records. Push the
             # join into SQLite instead of issuing two source/head lookups for
             # every vector; actual validity/privacy still belongs to retrieval.
             rows = self._db.execute(
                 "SELECT e.memory_id,e.revision,e.vector,r.draft FROM memory_embeddings e "
                 "JOIN memory_heads h ON h.id=e.memory_id AND h.revision=e.revision "
                 "JOIN memory_revisions r ON r.id=h.id AND r.revision=h.revision "
-                "WHERE e.version=? AND r.status='accepted' ORDER BY e.memory_id,e.revision",
+                "WHERE e.version=? AND r.status IN ('accepted','candidate','disputed') ORDER BY e.memory_id,e.revision",
                 (manifest.version,),
             ).fetchall()
             result: list[tuple[str, int, tuple[float, ...]]] = []
@@ -795,7 +861,8 @@ class SQLiteMemoryRepository:
     def _indexable(item: MemoryItem, now: datetime) -> bool:
         # A temporal historical head can support as_of retrieval. Actual time
         # eligibility belongs to the retriever; expiry/deletion still dominate.
-        return (item.status == MemoryStatus.ACCEPTED and item.draft.claim_type != ClaimType.LEGACY
+        return (item.status in (MemoryStatus.ACCEPTED, MemoryStatus.CANDIDATE, MemoryStatus.DISPUTED)
+                and item.draft.claim_type != ClaimType.LEGACY
                 and (item.draft.expires_at is None or now < item.draft.expires_at))
 
     def close(self) -> None:

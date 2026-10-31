@@ -200,7 +200,7 @@ class SchedulingService:
         Timers retain their persisted status. Calendar status is a presentation
         of reminder_fired: scheduled/reminded, not a claim about attendance.
         """
-        if not isinstance(source, str) or not isinstance(status, str) or source not in {"all", "timer", "calendar"} or status not in {"all", "pending", "fired", "cancelled", "scheduled", "reminded"}:
+        if not isinstance(source, str) or not isinstance(status, str) or source not in {"all", "timer", "calendar"} or status not in {"all", "upcoming", "pending", "fired", "cancelled", "scheduled", "reminded"}:
             raise ValueError("Unsupported scheduling source or status filter")
         if type(offset) is not int or offset < 0 or type(limit) is not int or not 1 <= limit <= 100:
             raise ValueError("Scheduling page limit must be 1..100 and offset non-negative")
@@ -211,15 +211,15 @@ class SchedulingService:
                        NULL AS start_at,NULL AS end_at,NULL AS reminder_at,NULL AS timezone,
                        status,duration_seconds,created_at,created_at AS updated_at,
                        1 AS occurrence_revision,due_at AS sort_at
-                FROM timers WHERE ? IN ('all','timer') AND (?='all' OR status=?)
+                FROM timers WHERE ? IN ('all','timer') AND (?='all' OR (?='upcoming' AND status='pending') OR status=?)
                 UNION ALL
                 SELECT 'calendar',id,id,title,title,reminder_at,start_at,end_at,reminder_at,timezone,
                        CASE WHEN reminder_fired=1 THEN 'reminded' ELSE 'scheduled' END,
                        NULL,created_at,updated_at,revision,start_at
                 FROM calendar WHERE ? IN ('all','calendar') AND
-                     (?='all' OR CASE WHEN reminder_fired=1 THEN 'reminded' ELSE 'scheduled' END=?)
+                     (?='all' OR (?='upcoming' AND COALESCE(end_at,start_at)>=?) OR CASE WHEN reminder_fired=1 THEN 'reminded' ELSE 'scheduled' END=?)
                 ORDER BY sort_at,source,id LIMIT ? OFFSET ?
-                """, (source, status, status, source, status, status, limit + 1, offset)).fetchall()
+                """, (source, status, status, status, source, status, status, _stamp(self._now()), status, limit + 1, offset)).fetchall()
             items = []
             for row in rows[:limit]:
                 item = dict(row)

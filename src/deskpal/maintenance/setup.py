@@ -40,7 +40,7 @@ FIELDS = {
     "expression_output_format": ("llm", "expression_output_format", "prompt", "DESKPAL_LLM_EXPRESSION_OUTPUT_FORMAT"),
     "workspace_dir": ("sandbox", "workspace_dir", "workspace", "DESKPAL_WORKSPACE_DIR"),
     "data_dir": ("storage", "data_dir", "data", "DESKPAL_DATA_DIR"),
-    "memory_mode": ("memory", "mode", "explicit_only", "DESKPAL_MEMORY_MODE"),
+    "memory_mode": ("memory", "mode", "automatic", "DESKPAL_MEMORY_MODE"),
     "embedding_provider": ("memory", "embedding_provider", "disabled", "DESKPAL_EMBEDDING_PROVIDER"),
     "model_cache_dir": ("memory", "model_cache_dir", "data/models/fastembed", "DESKPAL_MODEL_CACHE_DIR"),
 }
@@ -162,7 +162,7 @@ class SetupService:
                     raise MaintenanceError("invalid_config") from None
             elif not isinstance(value, str) or len(value) > 2048 or any(ord(c) < 32 for c in value):
                 raise MaintenanceError("invalid_config")
-        if "memory_mode" in values and values["memory_mode"] not in {"explicit_only", "candidate_review", "paused"}:
+        if "memory_mode" in values and values["memory_mode"] not in {"automatic", "explicit_only", "candidate_review", "paused"}:
             raise MaintenanceError("invalid_config")
         if "base_url" in values:
             try:

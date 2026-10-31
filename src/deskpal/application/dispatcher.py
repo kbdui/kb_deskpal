@@ -19,7 +19,7 @@ from deskpal.workflow.tasks import PersistentTaskManager
 from deskpal.workflow.store import canonical
 
 
-_RETURNABLE = frozenset({TaskStatus.WAITING, TaskStatus.NEEDS_REVIEW, TaskStatus.UNCERTAIN,
+_RETURNABLE = frozenset({TaskStatus.PAUSED, TaskStatus.AWAITING_INPUT, TaskStatus.WAITING, TaskStatus.NEEDS_REVIEW, TaskStatus.UNCERTAIN,
                          TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED})
 _TERMINAL = frozenset({TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED})
 
@@ -65,6 +65,8 @@ class SubmissionDispatcher:
         self._active_grants: tuple[frozenset[str], frozenset[str]] = (frozenset(), frozenset())
         self._control_revision = 0
         self._operations: dict[str, tuple[bool, frozenset[str], frozenset[str]]] = {}
+        self._internal: OrderedDict[str, Callable[[], None]] = OrderedDict()
+        self._internal_active = False
         self._results: OrderedDict[str, AgentResult] = OrderedDict()
         self._thread = Thread(target=self._work, name="deskpal-workflow", daemon=True)
         self._started = False
@@ -130,6 +132,15 @@ class SubmissionDispatcher:
         with self._condition:
             self._condition.notify_all()
 
+    def enqueue_internal(self, identity: str, operation: Callable[[], None]) -> None:
+        """同一个后台执行纯整理；不重入 Core，不生成用户聊天。"""
+        with self._condition:
+            self._accepting()
+            if len(self._internal) >= 32 and identity not in self._internal:
+                raise QueueFull('Internal work queue is full')
+            self._internal.setdefault(identity, operation)
+            self._condition.notify_all()
+
     @contextmanager
     def control(self) -> Iterator[None]:
         """Public short boundary: dispatcher control precedes workflow writes."""
@@ -171,7 +182,7 @@ class SubmissionDispatcher:
     def management(self) -> Iterator[None]:
         """Serialize short local management with claiming, never with control writes."""
         with self._condition:
-            if self._stop or self._active_id is not None or self._paused:
+            if self._stop or self._active_id is not None or self._internal_active or self._paused:
                 raise RuntimeError("Application is closing or an execution is active")
             self._paused = True
         try:
@@ -231,7 +242,7 @@ class SubmissionDispatcher:
                     "error_stage": None if self._failure is None else self._failure[0],
                     "error_type": None if self._failure is None else self._failure[1],
                     "active_task_id": self._active_id, "pending_operations": len(self._operations),
-                    "cached_results": len(self._results)}
+                    "cached_results": len(self._results), "internal_active": self._internal_active, "internal_pending": len(self._internal)}
 
     def _accepting(self) -> None:
         if self._failure is not None:
@@ -314,21 +325,33 @@ class SubmissionDispatcher:
                 task = self.tasks.claim_next()
                 self._prune_operations()
                 if task is None:
-                    self._condition.wait(0.2)
-                    continue
-                self._active_id = task.id
-                confirm, authorization, high_risk = self._operations.pop(
-                    task.id, (False, frozenset(), frozenset()))
-                self._active_confirmation = confirm
-                self._active_grants = (authorization, high_risk)
-                self._control_revision += 1
+                    if not self._internal:
+                        self._condition.wait(0.2)
+                        continue
+                    _, internal = self._internal.popitem(last=False)
+                    self._internal_active = True
+                else:
+                    self._active_id = task.id
+                    confirm, authorization, high_risk = self._operations.pop(
+                        task.id, (False, frozenset(), frozenset()))
+                    self._active_confirmation = confirm
+                    self._active_grants = (authorization, high_risk)
+                    self._control_revision += 1
+            if task is None:
+                try:
+                    internal()
+                finally:
+                    with self._condition:
+                        self._internal_active = False
+                        self._condition.notify_all()
+                continue
             try:
                 self._stage = "execution"
                 self._guard(task.id)
                 if confirm:
                     if not self.core.has_pending_plan(task.id):
                         snapshot = self.journal.get_plan(task.id)
-                        if snapshot is None or self.journal.attempts(task.id):
+                        if snapshot is None or any(item.status not in {"Succeeded", "Failed"} for item in self.journal.attempts(task.id)):
                             raise WorkflowBlocked("No intact unstarted plan remains for confirmation")
                         # Only the sole execution worker restores Core state;
                         # acceptance can queue safely while another task runs.
@@ -348,7 +371,7 @@ class SubmissionDispatcher:
                 current = self.tasks.get(task.id)
                 if current is not None and current.status != result.status:
                     result = stored_result(current, self.journal)
-                status = "Blocked" if result.status in {TaskStatus.WAITING, TaskStatus.NEEDS_REVIEW,
+                status = "Blocked" if result.status in {TaskStatus.PAUSED, TaskStatus.AWAITING_INPUT, TaskStatus.WAITING, TaskStatus.NEEDS_REVIEW,
                                                         TaskStatus.UNCERTAIN} else "Finished"
                 self.tasks.finish_submission(task.id, status=status)
                 try:

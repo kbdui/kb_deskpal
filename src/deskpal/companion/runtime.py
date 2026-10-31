@@ -1,587 +1,391 @@
-"""Bounded local Persona/Affect runtime.
+"""开放角色卡与五层状态。含义由模型产生，程序只落实归属、期限和修订。"""
 
-The compatibility payload and affect reducer remain version 1; SQLite schema 2
-adds isolated interaction settings. A receipt is retained for the lifetime
-of the database, including resets. At 100,000 distinct terminal task IDs the
-runtime refuses new effects instead of evicting deduplication keys. Only the
-latest 32 persona versions are retained. There are at most 256 budget rows in a
-rolling hour and at most 32 admitted outcomes per rolling minute. Current
-signal evidence is bounded in memory; only explicit settings are persisted.
-
-All mutations share an RLock and BEGIN IMMEDIATE transaction. State, receipt,
-window debit and revision commit together. Read projections never debit a
-window or persist a decayed state. A caller must catch CompanionStorageError
-and preserve the authoritative task outcome; this service cannot run tools.
-"""
-
-from __future__ import annotations
-
+from collections.abc import Callable, Iterable, Mapping
 from copy import deepcopy
-from collections.abc import Callable
 from datetime import datetime, timedelta
 from hashlib import sha256
-import json
 from pathlib import Path
-import sqlite3
-import threading
+from threading import RLock
 import time
+import math
 from typing import Any
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+from uuid import uuid4
+from zoneinfo import ZoneInfo
 
-from .policy import PRESETS, STYLE_KEYS, baseline, expression
-from .interaction import InteractionState
-from .interaction_runtime import InteractionOperations
-from .constants import (SCHEMA_VERSION, REDUCER_VERSION, RECEIPT_LIMIT, PERSONA_HISTORY_LIMIT,
-                        MINUTE_COUNT_LIMIT, HOUR_COUNT_LIMIT, MAX_OFFLINE_SECONDS, WINDOW_CAPS, HALF_LIVES, finite as _finite)
 from .errors import (CompanionClosedError as CompanionClosedError, CompanionError as CompanionError,
-                     CompanionRevisionConflict as CompanionRevisionConflict, CompanionStorageError as CompanionStorageError,
+                     CompanionRevisionConflict as CompanionRevisionConflict,
+                     CompanionStorageError as CompanionStorageError,
                      CompanionValidationError as CompanionValidationError)
-from .models import IDENTITY_DEFAULTS
-from .reducer import values_at, outcome_delta
-from .repository import STORAGE_SCHEMA_VERSION, initial_interaction, load_interaction, save_interaction
+from .repository import RoleRepository, encode, initial
 
-class CompanionRuntime(InteractionOperations):
-    """Qt-free expression service; ``None`` opens an ephemeral in-memory DB.
+LAYERS = ("user_understanding", "interaction_approach")
+SCOPES = ("turn", "conversation", "day", "persistent")
 
-    ``command`` returns the same snapshot shape as ``snapshot``. Validation,
-    stale revisions, closed lifecycle and persistence failures are typed
-    exceptions. The application owns fallback presentation and diagnostics.
-    """
 
-    def __init__(
-        self,
-        db_path: Path | str | None = None,
-        *,
-        timezone: str = "Asia/Shanghai",
-        wall_clock: Callable[[], float] | None = None,
-        monotonic_clock: Callable[[], float] | None = None,
-    ) -> None:
-        if not isinstance(timezone, str) or len(timezone) > 128:
-            raise CompanionValidationError("companion_timezone_invalid")
-        try:
-            self._timezone = ZoneInfo(timezone)
-        except (ZoneInfoNotFoundError, ValueError):
-            raise CompanionValidationError("companion_timezone_invalid") from None
-        if (wall_clock is not None and not callable(wall_clock)) or (monotonic_clock is not None and not callable(monotonic_clock)):
-            raise CompanionValidationError("companion_clock_invalid")
-        self._wall_clock = wall_clock if wall_clock is not None else time.time
-        self._monotonic_clock = monotonic_clock if monotonic_clock is not None else time.monotonic
-        self._lock = threading.RLock()
+def _text(value: Any, limit: int, *, empty: bool = False) -> str:
+    if (not isinstance(value, str) or (not empty and not value.strip())
+            or len(value.encode("utf-8")) > limit or "\x00" in value):
+        raise CompanionValidationError("companion_text_invalid")
+    return value.strip()
+
+
+class CompanionRuntime:
+    def __init__(self, db_path: Path | str | None = None, *, timezone: str = "Asia/Shanghai",
+                 wall_clock: Callable[[], float] | None = None,
+                 monotonic_clock: Callable[[], float] | None = None) -> None:
+        self._zone = ZoneInfo(timezone)
+        self._clock = wall_clock or time.time
+        self._lock = RLock()
         self._closed = False
-        self._warnings: list[str] = []
-        self._session_preferences: dict[str, Any] = {}
-        self._cue: tuple[str, float] | None = None
-        self._interaction = InteractionState()
-        self._session_policies: dict[str, str] = {}
-        self._event_time_tolerance = 0.001
-        # Only the system clocks have discoverable quantization. Injected
-        # clocks keep their original sampling contract and serialization bound.
-        sample_start = self._monotonic_clock() if wall_clock is None and monotonic_clock is None else None
-        self._wall_start = self._wall_clock()
-        self._mono_start = self._monotonic_clock()
-        if not _finite(self._wall_start, 0, 1e12) or not _finite(self._mono_start, 0, 1e12):
-            raise CompanionValidationError("companion_clock_invalid")
-        if sample_start is not None and _finite(sample_start, 0, 1e12):
-            wall_resolution = time.get_clock_info("time").resolution
-            mono_resolution = time.get_clock_info("monotonic").resolution
-            if (_finite(wall_resolution, 0, 1) and wall_resolution > 0
-                    and _finite(mono_resolution, 0, 1) and mono_resolution > 0):
-                bracket = self._mono_start - sample_start
-                # The bracket bounds startup sampling delay; its own measured
-                # duration can undercount by one monotonic tick. Windows 3.11
-                # clocks can each quantize to 15.625ms, despite float seconds.
-                uncertainty = wall_resolution + 2 * mono_resolution + bracket
-                if 0 <= bracket <= wall_resolution + mono_resolution and uncertainty < 1:
-                    self._event_time_tolerance = max(self._event_time_tolerance, uncertainty)
-                # One second is this application's conservative calibration
-                # limit. A pause or unusable resolution grants no extra future
-                # allowance; unknown age cannot become fresh affect.
-        self._initialize_storage(db_path)
+        self._repository = RoleRepository(db_path, validator=self._validate)
+        self._validate(self._repository.load())
 
-    def _now(self) -> float:
-        # Stable elapsed time throughout this process, immune to wall-clock edits.
-        monotonic_now = self._monotonic_clock()
-        if not _finite(monotonic_now, 0, 1e12):
-            raise CompanionStorageError("companion_clock_invalid")
-        now = self._wall_start + max(0.0, monotonic_now - self._mono_start)
-        if not _finite(now, 0, 1e12):
-            raise CompanionStorageError("companion_clock_invalid")
-        return now
-
-    def _warn(self, warning: str) -> None:
-        if warning not in self._warnings:
-            self._warnings = (self._warnings + [warning])[-8:]
-
-    def _restore_clock(self, state: dict[str, Any]) -> None:
-        db = self._db()
-        latest = db.execute("SELECT MAX(accepted_utc) FROM budget").fetchone()[0]
-        reference = max(state["last_seen_utc"], state["anchor_utc"], latest or 0.0)
-        elapsed = self._wall_start - reference
-        if elapsed < 0 or elapsed > MAX_OFFLINE_SECONDS:
-            # Unknown ages cannot refill a window: retain every budget debit
-            # for a full fresh window using the new process's monotonic time.
-            db.execute("UPDATE budget SET accepted_utc=?", (self._wall_start,))
-            self._neutralize(state, self._wall_start)
-            if int(db.execute("PRAGMA user_version").fetchone()[0]) == STORAGE_SCHEMA_VERSION:
-                self._neutralize_cloud(state, self._wall_start)
-                config = load_interaction(db)
-                for row in config["cloud_budget"]:
-                    row[0] = self._wall_start
-                save_interaction(db, config)
-            state["preferences"].pop("today", None)
-            state["revision"] += 1
-            state["reset_epoch"] += 1
-            state["last_seen_utc"] = self._wall_start
-            self._save(state)
-            self._warn("companion_clock_anomaly_budget_retained")
-        else:
-            db.execute("DELETE FROM budget WHERE accepted_utc<=?", (self._wall_start - 3600,))
+    def _load(self) -> dict[str, Any]:
+        if self._closed:
+            raise CompanionClosedError("companion_closed")
+        value = self._repository.load()
+        self._validate(value)
+        return value
 
     @staticmethod
-    def _neutralize(state: dict[str, Any], now: float) -> None:
-        state["values"] = list(baseline(state["persona"]["style"]))
-        state["anchor_utc"] = now
-        state["outcome_mode"] = "neutral"
-        state["outcome_mode_until"] = 0.0
-
-    @staticmethod
-    def _values(state: dict[str, Any], now: float) -> list[float]:
-        return values_at(state, now)
-
-    def _mode(self, state: dict[str, Any], now: float) -> str:
-        if not state["enabled"] or not state["emotions_enabled"]:
-            return "neutral"
-        if self._cue is not None and self._cue[1] > now:
-            return self._cue[0]
-        if state["outcome_mode_until"] > now:
-            return str(state["outcome_mode"])
-        return "neutral"
-
-    def _preferences(self, state: dict[str, Any], now: float) -> dict[str, Any]:
-        merged: dict[str, Any] = {}
-        for scope in ("persistent", "today"):
-            entry = state["preferences"].get(scope, {})
-            if scope == "today" and entry.get("expires_at", 0) <= now:
-                continue
-            merged.update({k: v for k, v in entry.items() if k != "expires_at"})
-        merged.update(self._session_preferences)
-        return merged
-
-    def _snapshot(self, state: dict[str, Any], now: float) -> dict[str, Any]:
-        active = state["enabled"] and state["emotions_enabled"]
-        values = self._values(state, now) if active else list(baseline(state["persona"]["style"]))
-        mode = self._mode(state, now)
-        scoped: dict[str, Any] = {}
-        for scope, entry in state["preferences"].items():
-            if scope != "today" or entry["expires_at"] > now:
-                scoped[scope] = deepcopy(entry)
-        if self._session_preferences:
-            scoped["session"] = dict(self._session_preferences)
-        cue = self._cue
-        return {
-            "schema_version": SCHEMA_VERSION,
-            "reducer_version": REDUCER_VERSION,
-            "revision": state["revision"],
-            "reset_epoch": state["reset_epoch"],
-            "enabled": state["enabled"],
-            "emotions_enabled": state["emotions_enabled"],
-            "persona": deepcopy(state["persona"]),
-            "persona_versions": [row[0] for row in self._db().execute("SELECT version FROM persona_versions ORDER BY version DESC LIMIT ?", (PERSONA_HISTORY_LIMIT,))],
-            "affect": {
-                "valence": values[0], "arousal": values[1], "mood": values[2],
-                "mode": mode,
-                "expression": expression(max(-1.0, min(1.0, values[0] + 0.2 * values[2])), mode) if active else "neutral",
-            },
-            "preferences": scoped,
-            "constraints": {"humor_allowed": self._preferences(state, now).get("humor_allowed", True)},
-            "cue": {"mode": cue[0], "remaining_seconds": max(0, int(cue[1] - now))} if cue and cue[1] > now else None,
-            "warnings": list(self._warnings),
-            "limits": {"receipts": RECEIPT_LIMIT, "persona_versions": PERSONA_HISTORY_LIMIT,
-                       "minute_events": MINUTE_COUNT_LIMIT, "hour_events": HOUR_COUNT_LIMIT},
-            "timezone": self._timezone.key,
-        }
+    def _validate(value: dict[str, Any]) -> None:
+        card = value["card"]
+        if (set(card) != {"id", "revision", "text", "use_policy", "origin"}
+                or not isinstance(card["id"], str) or len(card["id"]) != 32
+                or type(card["revision"]) is not int or card["revision"] < 1
+                or card["use_policy"] not in ("local_only", "cloud_allowed")
+                or card["origin"] not in ("default", "user", "legacy_import")):
+            raise CompanionStorageError("companion_state_invalid")
+        _text(card["text"], 8192)
+        for layer in (*LAYERS, "habits"):
+            if len(value[layer]) > 64:
+                raise CompanionStorageError("companion_state_invalid")
+            for row in value[layer]:
+                if not isinstance(row, dict):
+                    raise CompanionStorageError("companion_state_invalid")
+                for field in ("id", "content", "reason", "nature", "scope", "use_policy", "source"):
+                    if field not in row:
+                        raise CompanionStorageError("companion_state_invalid")
+                _text(row["content"], 1024)
+                _text(row["reason"], 1024, empty=True)
+                if (row["scope"] not in SCOPES or row["nature"] not in ("explicit", "inferred")
+                        or row["use_policy"] not in ("local_only", "cloud_allowed")
+                        or not isinstance(row["source"], dict)
+                        or type(row.get("created_at")) not in (int, float)
+                        or not 0 <= row["created_at"] <= 1e12
+                        or (row.get("expires_at") is not None and
+                            (type(row["expires_at"]) not in (int, float) or not 0 <= row["expires_at"] <= 1e12))):
+                    raise CompanionStorageError("companion_state_invalid")
+        emotion = value["emotion"]
+        if emotion is not None:
+            if not isinstance(emotion, dict) or set(emotion) != {"description_intensity", "reason_sources", "time_scope", "uncertainty", "source", "expires_at", "use_policy"}:
+                raise CompanionStorageError("companion_state_invalid")
+            for field in ("description_intensity", "reason_sources", "time_scope", "uncertainty"):
+                _text(emotion[field], 2048)
 
     def snapshot(self) -> dict[str, Any]:
         with self._lock:
-            try:
-                return self._snapshot(self._load(), self._now())
-            except (sqlite3.Error, OSError, ValueError, TypeError, KeyError, OverflowError):
-                self._warn("companion_storage_unavailable")
-                raise CompanionStorageError("companion_storage_unavailable") from None
+            state = self._load()
+            # 仅为桌宠旧表现 DTO 提供中性投影；它不是另一份人格或情绪存储。
+            return {"schema_version": 1, "revision": state["revision"], "reset_epoch": state["reset_epoch"],
+                    "enabled": True, "emotions_enabled": True,
+                    "persona": {"version": state["card"]["revision"], "preset": "balanced",
+                                "style": {"formality": .5, "warmth": .5, "humor": .2,
+                                          "verbosity": .5, "expressiveness": .4, "curiosity": .3}},
+                    "persona_versions": [], "affect": {"valence": 0., "arousal": 0., "mood": 0.,
+                    "mode": "neutral", "expression": "neutral"}, "warnings": [],
+                    "character_card": deepcopy(state["card"])}
 
-    @staticmethod
-    def _fields(parameters: dict[str, Any], allowed: set[str]) -> None:
-        if set(parameters) - allowed:
-            raise CompanionValidationError("companion_unknown_field")
+    def interaction_snapshot(self) -> dict[str, Any]:
+        with self._lock:
+            value = self._load()
+            return {"schema_version": 2, "revision": value["revision"], "reset_epoch": value["reset_epoch"],
+                    "character_card": deepcopy(value["card"]), "habits": deepcopy(value["habits"]),
+                    "current_emotion": deepcopy(value["emotion"]),
+                    "user_understanding": deepcopy(value["user_understanding"]),
+                    "interaction_approach": deepcopy(value["interaction_approach"]),
+                    "learning_status": "model_feedback"}
 
-    @staticmethod
-    def _revision(parameters: dict[str, Any], state: dict[str, Any]) -> None:
-        expected = parameters.get("expected_revision")
-        if type(expected) is not int or expected < 0:
-            raise CompanionValidationError("companion_expected_revision_required")
-        if expected != state["revision"]:
-            raise CompanionRevisionConflict("companion_revision_conflict")
+    def context(self, conversation_id: str, conversation_epoch: int, task_id: str, *,
+                allow_restricted: bool = False) -> dict[str, Any]:
+        with self._lock:
+            state = self._load()
+            now = self._clock()
+            def active(row: dict[str, Any]) -> bool:
+                if row.get("expires_at") is not None and row["expires_at"] <= now:
+                    return False
+                if row["scope"] == "turn":
+                    return bool(row["source"].get("task_id") == task_id)
+                if row["scope"] == "conversation":
+                    return bool(row["source"].get("conversation_id") == conversation_id
+                                and row["source"].get("conversation_epoch") == conversation_epoch)
+                return True
+            card = deepcopy(state["card"])
+            if not allow_restricted and card["use_policy"] == "local_only":
+                raise CompanionValidationError("旧角色卡仅限本地使用，请在设置中查看并重新保存后再交给当前模型。")
+            def rows(layer: str) -> list[dict[str, Any]]:
+                return [deepcopy(row) for row in state[layer] if active(row) and
+                        (allow_restricted or row["use_policy"] == "cloud_allowed")]
+            emotion = state["emotion"]
+            if emotion is not None and ((emotion.get("expires_at") is not None and emotion["expires_at"] <= now)
+                    or (not allow_restricted and emotion["use_policy"] == "local_only")):
+                emotion = None
+            if emotion is not None:
+                emotion = deepcopy(emotion)
+                # 时间只减弱影响，不改写事件含义，不把担忧事项当作已经解决。
+                timing = emotion['source']
+                since = timing.get('emotion_updated_at', 0.0)
+                half_life = timing.get('emotion_half_life_seconds', 21600.0)
+                if (type(since) not in (int, float) or not math.isfinite(since)
+                        or type(half_life) not in (int, float) or not math.isfinite(half_life)
+                        or not 900 <= half_life <= 604800):
+                    raise CompanionStorageError('companion_emotion_timing_invalid')
+                emotion['influence_weight'] = 2.0 ** (-min(1074.0, max(0.0, now - since) / half_life))
+                expiry = emotion.get('expires_at')
+                if expiry is not None and expiry > since:
+                    emotion['influence_weight'] *= min(1.0, max(0.0, (expiry - now) / (expiry - since)))
+                emotion['elapsed_seconds'] = max(0.0, now - since)
+            result = {"role_id": card["id"], "revision": state["revision"],
+                      "character_card": card, "learned_habits": rows("habits"),
+                      "current_emotion": deepcopy(emotion), "user_understanding": rows("user_understanding"),
+                      "interaction_approach": rows("interaction_approach"),
+                      "expression_adjustment": "由模型结合上述各层及当前明确要求形成；不另存派生模式。"}
+            if len(encode(result).encode("utf-8")) > 32768:
+                raise CompanionValidationError("角色上下文过大，需要先整理已有要求。")
+            return result
 
     def command(self, action: str, **parameters: Any) -> dict[str, Any]:
-        command_id = parameters.pop("command_id", None)
-        fingerprint = ""
+        allowed = {"character_card": {"text", "use_policy"}, "reset": {"target"}}
+        if action not in allowed or set(parameters) - (allowed[action] | {"expected_revision", "command_id"}):
+            raise CompanionValidationError("旧人格预设、短时模式及候选入口已撤除，请使用角色卡或聊天。")
+        command_id = parameters.get("command_id")
         if command_id is not None:
-            if not isinstance(command_id, str) or not command_id.strip() or len(command_id.encode("utf-8")) > 256:
-                raise CompanionValidationError("companion_command_id_invalid")
-            try:
-                canonical = json.dumps({"action": action, "parameters": parameters}, sort_keys=True,
-                                       ensure_ascii=True, allow_nan=False, separators=(",", ":"))
-                if len(canonical.encode("utf-8")) > 8192:
-                    raise ValueError
-                fingerprint = sha256(canonical.encode("utf-8")).hexdigest()
-            except (ValueError, TypeError, OverflowError):
-                raise CompanionValidationError("companion_command_invalid") from None
-        with self._lock:
-            db = self._db()
-            previous_session = dict(self._session_preferences)
-            previous_cue = self._cue
-            previous_interaction = deepcopy(self._interaction)
-            previous_policies = dict(self._session_policies)
-            try:
-                db.execute("BEGIN IMMEDIATE")
-                if command_id is not None:
-                    receipt = db.execute("SELECT fingerprint FROM command_receipts WHERE command_id=?", (command_id,)).fetchone()
-                    if receipt is not None:
-                        if receipt[0] != fingerprint:
-                            raise CompanionValidationError("companion_command_id_conflict")
-                        # Replay the acknowledgement without replaying config,
-                        # CAS, cue TTL, candidate confirmation or a reset. Use a
-                        # fresh read projection so old cues cannot reappear.
-                        result = self._snapshot(self._load(), self._now())
-                        db.execute("COMMIT")
-                        return result
-                    if db.execute("SELECT COUNT(*) FROM command_receipts").fetchone()[0] >= RECEIPT_LIMIT:
-                        raise CompanionValidationError("companion_command_capacity_reached")
-                state = self._load()
-                self._revision(parameters, state)
-                now = self._now()
-                self._apply_command(state, action, parameters, now)
-                self._sync_identity_version(state)
-                state["revision"] += 1
-                state["last_seen_utc"] = now
-                self._save(state)
-                # Materialize the bounded response before commit so a query
-                # failure cannot turn a committed command into an error reply.
-                result = self._snapshot(state, now)
-                if command_id is not None:
-                    db.execute("INSERT INTO command_receipts VALUES (?, ?)", (command_id, fingerprint))
-                db.execute("COMMIT")
-                return result
-            except Exception as error:
-                self._session_preferences, self._cue = previous_session, previous_cue
-                self._interaction, self._session_policies = previous_interaction, previous_policies
-                self._rollback()
-                if isinstance(error, (sqlite3.Error, OSError, ValueError, TypeError, KeyError, OverflowError)) and not isinstance(error, CompanionError):
-                    self._warn("companion_storage_unavailable")
-                    raise CompanionStorageError("companion_storage_unavailable") from None
-                raise
+            _text(command_id, 256)
+        fingerprint = sha256(encode({"action": action, **parameters}).encode("utf-8")).hexdigest()
+        with self._lock, self._repository.transaction():
+            state = self._load()
+            if command_id is not None:
+                prior = self._repository.connection.execute("SELECT fingerprint FROM role_receipt WHERE id=?", (command_id,)).fetchone()
+                if prior:
+                    if prior[0] != fingerprint:
+                        raise CompanionValidationError("companion_command_id_conflict")
+                    return self.snapshot()
+            if type(parameters.get("expected_revision")) is not int or parameters["expected_revision"] != state["revision"]:
+                raise CompanionRevisionConflict("companion_revision_conflict")
+            if action == "character_card":
+                policy = parameters.get("use_policy", "cloud_allowed")
+                if policy not in ("cloud_allowed", "local_only"):
+                    raise CompanionValidationError("companion_use_policy_invalid")
+                state["card"].update(text=_text(parameters.get("text"), 8192),
+                                     revision=state["card"]["revision"] + 1,
+                                     use_policy=policy, origin="user")
+            else:
+                target = parameters.get("target")
+                if target not in ("affect", "persona", "all"):
+                    raise CompanionValidationError("companion_reset_target_invalid")
+                state["emotion"] = None
+                if target in ("persona", "all"):
+                    replacement = initial()["card"]
+                    replacement.update(id=state["card"]["id"], revision=state["card"]["revision"] + 1)
+                    state["card"] = replacement
+                    state["habits"] = []
+                if target == "all":
+                    state["user_understanding"], state["interaction_approach"] = [], []
+                state["reset_epoch"] += 1
+            state["revision"] += 1
+            self._repository.save(state)
+            if command_id is not None:
+                self._receipt(command_id, fingerprint)
+        return self.snapshot()
 
-    def _apply_command(self, state: dict[str, Any], action: str, p: dict[str, Any], now: float) -> None:
-        common = {"expected_revision"}
-        if action in ("cloud_permissions", "identity", "confirm_candidate", "reject_candidate", "clear_cue", "clear_constraints"):
-            self._interaction_command(state, action, p, now)
-            return
-        if action == "configure":
-            self._fields(p, common | {"enabled", "emotions_enabled", "preset", "style"})
-            for flag in ("enabled", "emotions_enabled"):
-                if flag in p:
-                    if type(p[flag]) is not bool:
-                        raise CompanionValidationError("companion_boolean_required")
-                    state[flag] = p[flag]
-            changed = "preset" in p or "style" in p
-            if "preset" in p:
-                if not isinstance(p["preset"], str) or p["preset"] not in PRESETS:
-                    raise CompanionValidationError("companion_preset_invalid")
-                state["persona"]["preset"] = p["preset"]
-                state["persona"]["style"] = dict(PRESETS[p["preset"]])
-            if "style" in p:
-                style_edits = p["style"]
-                if not isinstance(style_edits, dict) or not set(style_edits) <= set(STYLE_KEYS):
-                    raise CompanionValidationError("companion_style_invalid")
-                if not all(_finite(value, 0, 1) for value in style_edits.values()):
-                    raise CompanionValidationError("companion_style_invalid")
-                state["persona"]["style"].update(style_edits)
+    def _receipt(self, identity: str, fingerprint: str) -> None:
+        db = self._repository.connection
+        if db.execute("SELECT COUNT(*) FROM role_receipt").fetchone()[0] >= 100000:
+            raise CompanionStorageError("companion_receipt_capacity_reached")
+        db.execute("INSERT INTO role_receipt VALUES(?,?)", (identity, fingerprint))
+
+    def apply_understanding(self, task_id: str, entries: Iterable[Mapping[str, Any]], *,
+                            expected_revision: int, conversation_id: str, conversation_epoch: int,
+                            sequence: int, use_policy: str) -> dict[str, Any]:
+        """采用一次模型理解；真实来源由宿主绑定，模型不能伪造消息编号。"""
+        entries = tuple(entries)
+        if len(entries) > 8 or use_policy not in ("cloud_allowed", "local_only"):
+            raise CompanionValidationError("companion_understanding_invalid")
+        receipt = "understand:" + _text(task_id, 200)
+        fingerprint = sha256(encode(list(entries)).encode("utf-8")).hexdigest()
+        with self._lock, self._repository.transaction():
+            state = self._load()
+            prior = self._repository.connection.execute("SELECT fingerprint FROM role_receipt WHERE id=?", (receipt,)).fetchone()
+            if prior:
+                if prior[0] != fingerprint:
+                    raise CompanionRevisionConflict("companion_understanding_already_processed")
+                return self.interaction_snapshot()
+            if state["revision"] != expected_revision:
+                raise CompanionRevisionConflict("companion_revision_conflict")
+            now = self._clock()
+            original = encode(state)
+            # 单次记录完成后不影响以后请求；过期项在下一次写入时回收。
+            for layer in LAYERS:
+                state[layer] = [row for row in state[layer] if row["scope"] != "turn" and
+                                (row.get("expires_at") is None or row["expires_at"] > now)]
+            visible = self.context(conversation_id, conversation_epoch, task_id, allow_restricted=True)
+            replaceable = {row["id"] for layer in LAYERS for row in visible[layer]}
+            for raw in entries:
+                if (set(raw) != {"layer", "content", "reason", "nature", "scope", "expires_at", "replaces"}
+                        or raw["layer"] not in LAYERS or raw["scope"] not in SCOPES
+                        or raw["nature"] not in ("explicit", "inferred")
+                        or not isinstance(raw["replaces"], list) or len(raw["replaces"]) > 16
+                        or any(identity not in replaceable for identity in raw["replaces"])):
+                    raise CompanionValidationError("companion_understanding_invalid")
+                # 长期推测只能交给 P4 缓冲，不能冒充用户的明确长期约定。
+                if raw["scope"] == "persistent" and raw["nature"] != "explicit":
+                    raise CompanionValidationError("长期推测由反馈缓冲复核，本轮未将它作为明确长期约定保存。")
+                expires = raw["expires_at"]
+                if expires is not None:
+                    if not isinstance(expires, str):
+                        raise CompanionValidationError("companion_expiry_invalid")
+                    parsed = datetime.fromisoformat(expires)
+                    if parsed.tzinfo is None or not now < parsed.timestamp() <= now + 366 * 86400:
+                        raise CompanionValidationError("companion_expiry_invalid")
+                    expires = parsed.timestamp()
+                if raw["scope"] == "day":
+                    local = datetime.fromtimestamp(now, self._zone)
+                    midnight = datetime.combine(local.date() + timedelta(days=1), datetime.min.time(), self._zone).timestamp()
+                    expires = min(expires or midnight, midnight)
+                if raw["scope"] in ("turn", "conversation", "persistent") and raw["expires_at"] is None:
+                    expires = None
+                layer = raw["layer"]
+                for key in LAYERS:
+                    state[key] = [row for row in state[key] if row["id"] not in raw["replaces"]]
+                content = _text(raw["content"], 1024, empty=True)
+                if content:
+                    state[layer].append({"id": uuid4().hex, "content": content,
+                        "reason": _text(raw["reason"], 1024, empty=True), "nature": raw["nature"],
+                        "scope": raw["scope"], "created_at": now, "expires_at": expires,
+                        "use_policy": use_policy, "source": {"kind": "dialogue_turn", "task_id": task_id,
+                            "id": task_id + ":user", "revision": sequence, "conversation_id": conversation_id,
+                            "conversation_epoch": conversation_epoch}})
+            self._validate(state)
+            if encode(state) != original:
+                state["revision"] += 1
+            self._repository.save(state)
+            self._receipt(receipt, fingerprint)
+        return self.interaction_snapshot()
+
+    def clear_conversation(self, conversation_id: str) -> None:
+        with self._lock, self._repository.transaction():
+            state = self._load()
+            changed = False
+            for key in LAYERS:
+                kept = [row for row in state[key] if not (row["scope"] in ("turn", "conversation") and
+                        row["source"].get("conversation_id") == conversation_id)]
+                changed = changed or kept != state[key]
+                state[key] = kept
+            records = [*state['habits'], *state['user_understanding'], *state['interaction_approach']]
+            if state['emotion']:
+                records.append(state['emotion'])
+            for record in records:
+                for ref in record['source'].get('refs', []):
+                    if ref.get('kind') == 'dialogue_turn' and ref.get('conversation_id') == conversation_id and ref.get('available', True):
+                        ref['available'] = False
+                        changed = True
             if changed:
-                self._persona_version(state)
-            # Config changes have no affect reward and cannot preserve a cue
-            # from a previously enabled presentation generation.
-            self._neutralize(state, now)
-            self._cue = None
-            if "preset" in p or "enabled" in p or "emotions_enabled" in p:
-                self._neutralize_cloud(state, now)
-            if p.get("enabled") is False or p.get("emotions_enabled") is False:
-                self._interaction.cues.clear()
-                self._interaction.candidates.clear()
-                self._interaction.prepared.clear()
-                self._interaction.epoch += 1
-            state["reset_epoch"] += 1
-        elif action == "rollback":
-            self._fields(p, common | {"persona_version"})
-            version = p.get("persona_version")
-            if type(version) is not int or version < 1:
-                raise CompanionValidationError("companion_persona_version_invalid")
-            row = self._db().execute("SELECT payload FROM persona_versions WHERE version=?", (version,)).fetchone()
-            if row is None:
-                raise CompanionValidationError("companion_persona_version_unavailable")
-            if not isinstance(row[0], str) or len(row[0]) > 2048:
-                raise CompanionStorageError("companion_state_invalid")
-            state["persona"] = json.loads(row[0])
-            self._validate_state(state)
-            config = load_interaction(self._db())
-            old_identity = config["identity_versions"].get(str(version), {"identity": dict(IDENTITY_DEFAULTS), "use_policy": "local_only"})
-            config["identity"] = deepcopy(old_identity["identity"])
-            config["identity_use_policy"] = old_identity["use_policy"]
-            save_interaction(self._db(), config)
-            self._persona_version(state)
-            self._neutralize(state, now)
-            self._cue = None
-            self._neutralize_cloud(state, now)
-            state["reset_epoch"] += 1
-        elif action == "reset":
-            self._fields(p, common | {"target"})
-            target = p.get("target", "affect")
-            if target not in ("affect", "persona", "all"):
-                raise CompanionValidationError("companion_reset_target_invalid")
-            if target in ("persona", "all"):
-                state["persona"] = {"version": 1, "preset": "balanced", "style": dict(PRESETS["balanced"])}
-                self._persona_version(state)
-            if target == "all":
-                state["preferences"] = {}
-                self._session_preferences.clear()
-                old_budget = load_interaction(self._db())["cloud_budget"]
-                config = initial_interaction()
-                config["cloud_budget"] = old_budget
-                save_interaction(self._db(), config)
-            elif target == "persona":
-                config = load_interaction(self._db())
-                config["identity"] = dict(IDENTITY_DEFAULTS)
-                config["identity_use_policy"] = "local_only"
-                save_interaction(self._db(), config)
-            self._neutralize(state, now)
-            self._cue = None
-            if target == "all":
-                self._interaction.clear()
-                self._session_policies.clear()
-            else:
-                self._interaction.cues.clear()
-                self._interaction.candidates.clear()
-                self._interaction.prepared.clear()
-                self._interaction.epoch += 1
-            self._neutralize_cloud(state, now)
-            state["reset_epoch"] += 1
-        elif action == "preference":
-            self._fields(p, common | {"scope", "verbosity", "humor_allowed", "followup_allowed", "conversation_id", "use_policy"})
-            scope = p.get("scope")
-            if scope not in ("session", "today", "persistent"):
-                raise CompanionValidationError("companion_scope_invalid")
-            preference_edits: dict[str, Any] = {}
-            if "verbosity" in p:
-                if p["verbosity"] not in ("brief", "normal", "detailed"):
-                    raise CompanionValidationError("companion_verbosity_invalid")
-                preference_edits["verbosity"] = p["verbosity"]
-            if "humor_allowed" in p:
-                if type(p["humor_allowed"]) is not bool:
-                    raise CompanionValidationError("companion_boolean_required")
-                preference_edits["humor_allowed"] = p["humor_allowed"]
-            if "followup_allowed" in p:
-                if type(p["followup_allowed"]) is not bool:
-                    raise CompanionValidationError("companion_boolean_required")
-                preference_edits["followup_allowed"] = p["followup_allowed"]
-            if not preference_edits:
-                raise CompanionValidationError("companion_preference_required")
-            policy = p.get("use_policy", "cloud_allowed")
-            conversation_id = p.get("conversation_id", "default")
-            self._interaction_identity(conversation_id, policy)
-            config = load_interaction(self._db())
-            for key, value in preference_edits.items():
-                self._set_interaction_preference(state, config, key, value, scope, conversation_id,
-                                                 policy, "explicit_configuration", now)
-            save_interaction(self._db(), config)
-            # Original snapshot has only its original preference vocabulary.
-            preference_edits = {k: v for k, v in preference_edits.items() if k in ("verbosity", "humor_allowed")}
-            if scope == "session":
-                if conversation_id == "default":
-                    self._session_preferences.update(preference_edits)
-                    self._session_policies.update(dict.fromkeys(preference_edits, policy))
-            else:
-                old = state["preferences"].get(scope, {})
-                if scope == "today" and old.get("expires_at", 0) <= now:
-                    old = {}
-                entry = {**old, **preference_edits}
-                if scope == "today":
-                    local = datetime.fromtimestamp(now, self._timezone)
-                    tomorrow = local.date() + timedelta(days=1)
-                    midnight = datetime.combine(tomorrow, datetime.min.time(), tzinfo=self._timezone)
-                    entry["expires_at"] = min(now + 86400, midnight.timestamp())
-                state["preferences"][scope] = entry
-        elif action == "cue":
-            self._fields(p, common | {"mode", "ttl_seconds", "conversation_id", "use_policy"})
-            mode = p.get("mode")
-            ttl = p.get("ttl_seconds", 1800)
-            conversation_id, policy = p.get("conversation_id", "default"), p.get("use_policy", "cloud_allowed")
-            self._interaction_identity(conversation_id, policy)
-            if mode not in ("neutral", "supportive", "focused"):
-                raise CompanionValidationError("companion_cue_invalid")
-            if type(ttl) is not int or not 1 <= ttl <= 1800:
-                raise CompanionValidationError("companion_cue_ttl_invalid")
-            if mode != "neutral" and conversation_id not in self._interaction.cues and len(self._interaction.cues) >= 4:
-                raise CompanionValidationError("companion_cue_capacity_reached")
-            if conversation_id == "default":
-                self._cue = None if mode == "neutral" else (mode, now + ttl)
-            self._interaction.cues.pop(conversation_id, None)
-            self._interaction.epoch += 1
-            self._interaction.prepared.clear()
-            self._interaction.candidates.clear()
-            if mode != "neutral":
-                self._interaction.cues[conversation_id] = {"mode": mode, "evidence_kind": "explicit_configuration",
-                    "source_ref": "explicit_configuration", "span": None, "use_policy": policy,
-                    "expires_at": now + ttl, "generation": self._interaction.epoch}
-        else:
-            raise CompanionValidationError("companion_action_unknown")
-
-    def record_outcome(self, task_id: str, status: str, *, tool_success: bool | None = None,
-                       use_policy: str = "cloud_allowed", occurred_at: float | None = None) -> None:
-        """Consume a root receipt once, optionally at its reliable terminal time.
-
-        Delayed delivery does not restart decay or focused-mode TTL. Explicit
-        stale, materially future or pre-reset events receive history only.
-        """
-        if not isinstance(task_id, str) or not task_id or len(task_id.encode("utf-8")) > 256:
-            raise CompanionValidationError("companion_task_id_invalid")
-        if not isinstance(status, str) or len(status) > 32:
-            raise CompanionValidationError("companion_status_invalid")
-        if tool_success is not None and type(tool_success) is not bool:
-            raise CompanionValidationError("companion_boolean_required")
-        if use_policy not in ("local_only", "cloud_allowed"):
-            raise CompanionValidationError("companion_use_policy_invalid")
-        if occurred_at is not None and not _finite(occurred_at, 0, 1e12):
-            raise CompanionValidationError("companion_event_time_invalid")
-        status = status.casefold()
-        with self._lock:
-            db = self._db()
-            # Waiting, review, uncertain and cancellation cannot penalize the
-            # user or consume the terminal completion identity prematurely.
-            if status not in ("completed", "failed"):
-                return
-            try:
-                db.execute("BEGIN IMMEDIATE")
-                state = self._load()
-                if db.execute("SELECT 1 FROM receipts WHERE task_id=?", (task_id,)).fetchone():
-                    db.execute("COMMIT")
-                    return
-                count = db.execute("SELECT COUNT(*) FROM receipts").fetchone()[0]
-                if count >= RECEIPT_LIMIT:
-                    self._warn("companion_receipt_capacity_effects_paused")
-                    db.execute("COMMIT")
-                    return
-                delivery_now = self._now()
-                now = delivery_now if occurred_at is None else min(float(occurred_at), delivery_now)
-                time_reason: str | None = None
-                if occurred_at is not None:
-                    # Compare independent wall timestamps with the stable
-                    # process clock only within its bounded calibration error.
-                    if occurred_at > delivery_now + self._event_time_tolerance:
-                        time_reason = "event_time_in_future"
-                    elif delivery_now - now > 60:
-                        time_reason = "event_too_old"
-                predates_anchor = occurred_at is not None and now < state["anchor_utc"]
-                can_project = (time_reason is None and not predates_anchor and state["enabled"]
-                               and state["emotions_enabled"] and ((status == "completed" and tool_success is True)
-                               or (status == "failed" and tool_success is False)))
-                if occurred_at is None or can_project:
-                    db.execute("DELETE FROM budget WHERE accepted_utc<=?", (now - 3600,))
-                rows = self._budget_rows()
-                minute = [r for r in rows if r[0] > now - 60]
-                reason = "eligible"
-                delta = [0.0, 0.0, 0.0]
-                if time_reason is not None:
-                    reason = time_reason
-                elif predates_anchor:
-                    reason = "event_precedes_current_anchor"
-                elif not state["enabled"] or not state["emotions_enabled"]:
-                    reason = "disabled"
-                elif tool_success is None:
-                    reason = "no_trusted_tool_outcome"
-                elif status == "completed" and tool_success is False:
-                    reason = "completion_not_reliably_successful"
-                elif status == "failed" and tool_success is not False:
-                    reason = "failure_not_classified_as_tool_failure"
-                elif len(minute) >= MINUTE_COUNT_LIMIT or len(rows) >= HOUR_COUNT_LIMIT:
-                    reason = "event_window_capacity"
-                else:
-                    delta = outcome_delta(status, rows, now)
-                    values = self._values(state, now)
-                    state["values"] = [max(low, min(high, value + step)) for value, step, low, high in zip(values, delta, (-1, 0, -0.25), (1, 1, 0.25))]
-                    state["anchor_utc"] = now
-                    if status == "failed":
-                        state["outcome_mode"] = "focused"
-                        state["outcome_mode_until"] = now + 60
-                cursor = db.execute(
-                    "INSERT INTO receipts(task_id,status,accepted_utc,epoch,eligibility,delta_v,delta_a,delta_m) VALUES (?,?,?,?,?,?,?,?)",
-                    (task_id, status, now, state["reset_epoch"], reason, *delta),
-                )
-                if reason == "eligible":
-                    db.execute("INSERT INTO budget VALUES (?,?,?,?,?)", (cursor.lastrowid, now, *delta))
-                if (time_reason is None and use_policy == "cloud_allowed" and state["enabled"] and state["emotions_enabled"]
-                        and ((status == "completed" and tool_success is True) or (status == "failed" and tool_success is False))):
-                    config = load_interaction(db)
-                    self._project_cloud_outcome(state, config, status, now)
-                    save_interaction(db, config)
                 state["revision"] += 1
-                state["last_seen_utc"] = delivery_now
-                self._save(state)
-                db.execute("COMMIT")
-            except Exception as error:
-                self._rollback()
-                if isinstance(error, (sqlite3.Error, OSError, ValueError, TypeError, KeyError, OverflowError)) and not isinstance(error, CompanionError):
-                    self._warn("companion_storage_unavailable")
-                    raise CompanionStorageError("companion_storage_unavailable") from None
-                raise
+                self._repository.save(state)
+
+
+    def close_conversation(self, conversation_id: str) -> None:
+        # 关闭窗口不等于清空会话，跨轮有效要求随持久会话保留。
+        return None
+
+    def apply_learning(self, command_id: str, *, expected_revision: int,
+                       source: Mapping[str, Any], habits: list[dict[str, Any]],
+                       emotion: dict[str, Any] | None, use_policy: str) -> int:
+        """跨库投递的幂等接收端；回执、局部成长和情绪在角色库一次提交。"""
+        fingerprint = sha256(encode(dict(source=source, habits=habits, emotion=emotion,
+            use_policy=use_policy, expected_revision=expected_revision)).encode()).hexdigest()
+        with self._lock, self._repository.transaction():
+            state = self._load()
+            prior = self._repository.connection.execute('SELECT fingerprint FROM role_receipt WHERE id=?', (command_id,)).fetchone()
+            if prior:
+                if prior[0] != fingerprint:
+                    raise CompanionValidationError('companion_command_id_conflict')
+                return int(state['revision'])
+            if state['revision'] != expected_revision:
+                raise CompanionRevisionConflict('companion_revision_conflict')
+            if use_policy not in ('cloud_allowed', 'local_only') or not source.get('task_id'):
+                raise CompanionValidationError('companion_feedback_source_invalid')
+            for habit in habits:
+                identity = habit['id']
+                old = next((row for row in state['habits'] if row['id'] == identity), None)
+                if identity is not None and old is None:
+                    raise CompanionRevisionConflict('Habit no longer exists')
+                if old is not None:
+                    state['habits'].remove(old)
+                if habit['content']:
+                    state['habits'].append(dict(id=identity or uuid4().hex,
+                        content=_text(habit['content'], 1024), reason=_text(habit['reason'], 1024),
+                        nature='explicit' if habit['explicit'] else 'inferred', scope='persistent',
+                        created_at=self._clock(), expires_at=None, use_policy=use_policy,
+                        uncertainty=habit['uncertainty'], source=dict(source, refs=habit['host_refs'])))
+            if emotion is not None:
+                expiry = emotion['expires_at']
+                if expiry is not None and not self._clock() < expiry <= 1e12:
+                    raise CompanionValidationError('companion_expiry_invalid')
+                state['emotion'] = {key: _text(emotion[key], 2048) for key in
+                    ('description_intensity', 'reason_sources', 'time_scope', 'uncertainty')}
+                half_life = emotion.get('half_life_seconds', 21600.0)
+                if (type(half_life) not in (int, float) or not math.isfinite(half_life)
+                        or not 900 <= half_life <= 604800):
+                    raise CompanionValidationError('companion_emotion_timing_invalid')
+                learned_at = source.get('learning_at', self._clock())
+                if type(learned_at) not in (int, float) or not math.isfinite(learned_at) or not 0 <= learned_at <= 1e12:
+                    raise CompanionValidationError('companion_emotion_timing_invalid')
+                state['emotion'].update(source=dict(source, refs=emotion['host_refs'],
+                    emotion_updated_at=min(learned_at, self._clock()), emotion_half_life_seconds=half_life),
+                    expires_at=expiry, use_policy=use_policy)
+            self._validate(state)
+            state['revision'] += 1
+            self._repository.save(state)
+            # 自动成长不能保存成下一轮连必需角色资料都无法读取的状态。
+            self.context(str(source.get('conversation_id', 'default')), int(source.get('conversation_epoch', 0)),
+                         str(source['task_id']), allow_restricted=True)
+            self._receipt(command_id, fingerprint)
+            return int(state['revision'])
+
+    def forget_sources(self, task_ids: Iterable[str]) -> None:
+        identities = set(task_ids)
+        with self._lock, self._repository.transaction():
+            state = self._load()
+            for key in (*LAYERS, "habits"):
+                state[key] = [row for row in state[key] if row["source"].get("task_id") not in identities]
+            if state["emotion"] and state["emotion"]["source"].get("task_id") in identities:
+                state["emotion"] = None
+            state["revision"] += 1
+            self._repository.save(state)
+
+
+    def style_instruction(self, request: str, *, cloud: bool = True,
+                          preferences: dict[str, Any] | None = None,
+                          constraints: dict[str, Any] | None = None, mode: str | None = None,
+                          conversation_id: str = "default", use_policy: str = "cloud_allowed") -> str:
+        return encode(self.context(conversation_id, 0, "", allow_restricted=not cloud))
 
     def reset_for_privacy(self) -> None:
-        """Clear local derived expression and session data; retain dedup/budget.
+        with self._lock, self._repository.transaction():
+            state = self._load()
+            state["emotion"] = None
+            state["user_understanding"], state["interaction_approach"] = [], []
+            state["reset_epoch"] += 1
+            state["revision"] += 1
+            self._repository.save(state)
 
-        Persistent and today preferences are explicit settings, not derived
-        evidence; only ``reset(target='all')`` removes those settings.
-        """
-        with self._lock:
-            self.invalidate_interaction()
-            db = self._db()
-            try:
-                db.execute("BEGIN IMMEDIATE")
-                state = self._load()
-                now = self._now()
-                self._neutralize(state, now)
-                self._neutralize_cloud(state, now)
-                state["reset_epoch"] += 1
-                state["revision"] += 1
-                state["last_seen_utc"] = now
-                self._save(state)
-                db.execute("COMMIT")
-            except Exception as error:
-                self._rollback()
-                if isinstance(error, (sqlite3.Error, OSError, ValueError, TypeError, KeyError, OverflowError)) and not isinstance(error, CompanionError):
-                    self._warn("companion_storage_unavailable")
-                    raise CompanionStorageError("companion_storage_unavailable") from None
-                raise
+    def invalidate_interaction(self) -> None:
+        # 失效由持久来源/修订落实；关闭后台不能删除仍有效的会话要求。
+        return None
 
     def close(self) -> None:
         with self._lock:
-            if self._closed:
-                return
-            self._closed = True
-            self._session_preferences.clear()
-            self._cue = None
-            self._interaction.clear()
-            self._session_policies.clear()
-            connection, self._connection = self._connection, None
-            if connection is not None:
-                try:
-                    connection.close()
-                except sqlite3.Error:
-                    raise CompanionStorageError("companion_close_failed") from None
+            if not self._closed:
+                self._closed = True
+                self._repository.close()

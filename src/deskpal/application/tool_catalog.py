@@ -11,6 +11,20 @@ from deskpal.workflow.store import canonical
 
 # Presentation only. Presence comes exclusively from list_tools(), not this map.
 _DISPLAY = {
+    'task_list': ('查看任务', 'agent', '查找实际任务与暂停状态'),
+    'task_pause': ('暂停任务', 'agent', '在下一次模型判断前暂停指定任务'),
+    'task_continue': ('继续任务', 'agent', '继续同一任务，保留已完成操作'),
+    'task_cancel': ('取消任务', 'agent', '停止后续步骤，保留已完成操作'),
+    'notification_status': ('查看通知状态', 'agent', '查看主动聊天和提醒控制'),
+    'notification_control': ('调整通知', 'agent', '分别暂停或恢复主动聊天与提醒'),
+    'attention_schedule': ('安排后续关注', 'agent', '有理由地安排后续复查'),
+    'attention_end': ('结束当前关注', 'agent', '结束已处理或不再适用的关注'),
+    'memory_search': ('检索记忆', 'agent', '查找当前角色的相关记忆'),
+    'memory_remember': ('保存记忆', 'agent', '保存用户明确要求记住的内容'),
+    'memory_correct': ('更正记忆', 'agent', '修正已有理解'),
+    'memory_forget': ('遗忘记忆', 'agent', '遗忘及清理相关副本'),
+    'role_read': ('读取角色资料', 'agent', '查看当前角色卡与修订'),
+    'role_update': ('修改角色卡', 'agent', '按用户明确要求修改角色卡'),
     "echo": ("回显文本", "general", "返回指定文本"),
     "time": ("当前时间", "general", "读取当前 UTC 时间"),
     "read_text": ("读取文本", "files", "读取工作区 UTF-8 文件"),
@@ -31,7 +45,7 @@ _DISPLAY = {
     "timer_cancel": ("取消计时器", "schedule", "取消仍在等待的计时器"),
     "timer_events": ("查看计时器到期记录", "schedule", "只读查询持久到期记录"),
 }
-_LABELS = {"path": "文件路径", "source": "源文件", "destination": "目标文件", "text": "文本内容",
+_LABELS = {'task_id':'任务', 'kind':'范围', 'paused':'是否暂停', 'until_at':'恢复时间', 'reason':'理由与取消条件', 'due_at':'检查时间', 'goal':'关注事项', "path": "文件路径", "source": "源文件", "destination": "目标文件", "text": "文本内容",
     "overwrite": "覆盖已有文件", "id": "对象 ID", "title": "标题", "label": "提醒名称",
     "duration_seconds": "计时秒数", "start_at": "开始时间", "end_at": "结束时间", "reminder_at": "提醒时间",
     "timezone": "时区", "query": "查找内容", "limit": "数量上限", "monitor": "显示器编号",

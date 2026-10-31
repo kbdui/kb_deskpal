@@ -4,13 +4,18 @@ from typing import Any
 
 from PySide6.QtCore import QObject, QEvent, QTimer, Qt, Signal
 from PySide6.QtGui import QInputMethodEvent, QKeyEvent, QWheelEvent
-from PySide6.QtWidgets import (
-    QApplication, QAbstractItemView, QAbstractScrollArea, QAbstractSlider, QAbstractSpinBox, QComboBox,
-    QDialog, QLabel, QPlainTextEdit, QPushButton, QVBoxLayout, QScrollArea, QTreeWidget, QTreeWidgetItem, QWidget,
-)
+from PySide6.QtWidgets import (QApplication, QAbstractItemView, QAbstractScrollArea, QAbstractSlider, QAbstractSpinBox, QComboBox, QDialog, QLabel, QSizePolicy, QVBoxLayout, QScrollBar, QTreeWidgetItem, QWidget)
+from .components import (PushButton as QPushButton, PlainTextEdit as QPlainTextEdit, TreeWidget as QTreeWidget, ScrollArea as QScrollArea)
 
 
-LABELS = {"explicit_only": "仅保存明确要求的记忆", "candidate_review": "生成候选，由我审核", "paused": "暂停记忆写入", "pending": "等待到期", "fired": "已到期", "cancelled": "已取消", "scheduled": "已安排", "reminded": "已提醒", "openai": "OpenAI 兼容服务", "offline": "离线演示", "responses": "Responses 协议", "prompt": "提示协议", "json_object": "原生 JSON 对象", "disabled": "关闭", "fastembed": "本地语义检索", "session": "仅选定会话", "today": "今天", "persistent": "持续保存", "brief": "简短", "normal": "适中", "detailed": "详细", "true": "允许", "false": "关闭", "Removed": "已移除", "unknown": "尚无法判断", "occurred": "已发生", "not_occurred": "未发生", "due": "已到期", "missed": "错过提醒", "suppressed": "已抑制", "redacted": "已清理", "execution_location": "执行位置", "provider": "服务提供方", "model": "模型名称", "protocol": "协议", "llm_ready": "连接配置就绪", "credential_mode": "凭据模式", "credential_source": "凭据来源", "active_revision": "当前生效版本", "request_use_default": "默认允许本次请求云处理", "memory_mode": "记忆模式", "embedding_provider": "检索模型", "data_dir": "数据目录", "cloud": "云模型", "local": "本地模型", "system_vault": "系统凭据库", "environment": "环境变量", "none": "无需凭据", "calendar": "日程", "timer": "计时器", "task": "任务", "Ignored": "已忽略", "Accepted": "已接受", "Expired": "已过期", "Invalidated": "已失效", "Planning": "正在理解", "Created": "已创建", "title": "名称", "status": "状态", "content": "内容", "request": "请求", "response": "回复",
+from .components import ChoiceBox
+
+
+class ArrowComboBox(ChoiceBox):
+    """Fluent 下拉菜单，沿用已有选择值及调用方名称。"""
+
+
+LABELS = {"automatic": "自动学习与模型复核", "explicit_only": "自动学习与模型复核", "candidate_review": "自动学习与模型复核", "paused": "暂停记忆写入", "pending": "等待到期", "fired": "已到期", "cancelled": "已取消", "scheduled": "已安排", "reminded": "已提醒", "openai": "OpenAI 兼容服务", "offline": "离线演示", "responses": "Responses 协议", "prompt": "提示协议", "json_object": "原生 JSON 对象", "disabled": "关闭", "fastembed": "本地语义检索", "session": "仅选定会话", "today": "今天", "persistent": "持续保存", "brief": "简短", "normal": "适中", "detailed": "详细", "true": "允许", "false": "关闭", "Removed": "已移除", "unknown": "尚无法判断", "occurred": "已发生", "not_occurred": "未发生", "due": "已到期", "missed": "错过提醒", "suppressed": "已抑制", "redacted": "已清理", "execution_location": "执行位置", "provider": "服务提供方", "model": "模型名称", "protocol": "协议", "llm_ready": "连接配置就绪", "credential_mode": "凭据模式", "credential_source": "凭据来源", "active_revision": "当前生效版本", "request_use_default": "默认允许本次请求云处理", "memory_mode": "记忆模式", "embedding_provider": "检索模型", "data_dir": "数据目录", "cloud": "云模型", "local": "本地模型", "system_vault": "系统凭据库", "environment": "环境变量", "none": "无需凭据", "calendar": "日程", "timer": "计时器", "task": "任务", "Ignored": "已忽略", "Accepted": "已接受", "Expired": "已过期", "Invalidated": "已失效", "Planning": "正在理解", "Created": "已创建", "title": "名称", "status": "状态", "content": "内容", "request": "请求", "response": "回复",
           "description": "说明", "path": "路径", "destination": "目标路径", "source": "来源", "source_id": "来源记录",
           "deadline": "截止时间", "success_criteria": "成功标准", "progress_note": "进度备注", "evidence": "人工证据",
           "use_policy": "可用范围", "revision": "版本", "created_at": "创建时间", "updated_at": "更新时间",
@@ -18,10 +23,10 @@ LABELS = {"explicit_only": "仅保存明确要求的记忆", "candidate_review":
           "local_only": "仅本地", "cloud_allowed": "允许云处理", "Active": "进行中", "Paused": "已暂停",
           "Completed": "已完成", "Cancelled": "已取消", "Pending": "待处理", "Waiting": "待我确认",
           "NeedsReview": "需要重新审核", "Running": "执行中", "Queued": "排队中", "Failed": "失败",
-          "Succeeded": "已完成", "Uncertain": "结果待核实", "accepted": "已接受", "candidate": "待审核",
+          "Succeeded": "已完成", "AwaitingInput": "等待补充信息", "Uncertain": "结果待核实", "accepted": "已采用", "candidate": "待复核理解",
           "rejected": "已拒绝", "deleted": "已删除", "disputed": "有争议", "all": "全部",
           "ordinary_tools": "普通工具", "high_risk_tools": "高风险工具", "workspace_dir": "工作区",
-          "display_name": "显示名称", "tool_name": "工具名称", "permission_level": "所需权限"}
+          "display_name": "显示名称", "tool_name": "工具名称", "permission_level": "所需权限", 'limit': '数量上限'}
 
 
 def label(value: object) -> str:
@@ -32,12 +37,36 @@ def label(value: object) -> str:
 
 
 def text_label(text: str = "", *, heading: bool = False) -> QLabel:
-    widget = QLabel(text)
+    from .components import BodyLabel
+    widget = BodyLabel(text)
     widget.setTextFormat(Qt.TextFormat.PlainText)
     widget.setWordWrap(True)
+    widget.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+    widget.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
     widget.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
     if heading:
         widget.setObjectName("heading")
+    return widget
+
+
+class _NoticeLabel(QLabel):
+    """A status line occupies space only while it has something to report."""
+
+    def setText(self, text: str) -> None:
+        super().setText(text)
+        self.setVisible(bool(text.strip()))
+
+    def clear(self) -> None:
+        self.setText("")
+
+
+def notice_label() -> QLabel:
+    widget = _NoticeLabel()
+    widget.setTextFormat(Qt.TextFormat.PlainText)
+    widget.setWordWrap(True)
+    widget.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+    widget.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
+    widget.hide()
     return widget
 
 
@@ -91,6 +120,11 @@ def fill_tree(tree: QTreeWidget, value: Any) -> bool:
 
 class WheelGuard(QObject):
     def eventFilter(self, watched: QObject, event: QEvent) -> bool:
+        # Scroll areas deliver viewport wheel events to their own QScrollBar.
+        # Sending that scrollbar event back to the viewport recurses through
+        # Qt's native wheelEvent until the process exhausts its stack.
+        if isinstance(watched, QScrollBar):
+            return super().eventFilter(watched, event)
         if isinstance(event, QWheelEvent) and isinstance(watched, QWidget):
             parent = watched.parentWidget()
             if isinstance(parent, QAbstractItemView) and parent.viewport() is watched:
@@ -101,7 +135,7 @@ class WheelGuard(QObject):
                         bar.setValue(bar.value() - (delta // 120 or (1 if delta > 0 else -1)) * max(1, bar.singleStep()) * 3)
                         event.accept()
                         return True
-        if isinstance(event, QWheelEvent) and isinstance(watched, (QComboBox, QAbstractSpinBox, QAbstractSlider)):
+        if isinstance(event, QWheelEvent) and isinstance(watched, (QComboBox, ChoiceBox, QAbstractSpinBox, QAbstractSlider)):
             parent = watched.parentWidget()
             while parent is not None:
                 if isinstance(parent, QAbstractScrollArea):

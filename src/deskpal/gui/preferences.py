@@ -14,6 +14,7 @@ class GuiPreferences(QObject):
 
     _KEYS = {
         "geometry": "gui/geometry",
+        "theme": "gui/theme",
         "screen_name": "gui/screen_name",
         "close_to_tray": "gui/close_to_tray",
         "notifications_enabled": "gui/notifications_enabled",
@@ -40,6 +41,16 @@ class GuiPreferences(QObject):
         self._settings.setValue(self._KEYS[name], value)
         self._settings.sync()
         self.changed.emit(name, value)
+
+    @property
+    def theme(self) -> str:
+        value = self._value('theme', 'auto')
+        return str(value) if value in ('auto', 'light', 'dark') else 'auto'
+
+    def set_theme(self, value: str) -> bool:
+        if value not in ('auto', 'light', 'dark'): return False
+        self._set('theme', value)
+        return True
 
     @property
     def geometry(self) -> bytes:

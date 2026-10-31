@@ -56,8 +56,8 @@ result_max_bytes = 262144
 shutdown_timeout_seconds = 5.0
 
 [proactive]
-# Local deterministic proposals only; enabling this grants no execution or cloud permission.
-enabled = false
+# Proactive checks use the configured model via AgentCore; tool permissions still apply.
+enabled = true
 # Positive limits: polling <=60s; batch <=100; new proposals <=10; TTL <=30 days.
 poll_interval_seconds = 1.0
 event_batch_size = 100

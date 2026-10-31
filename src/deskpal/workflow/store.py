@@ -16,6 +16,8 @@ from deskpal.tasks.models import utc_now
 
 from .models import AuditEvent, DependencyRef, WorkflowBlocked
 from .migrations import SCHEMA_VERSION, migrate_schema_1, migrate_schema_2
+from .schema_v4 import migrate_schema_3, validate as validate_schema_4
+from .schema_v5 import migrate_schema_4, validate as validate_schema_5
 
 
 def canonical(value: Any) -> str:
@@ -71,7 +73,7 @@ class WorkflowStore:
             exists = self._conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='schema_version'").fetchone()
             if exists:
                 versions = self._conn.execute("SELECT version FROM schema_version").fetchall()
-                if len(versions) != 1 or versions[0][0] not in {1, 2, SCHEMA_VERSION}:
+                if len(versions) != 1 or versions[0][0] not in {1, 2, 3, 4, SCHEMA_VERSION}:
                     raise ValueError("Unsupported workflow schema version")
                 if versions[0][0] < SCHEMA_VERSION:
                     self.backup(self.path.with_name(self.path.name + ".schema-" + str(versions[0][0]) + "-" + uuid4().hex + ".backup"))
@@ -81,12 +83,16 @@ class WorkflowStore:
                 exists = conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='schema_version'").fetchone()
                 if exists:
                     rows = conn.execute("SELECT version FROM schema_version").fetchall()
-                    if len(rows) != 1 or rows[0][0] not in {1, 2, SCHEMA_VERSION}:
+                    if len(rows) != 1 or rows[0][0] not in {1, 2, 3, 4, SCHEMA_VERSION}:
                         raise ValueError("Unsupported workflow schema version")
                     if rows[0][0] == 1:
                         migrate_schema_1(conn)
                     if rows[0][0] in {1, 2}:
                         migrate_schema_2(conn)
+                    if rows[0][0] in {1, 2, 3}:
+                        migrate_schema_3(conn)
+                    if rows[0][0] in {1, 2, 3, 4}:
+                        migrate_schema_4(conn)
                 else:
                     tables = conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").fetchall()
                     if tables:
@@ -95,8 +101,12 @@ class WorkflowStore:
                         conn.execute(statement)
                     migrate_schema_1(conn)
                     migrate_schema_2(conn)
+                    migrate_schema_3(conn)
+                    migrate_schema_4(conn)
                 for statement in _PRESENTATION_INDEXES:
                     conn.execute(statement)
+                validate_schema_4(conn)
+                validate_schema_5(conn)
                 # A previous process cannot know whether a reserved request was
                 # sent. Its slot remains consumed and recovery never retries it.
                 conn.execute("UPDATE task_call_attempt SET status='unknown' WHERE status='reserved'")
@@ -322,7 +332,7 @@ class WorkflowStore:
         """Publish a complete online backup at a new path, never overwrite one.
 
         The temporary SQLite lives beside the destination. A create-only hard
-        link publishes it atomically after closing SQLite; a concurrent creator,
+        link (Windows: create-new rename) publishes it atomically after closing SQLite; a concurrent creator,
         existing symlink or hardlink cannot be overwritten by this operation.
         """
         with self._lock:
@@ -347,7 +357,11 @@ class WorkflowStore:
                     output.close()
                 # os.link is create-new on both Windows and POSIX. In contrast,
                 # replace/rename may overwrite another process's destination.
-                os.link(temporary, target)
+                if os.name == 'nt':
+                    # Windows rename 本身是 create-new；不用受环境限制的硬链接。
+                    os.rename(temporary, target)
+                else:
+                    os.link(temporary, target)
             finally:
                 for suffix in ("-journal", "-wal", "-shm", ""):
                     Path(temporary_name + suffix).unlink(missing_ok=True)

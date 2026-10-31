@@ -141,7 +141,7 @@ class ConversationRuntime:
 
     def freeze(self, conversation_id: str, epoch: int, before_sequence: int, *,
                cloud: bool, history_allowed: bool) -> dict[str, Any]:
-        """Freeze independent neutral planning and expression projections.
+        """冻结有来源的双方历史；旧要求不成为新的执行授权。
 
         Expression history owns provenance: historical user references are not
         new instructions or externally verified claims; assistant responses are
@@ -157,7 +157,7 @@ class ConversationRuntime:
                 window = replace(window, turns=self.repository.load(conversation_id, epoch, before_sequence))
             history: list[dict[str, Any]] = []
             planning: list[dict[str, Any]] = []
-            history_rounds: list[tuple[dict[str, Any], dict[str, Any]]] = []
+            history_rounds: list[tuple[dict[str, Any], ...]] = []
             planning_rounds: list[list[dict[str, Any]]] = []
             references: set[ConversationRef] = set()
             warnings: list[str] = []
@@ -175,8 +175,7 @@ class ConversationRuntime:
                     continue
                 references.update(turn.refs)
                 refs = [ref.to_dict() for ref in turn.refs]
-                planning_refs = [ref.to_dict() for ref in turn.refs
-                                 if not (ref.kind == "dialogue_turn" and ref.id.endswith(":assistant"))]
+                planning_refs = refs
                 source = {"kind": "dialogue_turn", "id": turn.task_id + ":user",
                           "revision": turn.sequence, "use_policy": turn.use_policy}
                 assistant_source = {**source, "id": turn.task_id + ":assistant"}
@@ -184,7 +183,7 @@ class ConversationRuntime:
                 # inferred from prose (including apparent user confirmation).
                 # A draft version identifies one published response, not a
                 # verified claim or authorization to execute its suggestions.
-                history_round = (
+                history_round: tuple[dict[str, Any], ...] = (
                     {"role": "user", "content": turn.request, "verified": False,
                      "source_kind": "historical_user_reference", "instruction": False,
                      "externally_verified": False, "source_ref": source, "refs": refs},
@@ -198,6 +197,8 @@ class ConversationRuntime:
                                      "external_content_verified": False,
                                      "fact": json.loads(fact), "source_ref": assistant_source,
                                      "refs": refs} for fact in turn.facts]})
+                if not turn.request:
+                    history_round = (history_round[1],)
                 # Expression provenance and tool outcomes consume the same
                 # bounded history budget. Omit only complete expression rounds;
                 # the existing neutral planning selection below is independent.
@@ -211,9 +212,14 @@ class ConversationRuntime:
                     warnings.append("history_context_limit")
                 round_items: list[dict[str, Any]] = [
                     {"kind": "user_reference", "content": turn.request,
-                     "instruction": False, "source_ref": source, "refs": planning_refs}]
+                     "instruction": False, "source_ref": source, "refs": planning_refs},
+                    {"kind": "assistant_reference", "content": turn.response,
+                     "instruction": False, "confirmed": False, "externally_verified": False,
+                     "source_ref": assistant_source, "refs": planning_refs}]
+                if not turn.request:
+                    round_items = round_items[1:]
                 round_items.extend({"kind": "tool_fact", "verified": True, "fact": json.loads(fact),
-                                    "source_ref": source, "refs": planning_refs} for fact in turn.facts)
+                                    "source_ref": source if turn.request else assistant_source, "refs": planning_refs} for fact in turn.facts)
                 candidate = planning + round_items
                 encoded = json.dumps(candidate, ensure_ascii=False, allow_nan=False, sort_keys=True)
                 if len(candidate) > MAX_PLANNING_ITEMS or len(encoded.encode("utf-8")) > MAX_PLANNING_BYTES:

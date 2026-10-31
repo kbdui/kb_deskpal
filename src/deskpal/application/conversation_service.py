@@ -17,10 +17,13 @@ class ConversationService:
                  tasks: PersistentTaskManager, privacy: PrivacyCoordinator,
                  dispatcher: SubmissionDispatcher,
                  revoke: Callable[[tuple[str, ...]], None],
-                 discard: Callable[[tuple[str, ...]], None]) -> None:
+                 discard: Callable[[tuple[str, ...]], None],
+                 clear_scope: Callable[[str], None] | None = None) -> None:
         self.repository, self.runtime, self.tasks = repository, runtime, tasks
         self.privacy, self.dispatcher, self.revoke = privacy, dispatcher, revoke
         self.discard = discard
+        self.clear_scope = clear_scope
+        self.clear_learning: Callable[[str], None] | None = None
         self._lock = RLock()
         self._pending_revoke: set[str] = set()
 
@@ -34,6 +37,10 @@ class ConversationService:
 
         with self.privacy.exclusive():
             result = self.repository.cleanup(identity, expected_revision, command_id, delete=delete, scrub=scrub)
+            if self.clear_scope is not None:
+                self.clear_scope(identity)
+            if self.clear_learning is not None:
+                self.clear_learning(identity)
         # No SQLite lock while acquiring the dispatcher's condition; submit
         # owns that condition before entering its atomic registration transaction.
         self.runtime.invalidate()

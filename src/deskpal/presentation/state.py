@@ -13,6 +13,7 @@ _LABELS = {
     "Planning": "规划中",
     "Running": "执行中",
     "Waiting": "等待确认",
+    "Paused": "已暂停",
     "Completed": "已完成",
     "Failed": "执行失败",
     "Cancelled": "已取消",

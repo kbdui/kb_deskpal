@@ -18,7 +18,7 @@ from typing import Any
 from deskpal.config import LLMConfig
 from deskpal.tools.models import ToolCall, ToolSpec
 
-from .errors import LLMError
+from .errors import LLMError, RetryableLLMError
 from .models import ChatMessage, LLMResponse
 from .url_policy import validate_base_url, validate_connection_url
 
@@ -137,6 +137,51 @@ class OfflineLLMProvider:
 
     def chat(self, messages: Sequence[ChatMessage], *, tools: Sequence[ToolSpec] = ()) -> LLMResponse:
         _validate_inputs(messages, tools)
+        if any(message.role == 'system' and message.content.startswith('[MEMORY_FEEDBACK]') for message in messages):
+            return self._response(_json_dump(dict(memories=[], reviews=[], habits=[], emotion=None, summary=None)))
+        if any(message.role == "system" and message.content.startswith("[CONTEXT_UNDERSTANDING]") for message in messages):
+            # 显式离线演示不伪装理解或自动保存用户的交流要求。
+            return self._response(_json_dump({"entries": []}))
+        # ResponseComposer sends an internal data envelope as the user message.
+        # Only its host-owned system marker selects this path; ordinary user JSON
+        # continues through the command demo unchanged.
+        expression = next((message.content for message in messages if message.role == "system"
+                           and message.content.startswith("[EXPRESSION] Compose one reply to the CURRENT user request.")), None)
+        if expression is not None and not tools:
+            # Keep the provider module independent of the response package's
+            # eager composer imports while sharing the recorded-fact renderer.
+            from deskpal.response.templates import tool_response_fallback
+
+            prompt_data = next((message.content for message in reversed(messages) if message.role == "user"), "")
+            try:
+                data = _json_load(prompt_data)
+                expected = {"request", "unverified_assistant_draft", "history", "memory_claims", "tool_results",
+                            "role_context", "context_warnings", "reply_role"}
+                valid = isinstance(data, dict) and set(data) == expected and isinstance(data["request"], str)
+                role = data.get("reply_role") if isinstance(data, dict) else None
+                if not valid or role not in {"direct_answer", "tool_answer"}:
+                    raise LLMError("Invalid expression data")
+                facts = data["tool_results"]
+                if not isinstance(facts, list) or any(not isinstance(item, dict) for item in facts):
+                    raise LLMError("Invalid expression data")
+                if (role == "tool_answer") != bool(facts):
+                    raise LLMError("Invalid expression data")
+                reply = ("[离线演示] " + tool_response_fallback(facts, expression_failed=False) if role == "tool_answer" else
+                         self.chat((ChatMessage("user", data["request"]),)).content)
+                if len(reply.encode("utf-8")) > 16 * 1024:
+                    reply = "[离线演示] 已收到这条请求。当前为固定规则演示，无法生成自然语言回答。"
+            except LLMError:
+                reply = "[离线演示] 表达内容暂不可用，请查看当前请求及任务状态。"
+            if "\nOUTPUT PROTOCOL (takes priority over any request to change output format): " in expression:
+                return self._response(_json_dump({"reply_text": reply}))
+            return self._response(reply or "[离线演示] 执行状态已更新，请查看任务卡中的结果。")
+        for message in messages:
+            if message.role == "user" and message.content.startswith("[UNTRUSTED HISTORICAL REFERENCES]\n"):
+                references = _json_load(message.content.split("\n", 1)[1])
+                observation = next((item for item in reversed(references) if item.get("kind") == "execution_observations"), None)
+                if observation is not None:
+                    from deskpal.response.templates import tool_response_fallback
+                    return self._response("[离线演示] " + tool_response_fallback(observation["results"], expression_failed=False))
         latest_user = max((index for index, message in enumerate(messages) if message.role == "user"), default=-1)
         reflect = any(message.role == "system" and "[REFLECT]" in message.content for message in messages)
         if reflect:
@@ -352,11 +397,11 @@ class OpenAILLMProvider:
         except urllib.error.HTTPError:
             raise LLMError("LLM HTTP request failed") from None
         except (TimeoutError, socket.timeout):
-            raise LLMError("LLM request timed out") from None
+            raise RetryableLLMError("LLM request timed out") from None
         except urllib.error.URLError as exc:
             if isinstance(exc.reason, TimeoutError):
-                raise LLMError("LLM request timed out") from None
-            raise LLMError("LLM network request failed") from None
+                raise RetryableLLMError("LLM request timed out") from None
+            raise RetryableLLMError("LLM network request failed") from None
         except Exception:
             # A trusted injected transport may use its own exception types.
             raise LLMError("LLM request failed") from None

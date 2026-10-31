@@ -18,6 +18,7 @@ from uuid import uuid4
 
 from deskpal.memory.contracts import MemoryStatus, UsePolicy
 from deskpal.proactive.models import ProposalStatus
+from deskpal.tasks.models import TaskStatus
 from deskpal.workflow.models import WorkflowBlocked
 from deskpal.workflow.store import canonical
 
@@ -154,6 +155,28 @@ class DesktopFacade:
             if args:
                 raise ValueError("Interaction snapshot takes no parameters")
             return app.interaction_snapshot()
+        if operation in {"task_pause", "task_continue"}:
+            self._command(args)
+            return app.pause_task(**args) if operation == "task_pause" else app.continue_task(**args)
+        if operation == "attentions":
+            app._ready()
+            return app.proactive.page(**args)
+        if operation == 'attention_end':
+            app._ready()
+            self._command(args)
+            return app.proactive.end_attention(**args)
+        if operation == "notification_policy":
+            if args: raise ValueError("Notification policy takes no parameters")
+            return app.notification_policy.snapshot()
+        if operation == "notification_control":
+            self._command(args)
+            return app.notification_control(**args)
+        if operation == "task_append_requirement":
+            self._command(args)
+            return app.append_requirement(**args)
+        if operation == "task_answer":
+            self._command(args)
+            return app.answer_task(**args)
         if operation == "interaction_command":
             self._command(args)
             action = args.pop("action", None)
@@ -182,7 +205,21 @@ class DesktopFacade:
             return app.presentation_snapshot()
         if operation == "tasks":
             offset, limit = self._page(args)
-            return app.task_page(offset=offset, limit=limit, **args)
+            if set(args) - {"status", "statuses"} or ("status" in args and "statuses" in args):
+                raise ValueError("Task page accepts one status filter")
+            statuses: tuple[TaskStatus, ...] | None = None
+            if "status" in args:
+                status = args["status"]
+                if not isinstance(status, str): raise ValueError("Task status must be a string")
+                if status != "all": statuses = (TaskStatus(status),)
+            elif "statuses" in args:
+                raw_statuses = args["statuses"]
+                if (not isinstance(raw_statuses, list) or not 1 <= len(raw_statuses) <= len(TaskStatus)
+                        or any(not isinstance(value, str) for value in raw_statuses)):
+                    raise ValueError("Task statuses must be a bounded list of state names")
+                statuses = tuple(TaskStatus(value) for value in raw_statuses)
+                if len(set(statuses)) != len(statuses): raise ValueError("Task statuses must be unique")
+            return app.task_page(offset=offset, limit=limit, statuses=statuses)
         if operation == "task":
             return app.review_task(**args)
         if operation == "submit":
@@ -221,6 +258,16 @@ class DesktopFacade:
             return runtime.page_items(offset=offset, limit=limit, **args)
         if operation == "memory":
             return self._memory(args)
+        if operation == 'learning_records':
+            if set(args) - {'limit'}:
+                raise ValueError('Unsupported learning page parameters')
+            return app.learning_records(**args)
+        if operation == 'learning_review':
+            if set(args) != {'command_id'}:
+                raise ValueError('Review requires only its command identity')
+            self._command(args)
+            app.enqueue_learning_review(args['command_id'])
+            return {'accepted': True, 'work_id': 'review:' + args['command_id']}
         if operation == "diagnostics":
             return app.diagnostics()
         if operation == "settings":
@@ -358,6 +405,12 @@ class DesktopFacade:
         if not isinstance(entity_id, str) or not entity_id:
             raise ValueError("Notification entity_id must be non-empty")
         if kind == "task":
+            if self.app.journal.origin(entity_id)['kind'] == 'proactive':
+                if not self.app.proactive.can_publish(entity_id):
+                    return None
+                task = self.app.tasks.get(entity_id)
+                if task is None or not isinstance(task.result, dict) or not task.result.get('response'):
+                    return None
             with self.app.store.transaction() as db:
                 row = db.execute("SELECT id,revision,status FROM task WHERE id=? AND scrubbed=0 "
                     "AND status IN ('Waiting','Completed','Failed','Cancelled')", (entity_id,)).fetchone()
@@ -365,6 +418,8 @@ class DesktopFacade:
                     return None
                 return {"kind": kind, "entity_id": entity_id, "revision": row["revision"], "status": row["status"]}
         if kind == "proposal":
+            if self.app.config.proactive.enabled:
+                return None
             try:
                 proposal = self.app.proposals.preflight(entity_id)
             except (ValueError, WorkflowBlocked):

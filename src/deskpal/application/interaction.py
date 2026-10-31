@@ -1,23 +1,28 @@
-"""Application-owned context, controlled model calls and dialogue publication."""
+"""应用层统一准备角色、双方历史及有效要求；模型调用期间不持数据库锁。"""
 
 from collections import OrderedDict
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
+from datetime import datetime, timezone
+from dataclasses import replace
 from hashlib import sha256
 from threading import RLock
 from typing import Any
+from uuid import uuid4
 
 from deskpal.agent.context import PreparedTurn
 from deskpal.agent.ports import CompanionPort
-from deskpal.companion.signals import validate_preference
+from deskpal.companion.understanding import understand
+from deskpal.companion.repository import encode
 from deskpal.conversation.runtime import ConversationConflict, ConversationRuntime
 from deskpal.llm.calls import ModelCallGateway
 from deskpal.llm.ports import LLMProvider
-from deskpal.memory.contracts import MemoryRuntime, RetrievalBundle, UsePolicy
+from deskpal.memory.contracts import MemoryRuntime, RetrievalBundle
+from deskpal.memory.models import MemoryRecord
+from deskpal.memory.retrieval import _record
 from deskpal.tasks.models import TaskStatus
 from deskpal.workflow.humanization import HumanizationStore
 from deskpal.workflow.models import WorkflowBlocked
-from deskpal.workflow.store import canonical
 from deskpal.workflow.tasks import PersistentTaskManager
 
 from .privacy import PrivacyCoordinator
@@ -26,11 +31,8 @@ from .privacy import PrivacyCoordinator
 def _refs(values: Any) -> tuple[tuple[str, str, int], ...]:
     result: set[tuple[str, str, int]] = set()
     for value in values:
-        if isinstance(value, Mapping):
-            item = (str(value.get("kind", "memory")),
-                    str(value.get("id", value.get("object_id", ""))), value.get("revision"))
-        else:
-            item = tuple(value)
+        item = ((str(value.get("kind", "memory")), str(value.get("id", "")), value.get("revision"))
+                if isinstance(value, Mapping) else tuple(value))
         if len(item) != 3 or not item[0] or not item[1] or type(item[2]) is not int or item[2] < 1:
             raise ValueError("Context has an invalid source reference")
         result.add((str(item[0]), str(item[1]), item[2]))
@@ -43,56 +45,149 @@ class InteractionCoordinator:
     def __init__(self, *, persistence: HumanizationStore, privacy: PrivacyCoordinator,
                  conversations: ConversationRuntime, tasks: PersistentTaskManager,
                  memory: MemoryRuntime, companion: CompanionPort | None,
-                 provider: LLMProvider, cloud: bool) -> None:
+                 provider: LLMProvider, cloud: bool, profile_id: str = "",
+                 timezone_name: str = "Asia/Shanghai") -> None:
         self.persistence, self.privacy, self.conversations = persistence, privacy, conversations
-        self.tasks, self.memory, self.companion, self.cloud = tasks, memory, companion, cloud
-        evaluation_provider = getattr(memory, "evaluation_provider", None)
+        self.tasks, self.memory, self.companion = tasks, memory, companion
+        self.profile_id, self.runtime_id = profile_id, uuid4().hex
+        self.timezone_name = timezone_name
+        # 出站边界：旧来源仍有限制，新业务不再询问五类云端许可。
+        self.allow_restricted = not cloud
+        evaluator = getattr(memory, "evaluation_provider", None)
         self.gateway = ModelCallGateway(provider, reserve=persistence.reserve_call,
             finish=persistence.finish_call,
-            providers={"memory_evaluation": evaluation_provider} if evaluation_provider is not None else {})
+            providers={"memory_evaluation": evaluator} if evaluator is not None else {})
         self._lock = RLock()
         self._prepared: OrderedDict[str, PreparedTurn] = OrderedDict()
-
-    def _settings(self) -> dict[str, Any]:
-        read = getattr(self.companion, "interaction_snapshot", None)
-        try:
-            return dict(read()) if callable(read) else {}
-        except Exception:
-            return {"degraded": True}
 
     def source_policy(self, task_id: str) -> str:
         return self.tasks.task_use_policy(task_id)
 
-    def retrieve(self, request: str) -> RetrievalBundle:
-        # Profile projection has a separate expression-only permission boundary.
-        # Production Memory exposes this neutral view without changing the
-        # established retrieve() contract used by lower-level clients.
-        retrieve = getattr(self.memory, "retrieve_for_planning", None)
-        if callable(retrieve):
-            bundle = retrieve(request)
-            if not isinstance(bundle, RetrievalBundle):
-                raise ValueError("Memory runtime returned an invalid planning bundle")
-            return bundle
-        raise ValueError("Memory runtime does not support neutral planning retrieval")
+    def current_turn(self, task_id: str) -> PreparedTurn:
+        self.check(task_id)
+        return self._prepared[task_id]
 
-    def _profile(self) -> tuple[dict[str, str], tuple[tuple[str, str, int], ...]]:
-        settings = self._settings()
-        try:
-            enabled = self.companion is not None and self.companion.snapshot().get("enabled") is True
-        except Exception:
-            enabled = False
-        if not enabled:
-            return {}, ()
-        if self.cloud and not settings.get("cloud_permissions", {}).get("preferences", False):
-            return {}, ()
-        values: dict[str, str] = {}
-        refs: list[tuple[str, str, int]] = []
-        for entry in self.memory.profile():
-            if self.cloud and entry.use_policy != UsePolicy.CLOUD_ALLOWED:
-                continue
-            values[entry.key] = entry.value
-            refs.append(("memory", entry.memory_id, entry.revision))
-        return values, tuple(refs)
+    def admit_tool_memories(self, task_id: str, refs: tuple[tuple[str, int], ...]) -> None:
+        turn = self._prepared[task_id]
+        if not self.memory.valid(refs):
+            raise WorkflowBlocked("工具读取的记忆已失效。")
+        read_policy = getattr(self.memory, "source_policy")
+        restricted = any(getattr(read_policy(identity, revision), "value", None) != "cloud_allowed" for identity, revision in refs)
+        if restricted:
+            if not self.allow_restricted:
+                raise WorkflowBlocked("工具返回了不能交给当前模型的来源。")
+            self.persistence.tighten_policy(task_id, observed=True)
+            turn = replace(turn, use_policy="local_only")
+            self._prepared[task_id] = turn
+        self.persistence.renew_memory(task_id, "", 0, turn.planning_items,
+            extra_refs=tuple(("memory", identity, revision) for identity, revision in refs))
+
+    def refresh_memory(self, task_id: str, memory_id: str, revision: int, replacement_id: str) -> PreparedTurn:
+        turn = self._prepared[task_id]
+        self.privacy.check(turn.privacy_epoch)
+        if not self.memory.valid(((replacement_id, revision),)):
+            raise WorkflowBlocked("更正后的记忆已经再次变化。")
+        def refers(item: Mapping[str, Any]) -> bool:
+            return any(kind == "memory" and identity == memory_id for kind, identity, _ in _refs(item.get("refs", ())))
+        # 依赖旧记忆的完整历史单元全部省略，实际更正结果在工具观察中提供。
+        revoked_tasks = {str(item.get("source_ref", {}).get("id", "")).rsplit(":", 1)[0]
+                         for item in turn.planning_items if refers(item)}
+        items = tuple(item for item in turn.planning_items if not refers(item) and
+                      str(item.get("source_ref", {}).get("id", "")).rsplit(":", 1)[0] not in revoked_tasks)
+        history = tuple(item for item in turn.history if not refers(item))
+        self.persistence.renew_memory(task_id, memory_id, revision, items, replacement_id)
+        snapshot = self.persistence.context(task_id, 'planning')
+        records = self._memory_records(snapshot['refs'] if snapshot else ())
+        updated = replace(turn, planning_items=items, history=history,
+            memories=tuple(row.content for row in records), memory_records=records)
+        self._prepared[task_id] = updated
+        self.check(task_id)
+        return updated
+
+    def refresh_role(self, task_id: str, expected_revision: int) -> PreparedTurn:
+        turn = self._prepared[task_id]
+        self.privacy.check(turn.privacy_epoch)
+        role = self._role(turn.conversation_id, turn.conversation_epoch, task_id)
+        if role["revision"] != expected_revision:
+            raise WorkflowBlocked("角色在管理操作后又被更改，请重新核对。")
+        items = tuple({**dict(item), "data": role} if item.get("kind") == "role_context" else item for item in turn.planning_items)
+        self.persistence.renew_memory(task_id, "", 0, items)
+        updated = replace(turn, role_revision=role["revision"], role_json=encode(role), planning_items=items)
+        self._prepared[task_id] = updated
+        return updated
+
+    def settle_learning(self, task_id: str, changed_ids: set[str]) -> None:
+        """回答形成后的复核更新退出本轮旧引用；历史保留删除索引，不重做工具。"""
+        turn = self._prepared[task_id]
+        def retained(item: Mapping[str, Any]) -> bool:
+            return not any(kind == 'memory' and identity in changed_ids for kind, identity, _ in _refs(item.get('refs', ())))
+        planning = tuple(item for item in turn.planning_items if retained(item))
+        with self.persistence.store.transaction() as db:
+            # 沿用既有归档逻辑，保留旧快照和来源清理路径。
+            self.persistence.renew_memory(task_id, '', 0, planning)
+            for identity in changed_ids:
+                db.execute("DELETE FROM dependency WHERE task_id=? AND kind='memory' AND object_id=?", (task_id, identity))
+                db.execute("DELETE FROM context_dependency WHERE task_id=? AND kind='memory' AND object_id=?", (task_id, identity))
+        self._prepared[task_id] = replace(turn, planning_items=planning,
+            history=tuple(item for item in turn.history if retained(item)),
+            memories=tuple(row.content for row in turn.memory_records if row.id not in changed_ids),
+            memory_records=tuple(row for row in turn.memory_records if row.id not in changed_ids))
+
+    def retrieve(self, request: str) -> RetrievalBundle:
+        return self.memory.retrieve(request)
+
+    def _memory_records(self, refs: Any) -> tuple[MemoryRecord, ...]:
+        """按已冻结的真实引用恢复正文；不重新检索替换任务原先使用的证据。"""
+        selected = tuple((name, revision) for kind, name, revision in refs if kind == 'memory')
+        if not self.memory.valid(selected):
+            raise WorkflowBlocked('任务引用的记忆已变化，不能恢复旧正文。')
+        repository = getattr(self.memory, 'repository', None)
+        records: list[MemoryRecord] = []
+        size = 0
+        for identity, revision in selected:
+            item = repository.get(identity) if repository is not None else None
+            if item is None or item.revision != revision:
+                raise WorkflowBlocked('无法恢复任务的记忆依据。')
+            record = _record(item, ('task_context',))
+            length = len(record.content.encode('utf-8'))
+            if len(records) < 20 and size + length <= 65536:
+                records.append(record)
+                size += length
+        return tuple(records)
+
+    def _role(self, conversation_id: str, epoch: int, task_id: str) -> dict[str, Any]:
+        read = getattr(self.companion, "context", None)
+        if not callable(read):
+            raise WorkflowBlocked("角色资料不可读，无法准备本轮上下文。")
+        return dict(read(conversation_id, epoch, task_id, allow_restricted=self.allow_restricted))
+
+    def prepare_continuation(self, task_id: str) -> None:
+        """恢复先核对来源，再换入当前角色；不再次执行上下文理解或工具。"""
+        self._prepared.pop(task_id, None)
+        self.persistence.check(task_id, 'planning')
+        link = self.persistence.turn(task_id)
+        saved = self.persistence.context(task_id, 'planning')
+        if link is None or saved is None:
+            raise WorkflowBlocked('Missing continuation context')
+        identity, epoch = link['conversation_id'], link['epoch']
+        if not identity.startswith('single:') and self.conversations.context_epoch(identity) != epoch:
+            raise WorkflowBlocked('Conversation cleared while paused')
+        role = self._role(identity, epoch, task_id)
+        items = tuple({**dict(item), 'data': role} if item.get('kind') == 'role_context' else item for item in saved['items'])
+        extra: set[tuple[str, str, int]] = set()
+        if not identity.startswith('single:'):
+            frozen = self.conversations.freeze(identity, epoch, 2 ** 63 - 1,
+                cloud=not self.allow_restricted, history_allowed=True)
+            items = tuple(item for item in items if item.get('kind') in {'role_context', 'task_origin'}) + tuple(frozen['planning_items'])
+            summary = self.conversations.repository.context_summary(identity, epoch,
+                allow_restricted=self.allow_restricted) if self.conversations.repository else None
+            if summary and not summary.get('unavailable'):
+                items += (summary,)
+            for item in items:
+                extra.update(_refs(item.get('refs', ())))
+                if item.get('source_ref'):
+                    extra.update(_refs((item['source_ref'],)))
+        self.persistence.renew_memory(task_id, '', 0, items, extra_refs=tuple(sorted(extra)))
 
     def prepare(self, task_id: str, request: str, bundle: RetrievalBundle) -> PreparedTurn:
         with self._lock:
@@ -100,146 +195,156 @@ class InteractionCoordinator:
             if prior is not None:
                 self.check(task_id)
                 return prior
-            # Never silently evict a Waiting task's admission context.
             for identity in tuple(self._prepared):
                 task = self.tasks.get(identity)
-                if task is None or task.status not in {TaskStatus.WAITING, TaskStatus.CREATED,
-                                                      TaskStatus.PLANNING, TaskStatus.RUNNING}:
+                if task is None or task.status not in {TaskStatus.WAITING, TaskStatus.CREATED, TaskStatus.PLANNING, TaskStatus.RUNNING}:
                     self._prepared.pop(identity, None)
             if len(self._prepared) >= 128:
                 raise WorkflowBlocked("Interaction admission capacity reached")
-            state = self.persistence.privacy()
-            self.privacy.check(state["epoch"])
-            use_policy = self.tasks.task_use_policy(task_id)
-            if self.cloud and use_policy == "local_only":
-                raise WorkflowBlocked("This request is local_only")
+        privacy_epoch = int(self.persistence.privacy()["epoch"])
+        self.privacy.check(privacy_epoch)
+        use_policy = self.source_policy(task_id)
+        if not self.allow_restricted and use_policy == "local_only":
+            raise WorkflowBlocked("This request is local_only")
+        link = self.persistence.turn(task_id)
+        if link is None:
+            self.persistence.bind_turn(task_id, "single:" + task_id, 0, 1)
             link = self.persistence.turn(task_id)
-            if link is None:
-                self.persistence.bind_turn(task_id, "single:" + task_id, 0, 1)
-                link = self.persistence.turn(task_id)
-            assert link is not None
-            conversation_id = str(link["conversation_id"])
-            is_conversation = not conversation_id.startswith("single:")
-            repository = self.conversations.repository
-            if is_conversation and repository is not None and not repository.contains(conversation_id):
-                # Schema 2's process-local identities have no archived dialogue.
-                # Keep their immutable turn binding and reviewed plan usable,
-                # while treating expression as a standalone legacy task.
-                is_conversation = False
-            settings = self._settings()
-            admitted_categories = {key for key, allowed in settings.get("cloud_permissions", {}).items() if allowed}
-            frozen: dict[str, Any] = {"history": (), "planning_items": (), "warnings": ()}
-            saved = self.persistence.context(task_id, "planning")
-            legacy_plan = saved is None and self.privacy.journal.get_plan(task_id) is not None
-            if is_conversation and saved is None and not legacy_plan:
-                frozen = self.conversations.freeze(conversation_id, int(link["epoch"]), int(link["sequence"]),
-                    cloud=self.cloud,
-                    history_allowed=bool(settings.get("cloud_permissions", {}).get("history", False)))
-            elif saved is not None:
-                # Recovered plans retain their original neutral snapshot. No
-                # dialogue is reconstructed from persisted task/assistant text.
-                frozen["planning_items"] = saved["items"]
-                frozen["warnings"] = ("Recovered plan: expression history was not restored",)
-            overrides: dict[str, Any] = {}
-            prepare = getattr(self.companion, "prepare_interaction", None)
-            if callable(prepare) and not settings.get("degraded"):
-                try:
-                    overrides = dict(prepare(request, task_id=task_id,
-                        conversation_id=conversation_id, use_policy=use_policy))
-                except Exception:
-                    frozen["warnings"] = (*frozen["warnings"], "Interaction preferences could not be saved")
-            profile, profile_refs = self._profile()
-            style_settings = self._settings()
-            admitted_categories.update(key for key, allowed in style_settings.get("cloud_permissions", {}).items() if allowed)
-            style = ""
-            if self.companion is not None and not settings.get("degraded"):
-                try:
-                    if self.companion.snapshot().get("enabled") is True:
-                        style = self.companion.style_instruction(request, cloud=self.cloud,
-                            preferences=profile, conversation_id=conversation_id, use_policy=use_policy)
-                except Exception:
-                    frozen["warnings"] = (*frozen["warnings"], "Optional expression settings are unavailable")
-            settings = self._settings()
-            admitted_categories.update(key for key, allowed in settings.get("cloud_permissions", {}).items() if allowed)
-            if profile:
-                admitted_categories.add("preferences")
-            if frozen["history"] or frozen["planning_items"]:
-                admitted_categories.add("history")
-            expression_epoch = int(style_settings.get("interaction_epoch", 0))
-            if settings.get("interaction_epoch", 0) != expression_epoch:
-                style = ""
-            memory_refs = tuple(("memory", identity, revision) for identity, revision in bundle.revisions)
-            planning = tuple(dict(item) for item in frozen["planning_items"])
-            planning_refs = set(memory_refs)
-            expression_refs = set(memory_refs) | set(profile_refs)
-            for item in planning:
-                planning_refs.update(_refs(item.get("refs", ())))
-                if item.get("source_ref"):
-                    planning_refs.update(_refs((item["source_ref"],)))
-            for item in frozen["history"]:
-                expression_refs.update(_refs(item.get("refs", ())))
-                if item.get("source_ref"):
-                    expression_refs.update(_refs((item["source_ref"],)))
-            expression_refs.update(planning_refs)
-            source_policy = getattr(self.memory, "source_policy", None)
-            restricted = use_policy == "local_only"
-            for kind, identity, revision in expression_refs:
-                if kind == "memory":
-                    policy = source_policy(identity, revision) if callable(source_policy) else None
-                    allowed = getattr(policy, "value", policy) == "cloud_allowed"
-                else:
-                    allowed = self.persistence.reference_policy(kind, identity, revision) == "cloud_allowed"
-                restricted = restricted or not allowed
-            if restricted and use_policy != "local_only":
-                if legacy_plan or saved is not None:
-                    raise WorkflowBlocked("Recovered context policy requires a new intent")
-                self.persistence.tighten_policy(task_id)
+        assert link is not None
+        identity, epoch, sequence = str(link["conversation_id"]), int(link["epoch"]), int(link["sequence"])
+        repository = self.conversations.repository
+        persistent = not identity.startswith("single:") and repository is not None and repository.contains(identity)
+        role = self._role(identity, epoch, task_id)
+        origin = self.privacy.journal.origin(task_id)
+        saved = self.persistence.context(task_id, "planning")
+        history: tuple[Mapping[str, Any], ...] = ()
+        warnings: list[str] = list(bundle.warnings)
+        planning: list[Mapping[str, Any]] = []
+        if saved is not None:
+            planning = list(saved["items"])
+            original = next((item.get("data") for item in planning if item.get("kind") == "role_context"), None)
+            if original is None or original.get("role_id") != role["role_id"] or original.get("revision") != role["revision"]:
+                raise WorkflowBlocked("角色或有效要求已变化，请重新发起请求。")
+            role = original
+            # 仅恢复快照中已经登记来源的双方交流；不能在表达阶段偷偷加入未登记的新历史。
+            history = tuple(dict(item,
+                role='user' if item['kind'] == 'user_reference' else 'assistant',
+                verified=False, source_kind='historical_user_reference' if item['kind'] == 'user_reference' else 'assistant_proposal')
+                for item in planning if item.get('kind') in {'user_reference', 'assistant_reference'})
+        else:
+            if self.privacy.journal.get_plan(task_id) is not None:
+                raise WorkflowBlocked("旧计划未绑定新版角色上下文，请重新发起请求。")
+            if persistent:
+                assert repository is not None
+                frozen = self.conversations.freeze(identity, epoch, sequence,
+                    cloud=not self.allow_restricted, history_allowed=True)
+                history = tuple(frozen["history"])
+                planning.extend(frozen["planning_items"])
+                warnings.extend(frozen["warnings"])
+                summary = repository.context_summary(identity, epoch, allow_restricted=self.allow_restricted)
+                if summary is not None:
+                    if summary.get("unavailable"):
+                        warnings.append("conversation_summary_sources_unavailable")
+                    else:
+                        planning.insert(0, summary)
+            # 本地模型可理解旧受限资料，但派生理解不能因此扩大外发范围。
+            role_sources = [role["character_card"], *role["learned_habits"],
+                            *role["user_understanding"], *role["interaction_approach"]]
+            if role.get("current_emotion") is not None:
+                role_sources.append(role["current_emotion"])
+            if (any(row.get("use_policy") == "local_only" for row in role_sources)
+                    or any(row.get("source_ref", {}).get("use_policy") == "local_only" for row in history)):
                 use_policy = "local_only"
-            if self.cloud and use_policy == "local_only":
+                if self.source_policy(task_id) != use_policy:
+                    self.persistence.tighten_policy(task_id)
+            base_revision = role["revision"]
+            def guard() -> None:
+                self.privacy.check(privacy_epoch)
+                self.check(task_id)
+                current = self._role(identity, epoch, task_id)
+                if current["role_id"] != role["role_id"] or current["revision"] != base_revision:
+                    raise WorkflowBlocked("角色上下文在理解期间已改变。")
+                if persistent and self.conversations.context_epoch(identity) != epoch:
+                    raise WorkflowBlocked("会话已清空，旧理解不再保存。")
+            provider = self.gateway.bind(task_id, "context_understanding", guard)
+            try:
+                entries = () if origin["kind"] == "proactive" else understand(provider, request=request, role=role, history=history,
+                    now=datetime.now(timezone.utc).isoformat(), timezone=self.timezone_name)
+                guard()
+                apply = getattr(self.companion, "apply_understanding", None)
+                if not callable(apply):
+                    raise WorkflowBlocked("角色理解保存接口不可用。")
+                # 同隐私发布屏障内核对再保存，清空或遗忘不能被晚到结果复活。
+                with self.privacy.publication(privacy_epoch):
+                    guard()
+                    apply(task_id, entries, expected_revision=base_revision,
+                        conversation_id=identity, conversation_epoch=epoch, sequence=sequence, use_policy=use_policy)
+            except ValueError:
+                warnings.append("本轮交流要求未能解析或保存，未更改长期人格；请重述或重试。")
+            role = self._role(identity, epoch, task_id)
+            planning.insert(0, {"kind": "role_context", "data": role, "authority": "character_and_scoped_communication_only"})
+            planning.insert(1, {"kind": "task_origin", "data": origin,
+                "instruction": False, "grants_permission": False})
+            # 角色是必需资料；超预算只省略完整的最旧历史轮次。
+            while len(planning) > 32:
+                oldest = next((item for item in planning if item.get("source_ref")), None)
+                if oldest is None:
+                    raise WorkflowBlocked("Context item budget exceeded")
+                old_id = str(oldest["source_ref"]["id"]).rsplit(":", 1)[0]
+                planning = [item for item in planning if not str(item.get("source_ref", {}).get("id", "")).startswith(old_id + ":")]
+                warnings.append("planning_context_limit")
+        refs = set(("memory", name, revision) for name, revision in bundle.revisions)
+        for item in planning:
+            refs.update(_refs(item.get("refs", ())))
+            if item.get("source_ref"):
+                refs.update(_refs((item["source_ref"],)))
+        for kind, name, revision in refs:
+            if kind == "memory":
+                read_policy = getattr(self.memory, "source_policy", None)
+                policy = getattr(read_policy(name, revision), "value", None) if callable(read_policy) else None
+            else:
+                policy = self.persistence.reference_policy(kind, name, revision)
+            if policy != "cloud_allowed":
+                use_policy = "local_only"
+        if use_policy == "local_only":
+            if not self.allow_restricted:
                 raise WorkflowBlocked("Context contains local_only sources")
-            if saved is None and not legacy_plan:
-                digest = sha256(canonical({"request": request, "items": planning,
-                    "memories": [record.content for record in bundle.records],
-                    "refs": sorted(planning_refs)}).encode("utf-8")).hexdigest()
-                self.persistence.save_context(task_id, digest, planning, tuple(sorted(planning_refs)), "planning")
-            elif saved is not None:
-                planning_refs.update(_refs(saved["refs"]))
-                expression_refs.update(planning_refs)
-            expression_digest = sha256(canonical({"refs": sorted(expression_refs)}).encode("utf-8")).hexdigest()
-            # Confirmation may reuse a previously frozen expression source set.
-            if self.persistence.context(task_id, "expression") is None:
-                self.persistence.save_context(task_id, expression_digest, (), tuple(sorted(expression_refs)), "expression")
-            context = PreparedTurn(task_id, int(state["epoch"]),
-                conversation_id if is_conversation else "", int(link["epoch"]), int(link["sequence"]),
-                planning, tuple(dict(item) for item in frozen["history"]), style,
-                tuple(record.content for record in bundle.records) + (
-                    (canonical({"source_kind": "accepted_user_preference", "values": profile}),) if profile else ()),
-                tuple(frozen["warnings"]), use_policy, expression_epoch,
-                frozenset(overrides.get("consumed_profile_keys", ())),
-                frozenset(admitted_categories))
-            self._prepared[task_id] = context
-            self.check(task_id)
-            return context
+            if self.source_policy(task_id) != use_policy:
+                self.persistence.tighten_policy(task_id)
+        if saved is None:
+            digest = sha256(encode({"request": request, "items": planning, "refs": sorted(refs)}).encode("utf-8")).hexdigest()
+            self.persistence.save_context(task_id, digest, planning, tuple(sorted(refs)), "planning")
+        if self.persistence.context(task_id, "expression") is None:
+            self.persistence.save_context(task_id, sha256(encode(sorted(refs)).encode("utf-8")).hexdigest(), (), tuple(sorted(refs)), "expression")
+        memory_records = self._memory_records(saved['refs']) if saved is not None else tuple(bundle.records)
+        result = PreparedTurn(task_id=task_id, privacy_epoch=privacy_epoch,
+            conversation_id=identity if persistent else "", conversation_epoch=epoch, sequence=sequence,
+            planning_items=tuple(planning), history=history, style="", role_json=encode(role),
+            memories=tuple(row.content for row in memory_records), memory_records=memory_records,
+            warnings=tuple(dict.fromkeys(warnings)),
+            use_policy=use_policy, profile_id=self.profile_id, runtime_id=self.runtime_id,
+            role_id=role["role_id"], role_revision=role["revision"])
+        result = replace(result, origin=origin["kind"])
+        with self._lock:
+            self._prepared[task_id] = result
+        self.check(task_id)
+        return result
 
     def check(self, task_id: str, *, expression: bool = False) -> None:
         value = self._prepared.get(task_id)
         if value is not None:
             self.privacy.check(value.privacy_epoch)
-            settings = self._settings()
-            if settings.get("degraded") and (expression or value.history or value.planning_items):
-                raise WorkflowBlocked("Interaction source permissions are unavailable")
-            if self.cloud and any(not settings.get("cloud_permissions", {}).get(key, False)
-                                  for key in value.allowed_cloud_categories):
-                raise WorkflowBlocked("A previously admitted cloud category was revoked")
+            if value.profile_id != self.profile_id or value.runtime_id != self.runtime_id:
+                raise WorkflowBlocked("Backend generation changed")
+            current = self._role(value.conversation_id, value.conversation_epoch, task_id)
+            if current["role_id"] != value.role_id or current["revision"] != value.role_revision:
+                raise WorkflowBlocked("角色背景已修改，旧快照不可继续使用。")
             if value.conversation_id:
                 try:
-                    context_epoch = self.conversations.context_epoch(value.conversation_id)
-                except ConversationConflict as exc:
-                    raise WorkflowBlocked("Conversation context expired") from exc
-                if context_epoch != value.conversation_epoch:
-                    raise WorkflowBlocked("Conversation epoch expired")
-            if expression and settings.get("interaction_epoch", 0) != value.expression_epoch:
-                raise WorkflowBlocked("Expression settings or cue were reset")
+                    if self.conversations.context_epoch(value.conversation_id) != value.conversation_epoch:
+                        raise WorkflowBlocked("Conversation epoch expired")
+                except ConversationConflict as error:
+                    raise WorkflowBlocked("Conversation context expired") from error
         self.persistence.check(task_id, "expression" if expression else "planning")
 
     def calls(self, task_id: str, purpose: str) -> LLMProvider:
@@ -249,7 +354,7 @@ class InteractionCoordinator:
     @contextmanager
     def publication(self, task_id: str) -> Iterator[None]:
         turn = self._prepared.get(task_id)
-        epoch = turn.privacy_epoch if turn is not None else int(self.persistence.privacy()["epoch"])
+        epoch = turn.privacy_epoch if turn else int(self.persistence.privacy()["epoch"])
         with self.privacy.publication(epoch):
             self.check(task_id)
             yield
@@ -258,75 +363,25 @@ class InteractionCoordinator:
                 facts: tuple[Mapping[str, Any], ...], signals: Mapping[str, Any]) -> None:
         self.check(turn.task_id)
         context = self.persistence.context(turn.task_id, "expression")
-        refs = _refs(context["refs"] if context is not None else ())
-        policy = turn.use_policy
-        source_policy = getattr(self.memory, "source_policy", None)
-        for kind, identity, revision in refs:
-            if kind == "memory":
-                value = source_policy(identity, revision) if callable(source_policy) else None
-                allowed = getattr(value, "value", value) == "cloud_allowed"
-            else:
-                allowed = self.persistence.reference_policy(kind, identity, revision) == "cloud_allowed"
-            if not allowed:
-                policy = "local_only"
-        for role in ("user", "assistant"):
-            self.persistence.store.set_dependency_version("dialogue_turn", turn.task_id + ":" + role,
-                turn.sequence, use_policy=policy)
-        if turn.conversation_id:
+        refs = _refs(context["refs"] if context else ())
+        for side in ("user", "assistant"):
+            self.persistence.store.set_dependency_version("dialogue_turn", turn.task_id + ":" + side,
+                                                         turn.sequence, use_policy=turn.use_policy)
+        if turn.conversation_id and turn.origin == "user":
             self.conversations.publish(turn.conversation_id, turn.conversation_epoch, turn.sequence,
-                turn.task_id, request, response, refs=refs, use_policy=policy, facts=facts)
-        accept = getattr(self.companion, "accept_signals", None)
-        if callable(accept) and self._settings().get("interaction_epoch", 0) == turn.expression_epoch:
-            self._offer_profiles(turn, request, signals, policy)
-            accept(turn.task_id, signals, conversation_id=turn.conversation_id or "single:" + turn.task_id,
-                   use_policy=policy)
-        self._prepared.pop(turn.task_id, None)
-
-    def _offer_profiles(self, turn: PreparedTurn, request: str,
-                        signals: Mapping[str, Any], policy: str) -> None:
-        """Keep personal facts in Memory's existing revision-checked review path.
-
-        The caller holds the publication barrier after the terminal task commit.
-        A generation result may propose a fact, but cannot accept it or change
-        profile data through companion configuration.
-        """
-        if (self.companion is None or self.companion.snapshot().get("enabled") is not True
-                or getattr(self.memory, "mode", "explicit_only") == "paused"):
-            return
-        candidates = signals.get("preference_candidates", ())
-        if not isinstance(candidates, (tuple, list)) or len(candidates) > 2:
-            return
-        offer = getattr(self.memory, "offer_profile_candidate", None)
-        task = self.tasks.get(turn.task_id)
-        if task is None or task.status != TaskStatus.COMPLETED:
-            raise WorkflowBlocked("Profile candidates require a committed completed task")
-        for raw in candidates:
-            candidate = validate_preference(raw, request)
-            if candidate is None or candidate.key not in {"preferred_name", "reply_language"}:
-                continue
-            if not isinstance(candidate.value, str):
-                continue
-            self.check(turn.task_id, expression=True)
-            if not callable(offer):
-                raise ValueError("Memory runtime does not support reviewed profile candidates")
-            offer(request, task_id=turn.task_id, key=candidate.key, value=candidate.value,
-                  span=candidate.span, created_at=task.created_at, use_policy=UsePolicy(policy))
+                turn.task_id, request, response, refs=refs, use_policy=turn.use_policy, facts=facts)
+        if turn.origin == 'proactive' and not response:
+            with self.persistence.store.transaction() as db:
+                db.execute("DELETE FROM conversation_item WHERE task_id=? AND kind IN ('assistant_message','task_card')", (turn.task_id,))
+                db.execute("UPDATE conversation_turn SET published=0,refs='[]',facts='[]' WHERE task_id=?", (turn.task_id,))
+                db.execute('UPDATE conversation SET timeline_revision=timeline_revision+1 WHERE id=?', (turn.conversation_id,))
+        with self._lock:
+            self._prepared.pop(turn.task_id, None)
 
     def invalidate(self) -> None:
-        with self._lock:
-            self.conversations.invalidate()
-            invalidate = getattr(self.companion, "invalidate_interaction", None)
-            if callable(invalidate):
-                invalidate()
-            # Admission tickets remain invalid until the worker leaves. Clearing
-            # them here would accidentally admit a late callback at the new epoch.
+        self.conversations.invalidate()
 
     def discard_tasks(self, task_ids: tuple[str, ...]) -> None:
-        """Erase cached bodies only after their durable tasks were scrubbed.
-
-        The durable scrub guard still rejects late callbacks after removing the
-        process-local ticket, unlike a bare global cache invalidation.
-        """
         with self._lock:
             for task_id in task_ids:
                 self._prepared.pop(task_id, None)

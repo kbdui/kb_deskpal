@@ -31,11 +31,11 @@ class _Command:
     privacy_epoch: int
 
 
-READ_OPERATIONS = frozenset({"conversation_task_location", "schedule_items", "task_review", "task_updates", "command_status", "conversation_list", "conversation_timeline", "conversation_item", "conversation_cleanup_status", "appearance_snapshot", "tools_catalog", "tool_detail", "plugins_catalog", "reminder_feed", "reminder_detail", "tasks", "task", "memories", "goals", "goal", "milestones",
+READ_OPERATIONS = frozenset({"attentions", "notification_policy", "conversation_task_location", "schedule_items", "task_review", "task_updates", "command_status", "conversation_list", "conversation_timeline", "conversation_item", "conversation_cleanup_status", "appearance_snapshot", "tools_catalog", "tool_detail", "plugins_catalog", "reminder_feed", "reminder_detail", "tasks", "task", "memories", "goals", "goal", "milestones",
                              "bindings", "proposals", "proposal", "settings", "notification_feed",
                              "notification_validate", "presentation", "companion",
-                             "conversation_snapshot", "interaction_snapshot", "cleanup_status"})
-CONTROL_OPERATIONS = frozenset({"conversation_clear", "conversation_delete", "cancel", "diagnostics", "request_forget"})
+                             "conversation_snapshot", "interaction_snapshot", "cleanup_status", "learning_records"})
+CONTROL_OPERATIONS = frozenset({"task_pause", "task_continue", "notification_control", "task_append_requirement", "task_answer", "conversation_clear", "conversation_delete", "cancel", "diagnostics", "request_forget", "attention_end"})
 PRIVACY_ACTIONS = frozenset({"forget", "correct", "accept", "reject"})
 MAX_PENDING = 32
 MAX_PARAMETERS_BYTES = 131072
@@ -82,6 +82,7 @@ class ApplicationBridge(QObject):
         self._app: ApplicationService | None = None
         self._facade: DesktopPort | None = None
         self._state = "Initializing"
+        self._startup_error: dict[str, Any] | None = None
         self._epoch = 0
         self._lock = RLock()
         self._commands: Queue[_Command] = Queue(MAX_PENDING)
@@ -110,6 +111,12 @@ class ApplicationBridge(QObject):
     def state(self) -> str:
         with self._lock:
             return self._state
+
+    @property
+    def startup_error(self) -> dict[str, Any] | None:
+        """Sanitized startup reason survives shutdown's ordinary-reply barrier."""
+        with self._lock:
+            return dict(self._startup_error) if self._startup_error is not None else None
 
     @property
     def privacy_epoch(self) -> int:
@@ -157,10 +164,12 @@ class ApplicationBridge(QObject):
                 self._set_state("CleanupBlocked" if blocked else "Ready")
         except Exception as exc:
             from deskpal.maintenance.service import safe_error
+            with self._lock:
+                self._startup_error = safe_error(exc)
             self._set_state("StartupFailed" if not self._closing.is_set() else "Closing")
             self._deliver({"request_id": "startup", "operation": "startup", "generation": 0,
                              "privacy_epoch": self.privacy_epoch, "ok": False,
-                             "error": safe_error(exc)})
+                             "error": self.startup_error})
         finally:
             self._initialized.set()
         self._loop(self._commands)

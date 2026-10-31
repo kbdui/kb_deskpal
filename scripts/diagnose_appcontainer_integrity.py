@@ -318,7 +318,7 @@ def _observe(session: Session, process: int, package: str) -> None:
 
 
 def _fingerprints() -> dict[str, str]:
-    paths = ("scripts/diagnose_appcontainer_integrity.py", "tests/unit/test_appcontainer_integrity_diagnostic.py",
+    paths = ("scripts/diagnose_appcontainer_integrity.py", "tests/unit/execution_sandbox/test_appcontainer_integrity_diagnostic.py",
         "scripts/diagnose_write_restricted_token.py", "scripts/diagnose_worker_registry.py",
         "src/deskpal/execution/windows/_win32.py", "src/deskpal/execution/windows/launcher.py",
         "src/deskpal/execution/runtime.py", "tests/fixtures/windows/native_probe_v2.c",

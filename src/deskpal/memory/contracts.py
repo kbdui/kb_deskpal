@@ -81,6 +81,10 @@ class MemoryDraft:
     expires_at: datetime | None = None
     pinned: bool = False
     half_life_days: float = 30.0
+    destination: str = "facts"
+    reason: str = ""
+    uncertainty: str = ""
+    review_after: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -154,7 +158,7 @@ class MemoryRepository(Protocol):
     def epoch(self) -> int: ...
 
     def page_items(self, *, status: MemoryStatus | None = None, limit: int = 100,
-                   offset: int = 0) -> MemoryPage: ...
+                   offset: int = 0, group: str = 'all') -> MemoryPage: ...
 
     def ingest(self, source: MemorySource, draft: MemoryDraft, *,
                accepted: bool = False, idempotency_key: str = "") -> MemoryItem: ...
@@ -170,6 +174,9 @@ class MemoryRepository(Protocol):
 
     def revise(self, memory_id: str, expected_revision: int, source: MemorySource,
                draft: MemoryDraft, *, temporal: bool = False) -> MemoryItem: ...
+
+    def update_understanding(self, memory_id: str, expected_revision: int, source: MemorySource,
+                             draft: MemoryDraft, status: MemoryStatus) -> MemoryItem: ...
 
     def forget(self, memory_id: str, expected_revision: int) -> DeletionReceipt: ...
 
@@ -194,7 +201,7 @@ class MemoryRuntime(Protocol):
     def epoch(self) -> int: ...
 
     def page_items(self, *, status: MemoryStatus | None = None, limit: int = 100,
-                   offset: int = 0) -> MemoryPage: ...
+                   offset: int = 0, group: str = 'all') -> MemoryPage: ...
 
     def retrieve(self, query: str) -> RetrievalBundle: ...
 

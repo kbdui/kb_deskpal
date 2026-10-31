@@ -164,14 +164,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     workflow_cli.add_arguments(parser)
     request_mode.add_argument("--memory", choices=("remember", "list", "profile", "accept", "reject", "correct", "forget", "export", "rebuild-index"),
                               help="Explicit local memory management; never invokes the planner")
-    request_mode.add_argument("--companion", choices=("show", "configure", "reset", "rollback", "preference", "cue"),
+    request_mode.add_argument("--companion", choices=("show", "character_card", "reset"),
                               help="Local persona and expression management; never invokes the planner")
     request_mode.add_argument("--conversation", choices=("interactive",),
                               help="Explicit process-local dialogue; never restores a previous CLI history")
     parser.add_argument("--conversation-cloud", action="store_true",
                         help="Allow current requests in this interactive conversation to use the cloud")
-    request_mode.add_argument("--interaction", choices=("show", "cloud_permissions", "identity", "preference",
-                              "confirm_candidate", "reject_candidate", "clear_cue", "clear_constraints"),
+    request_mode.add_argument("--interaction", choices=("show", "character_card", "reset"),
                               help="Local interaction settings/candidate management, with zero model calls")
     parser.add_argument("--interaction-parameters", metavar="JSON",
                         help="Bounded unique-key JSON, including expected_revision for interaction writes")
@@ -248,7 +247,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             arguments = snapshot_json(json.loads(args.arguments or "{}", object_pairs_hook=unique_pairs))
             if not isinstance(arguments, dict):
                 raise ValueError("Arguments must be an object")
-            direct_planner = DirectToolPlanner(ToolCall(args.tool, arguments, "cli-direct"))
+            direct_planner = None
+            args.request = "请判断并执行这个工具请求：" + json.dumps({"tool": args.tool, "arguments": arguments}, ensure_ascii=False)
         except (ValueError, TypeError, RecursionError):
             parser.error("--arguments must be a finite JSON object with unique keys")
     try:

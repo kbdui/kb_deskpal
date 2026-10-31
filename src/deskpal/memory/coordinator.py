@@ -60,9 +60,9 @@ def _json_value(value: Any) -> Any:
 
 class MemoryCoordinator:
     def __init__(self, repository: MemoryRepository, *, retriever: _Retriever | None = None,
-                 evaluator: MemoryEvaluator | None = None, mode: str = "explicit_only",
+                 evaluator: MemoryEvaluator | None = None, mode: str = "automatic",
                  cloud: bool = True, clock: Clock = utc_now) -> None:
-        if mode not in {"explicit_only", "candidate_review", "paused"}:
+        if mode not in {"automatic", "explicit_only", "candidate_review", "paused"}:
             raise MemoryError("Unknown memory mode")
         if type(cloud) is not bool or not callable(clock):
             raise MemoryError("Invalid memory runtime configuration")
@@ -158,7 +158,7 @@ class MemoryCoordinator:
             if key not in PROFILE_KEYS or hint != (key, value):
                 raise MemoryError("Profile fields must match an explicit supported preference")
             return key, value
-        return hint if hint is not None else ("", "")
+        return "", ""
 
     def _check_conflict(self, key: str, value: str, scope: str, *, excluding: str = "",
                         owner_id: str = "local") -> None:
@@ -213,137 +213,13 @@ class MemoryCoordinator:
         return self.repository.ingest(source, draft, accepted=True,
                                       idempotency_key="execution:" + task_id)
 
-    def offer_profile_candidate(self, request: str, *, task_id: str, key: str,
-                                value: str, span: tuple[int, int], created_at: datetime,
-                                use_policy: UsePolicy) -> MemoryItem:
-        """Offer attributed profile evidence for explicit, revision-checked review.
-
-        The application supplies a real root task and its stable creation time
-        while holding its publication/privacy barrier. This method does not
-        infer semantic truth, evaluate a model or grant acceptance.
-        """
-        request = _content(request)
-        if not isinstance(task_id, str) or not task_id.strip():
-            raise MemoryError("A profile candidate requires its root task id")
-        if key not in {"preferred_name", "reply_language"} or not isinstance(value, str):
-            raise MemoryError("Unsupported profile candidate field or value")
-        if not isinstance(use_policy, UsePolicy):
-            raise MemoryError("Invalid profile candidate use policy")
-        if (not isinstance(created_at, datetime) or created_at.tzinfo is None
-                or created_at.utcoffset() is None):
-            raise MemoryError("Profile candidate creation time must be aware")
-        if (not isinstance(span, tuple) or len(span) != 2
-                or type(span[0]) is not int or type(span[1]) is not int
-                or not 0 <= span[0] < span[1] <= len(request)
-                or span[1] - span[0] > 256):
-            raise MemoryError("Profile candidate requires a bounded exact evidence span")
-        quote = request[span[0]:span[1]]
-        if not quote.strip():
-            raise MemoryError("Profile candidate evidence must be non-empty")
-        normalized = unicodedata.normalize("NFC", value.strip())
-        if key == "preferred_name":
-            try:
-                valid_name = (0 < len(normalized) <= 40 and len(normalized.encode("utf-8")) <= 120
-                              and not any(unicodedata.category(char) in {"Cc", "Cf"} for char in value))
-            except UnicodeError:
-                raise MemoryError("Preferred name must be valid UTF-8") from None
-            if not valid_name:
-                raise MemoryError("Preferred name must be non-empty, bounded and free of control characters")
-        else:
-            normalized = normalized.lower()
-            if normalized not in {"zh", "en"}:
-                raise MemoryError("Reply language must be zh or en")
-        # Include the original request digest and exact offsets, rather than
-        # assigning an assistant-generated text summary a source identity.
-        fingerprint = hashlib.sha256(json.dumps({
-            "task_id": task_id, "key": key, "value": normalized, "span": span,
-            "request_digest": hashlib.sha256(request.encode("utf-8")).hexdigest(),
-        }, sort_keys=True, ensure_ascii=False, separators=(",", ":"),
-            allow_nan=False).encode("utf-8")).hexdigest()
-        when = created_at.astimezone(timezone.utc)
-        source = MemorySource(request, origin="user_message", task_id=task_id,
-            id=str(uuid5(NAMESPACE_URL, "deskpal/interaction_profile/" + fingerprint)),
-            created_at=when, use_policy=use_policy)
-        draft = MemoryDraft(quote, quote, claim_type=ClaimType.USER_REPORT,
-            kind=MemoryKind.SEMANTIC, subject="user", predicate=key, value=normalized,
-            scope="global", profile_key=key, valid_from=when)
-        # Default expiry is owned by Repository (seven days); acceptance clears
-        # that default under its existing CAS/conflict rules. Stable ingestion
-        # receipts also return deletion tombstones instead of recreating data.
-        return self.repository.ingest(source, draft, accepted=False,
-            idempotency_key="interaction_profile:" + task_id + ":" + fingerprint)
-
-    def learn(self, request: str, task_id: str, *,
-              use_policy: UsePolicy = UsePolicy.CLOUD_ALLOWED) -> tuple[str, ...]:
-        return self._learn(request, task_id, use_policy=use_policy)
-
     @property
     def evaluation_provider(self) -> LLMProvider | None:
         return getattr(self._evaluator, "model_client", None)
 
-    def learn_with_client(self, request: str, task_id: str, *, client: LLMProvider,
-                          guard: Callable[[], None],
-                          use_policy: UsePolicy = UsePolicy.CLOUD_ALLOWED,
-                          excluded_profile_keys: frozenset[str] = frozenset()) -> tuple[str, ...]:
-        return self._learn(request, task_id, use_policy=use_policy, client=client,
-                           guard=guard, excluded_profile_keys=excluded_profile_keys)
-
-    def _learn(self, request: str, task_id: str, *,
-               use_policy: UsePolicy = UsePolicy.CLOUD_ALLOWED,
-               client: LLMProvider | None = None, guard: Callable[[], None] | None = None,
-               excluded_profile_keys: frozenset[str] = frozenset()) -> tuple[str, ...]:
-        if self.mode != "candidate_review":
-            return ()
-        if self._evaluator is None:
-            return ("Automatic memory evaluation is unavailable",)
-        if use_policy != UsePolicy.CLOUD_ALLOWED:
-            return ("Automatic memory evaluation skipped by use policy",)
-        try:
-            if guard is not None:
-                guard()
-            request = _content(request)
-            if not isinstance(task_id, str) or not task_id.strip():
-                raise MemoryError("Learning requires a task id")
-            # Durable consumption precedes external evaluation. Even empty,
-            # failed, rejected or forgotten extraction is not retried implicitly.
-            if not self.repository.claim_learning(task_id):
-                return ()
-            now = self._now()
-            digest = hashlib.sha256(request.encode("utf-8")).hexdigest()
-            source = MemorySource(request, id=str(uuid5(NAMESPACE_URL, "deskpal/learn/" + task_id + "/" + digest)),
-                                  task_id=task_id, created_at=now, use_policy=use_policy)
-            if client is not None:
-                evaluate_with_client = getattr(self._evaluator, "evaluate_with_client", None)
-                if not callable(evaluate_with_client):
-                    # Custom evaluators must opt into the task-bound boundary.
-                    raise MemoryError("Evaluator does not support controlled model calls")
-                candidates = evaluate_with_client(source, client)
-            else:
-                candidates = self._evaluator.evaluate(source)
-            if guard is not None:
-                guard()
-            maximum = getattr(self._evaluator, "max_candidates", 5)
-            if (type(maximum) is not int or maximum <= 0 or not isinstance(candidates, tuple)
-                    or len(candidates) > maximum):
-                raise MemoryError("Evaluator returned invalid candidates")
-            for draft in candidates:
-                validate_draft(draft, source)
-            for draft in candidates:
-                if draft.profile_key in excluded_profile_keys:
-                    continue
-                if guard is not None:
-                    guard()
-                # Repository owns candidate TTL; default expiry is cleared on
-                # explicit acceptance. Evaluators cannot choose validity/pinning.
-                bounded = replace(draft, valid_from=None, valid_to=None, expires_at=None,
-                                  pinned=False, half_life_days=30.0)
-                fingerprint = hashlib.sha256(json.dumps(_json_value(asdict(bounded)), sort_keys=True,
-                                                       ensure_ascii=False, allow_nan=False).encode("utf-8")).hexdigest()
-                self.repository.ingest(source, bounded, accepted=False,
-                                       idempotency_key="learning:" + task_id + ":" + fingerprint)
-            return ()
-        except Exception:
-            return ("Automatic memory learning was incomplete",)
+    def learn(self, request: str, task_id: str) -> tuple[str, ...]:
+        """兼容旧低层协议；实际学习仅由应用反馈服务调用。"""
+        return ()
 
     def profile(self) -> tuple[ProfileEntry, ...]:
         from .retrieval import profile_entries
@@ -364,8 +240,8 @@ class MemoryCoordinator:
         return self.repository.list_items(status=status, include_history=include_history)
 
     def page_items(self, *, status: MemoryStatus | None = None, limit: int = 100,
-                   offset: int = 0) -> MemoryPage:
-        return self.repository.page_items(status=status, limit=limit, offset=offset)
+                   offset: int = 0, group: str = 'all') -> MemoryPage:
+        return self.repository.page_items(status=status, limit=limit, offset=offset, group=group)
 
     def accept(self, memory_id: str, expected_revision: int) -> MemoryItem:
         item = self.repository.get(memory_id)
@@ -393,6 +269,10 @@ class MemoryCoordinator:
         draft = MemoryDraft(content, content, predicate=key or "statement", value=value,
                             profile_key=key, scope=item.draft.scope,
                             valid_from=now if temporal else item.draft.valid_from)
+        if item.status in (MemoryStatus.CANDIDATE, MemoryStatus.DISPUTED):
+            draft = replace(draft, destination=item.draft.destination, reason='用户明确更正理解，后续可继续复核',
+                            uncertainty=item.draft.uncertainty)
+            return self.repository.update_understanding(memory_id, expected_revision, source, draft, MemoryStatus.CANDIDATE)
         return self.repository.revise(memory_id, expected_revision, source, draft, temporal=temporal)
 
     def forget(self, memory_id: str, expected_revision: int) -> DeletionReceipt:
@@ -411,11 +291,10 @@ class MemoryCoordinator:
     def _eligible(self, item: MemoryItem, now: datetime, *, enforce_cloud: bool = True) -> bool:
         draft = item.draft
         start = draft.valid_from if draft.valid_from is not None else item.source.created_at
-        return (item.status == MemoryStatus.ACCEPTED
+        return (item.status in (MemoryStatus.ACCEPTED, MemoryStatus.CANDIDATE, MemoryStatus.DISPUTED)
                 and draft.claim_type != ClaimType.LEGACY
                 and (not enforce_cloud or not self.cloud or item.source.use_policy == UsePolicy.CLOUD_ALLOWED)
                 and start <= now
-                and (draft.valid_to is None or now < draft.valid_to)
                 and (draft.expires_at is None or now < draft.expires_at))
 
     def valid(self, revisions: tuple[tuple[str, int], ...]) -> bool:

@@ -1,156 +1,18 @@
 # 文档导航
 
-## 按读者查阅
+当前基线：2026-10-30，Phase 01–05 已实现，Phase 06 待实施。各阶段的定向验证记录只证明对应范围；最新全量检查状态见[整理记录](maintenance/2026-10-30-repository-cleanup.md)。
 
-| 读者 | 入口 | 内容 |
-| --- | --- | --- |
-| 使用者 | [用户指南](user-guide/README.md) | 安装、配置、桌面与会话、任务授权、记忆隐私、目标提议、CLI、维护与排错 |
-| 开发者 | [开发者指南](developer-guide/README.md) | 文件架构、设计边界、请求生命周期、核心代码、GUI、存储维护、扩展和验证 |
+| 分类 | 入口 | 内容 |
+|---|---|---|
+| 使用 | [用户指南](user-guide/README.md) | 启动、模型配置、角色与聊天、任务、记忆、维护 |
+| 开发 | [开发者指南](developer-guide/README.md) | 模块、执行链路、存储、扩展及测试纪律 |
+| 设计约定 | [28 日完整讨论](planning/companion-model/2026-10-28-character-memory-redesign-discussion.md)、[29 日确认结论](planning/companion-model/2026-10-29-redesign-follow-up-decisions.md) | 原路径恢复完整原文；后续补充与阅读说明见[目录](planning/companion-model/README.md)，摘要不替代原文 |
+| 实施 | [六阶段开发与验收](planning/companion-redesign/README.md) | P1–P5 实施证据、P6 后续工作、公共契约与数据库设计 |
+| 持续报告 | [实施日志](reports/implementation-log.md) | GUI 优化及后续短报告统一追加，按日期记录 |
+| 长期方向 | [路线图](roadmap/README.md) | 当前收尾与正式版后拓展 |
+| 维护记录 | [本次整理](maintenance/2026-10-30-repository-cleanup.md)、[测试目录](../tests/README.md) | 路径变更、退役依据、测试现状 |
+| 历史 | [存档导航](archive/README.md) | 旧版本、审计、交接、讨论原文及未通过的实验 |
 
-两套指南最初按 2026-10-23 实现整理，GUI 相关内容已于 2026-10-26 随本轮开发更新，建议新读者从这里开始。下列 `versions/` 保存历史接口和实际证据，`planning/` 保存计划与设计快照；它们的目录编号不等于当前软件包版本。
+分类规则：用户怎么用写入 user-guide，代码怎么接写入 developer-guide，已确认产品含义写入 design，阶段任务和验收写入 planning。短报告统一更新 implementation-log；只有一次性维护记录另存 maintenance。文件采用英文小写 `kebab-case.md`；日期用于一次性记录，稳定指南不把日期写进文件名。
 
-## 版本状态与历史资料
-
-2026-10-26 GUI 重构 D1–D5 源码已整合，旧 GUI 实现已退役。本轮自动化首败、修补与结果见[测试记录](planning/gui-refactor/test-report.md)，实机交互按用户决定后续自行检查，见[操作要点](planning/gui-refactor/manual-checklist.md)。另见[开发范围](planning/gui-refactor/development-status.md)、[源码接口](developer-guide/gui-refactor.md)与[桌面用法](user-guide/desktop.md)。历史版本通过数只属于原测试批次。
-
-2026-10-23 后续补验：[真实 BGE 托管链路](versions/v0.9/managed-embedding-live-report.md)已完成新下载、SHA-256 清单登记及新进程离线 CPU 推理；512 维有限归一化向量、重复 query 一致、网络尝试 0。模型已迁入 `data/models/bge-small-zh-v1.5` 并由本地配置启用，内置默认未改，权重不随 Git 分发；使用与实现分别见[用户维护指南](user-guide/maintenance.md)和[开发者存储指南](developer-guide/storage-and-maintenance.md)。下述原集中批次的 BGE 缺项已补齐，物理桌面交互仍未验收。
-
-2026-10-23 产品化补齐：首次配置/系统凭据、语义检索缓存、失败指引、协调四库备份恢复已完成开发及集中自动化修补复测；原集中批次为 **主环境去重 1,289 passed / 2 skipped / 0 failed，兼容环境 169 passed / 1 skipped，strict 145 文件通过**。后续 BGE 实测见上段；物理桌面交互和 symlink 权限边界继续保留。阅读[测试记录](versions/v0.9/test-report.md)、[开发记录](versions/v0.9/development-status.md)、[接口](versions/v0.9/interfaces.md)、[操作说明](versions/v0.9/operations.md)、[开发计划](planning/v0.9/productization-development-plan.md)和[最小 P01–P08](planning/v0.9/productization-minimal-test-plan.md)。隔离执行/强制停止、精细授权及有限无人值守执行移至正式版后，旧实验不恢复。
-
-当前代码为 **0.5.0rc1**，加入 GUI 与后台交互；V0.4 持久后端继续保留。候选版实际范围与验收缺项见 [V0.5 状态](versions/v0.5/delivery.md)和[测试报告](versions/v0.5/test-report.md)；历史报告只说明当时证据，规划不是验收结果。
-
-**GUI 任务工作方式交接：**见[2026-10-24 交接](handoffs/2026-10-24-gui-refactor.md)，只传达 Agent 分工、模型与思考强度、开发/测试分阶段、整合审查及 Git 约定；不规定 GUI 如何重构。
-
-**2026-10-25 桌宠 GUI 重构设计：**从[设计总览](planning/gui-refactor/README.md)开始，按需阅读[产品与交互](planning/gui-refactor/product-design.md)、[页面与状态细则](planning/gui-refactor/page-and-state-spec.md)、[前后端技术方案](planning/gui-refactor/technical-plan.md)、[实施与验收计划](planning/gui-refactor/implementation-and-acceptance.md)。D0 文档先行后，用户已授权 D1–D5；实际实现、2026-10-26 旧 GUI 退役与未执行测试见[开发记录](planning/gui-refactor/development-status.md)。
-
-同日第二轮修订：[默认云模型、设置密钥、头像/静态形象与工具插件扩展](planning/gui-refactor/settings-assets-and-tools.md)。界面统一“聊天”，会话栏仅聊天页出现，所有配置入口集中设置；新增 G16–G21 验收要求。生产功能仍处于设计阶段。
-
-**V0.6 切换聊天：**V0.6 以[2026-10-19 14:57 暂停检查点](versions/v0.6/pause-checkpoint-2026-10-19-1457.md)和[执行环境架构重评](versions/v0.6/execution-environment-architecture-review-2026-10-19.md)为最新边界；阶段0仍未通过，尚未接入生产执行，不恢复封存实验。更早的[交接](handoffs/2026-10-17-v0.6.md)和恢复记录仅作历史参考。
-
-2026-10-21：V0.7「静态图片桌宠表现层」已实现，按用户要求带未决项[归档](versions/v0.7/delivery.md)，未全部验收通过；Live2D 延至正式版后的更新。[验收边界](planning/v0.7/acceptance-boundaries.md)、[开发计划](planning/v0.7/development-plan.md)和[环境评估](planning/v0.7/environment-assessment.md)记录范围，[接口](versions/v0.7/interfaces.md)、[运行说明](versions/v0.7/operations.md)和[测试报告](versions/v0.7/test-report.md)记录实现及证据。[内存简析](versions/v0.7/memory-review-2026-10-21.md)与[后续测试清单](versions/v0.7/deferred-tests.md)保留收尾判断和未执行项。原 Live2D 提案/调研保留为历史；不改变0.5.0rc1版本或V0.6暂停状态。
-
-2026-10-21：V0.8「人格、情绪与文本风格」完成实现后，用户授权[最小T01–T09](versions/v0.8/minimal-test-plan.md)。新增76项定向、修补后主环境119项及兼容171项通过，strict106源文件通过；T07并发受理和两项符号链接权限仍有边界，见[测试报告](versions/v0.8/test-report.md)。[开发计划](planning/v0.8/development-plan.md)、[验收边界](planning/v0.8/acceptance-boundaries.md)、[接口](versions/v0.8/interfaces.md)、[操作说明](versions/v0.8/operations.md)及[开发记录](versions/v0.8/development-status.md)区分规划、实际契约及证据，不宣称完整版本验收。
-
-## 推荐阅读顺序
-
-2026-10-22 新增[拟人化优化方案](planning/v0.8/humanization-proposal.md)、[代码组织与状态协议](planning/v0.8/humanization-architecture.md)和[实施/验收计划](planning/v0.8/humanization-delivery-plan.md)。主 Agent 独立完成设计后，已组织实现至 H5 并准备 H6 验收材料，见[源码开发记录](versions/v0.8/humanization-development-status.md)。用户已授权集中执行[最小 HM01–HM08](planning/v0.8/humanization-minimal-test-plan.md)；首败、修补、定向复测及真实模型未通过项见[本轮测试记录](versions/v0.8/humanization-test-report.md)，不宣称整体通过。桌宠仅预留接口。
-
-1. [根目录总体架构](../ARCHITECTURE.md)：模块边界、调用方向和安全保证。
-2. [V0.4 交付说明](versions/v0.4/delivery.md)、[接口契约](versions/v0.4/interfaces.md)、[操作指南](versions/v0.4/operations.md)、[测试报告](versions/v0.4/test-report.md)：持久目标/任务、来源用途与恢复边界；V0.3 目录保留记忆契约，V0.2 保留工具契约。
-3. [开发约定](guides/development.md)：扩展与测试纪律。
-4. [V0.3 环境评估](planning/v0.3/environment-assessment.md)、[开发计划](planning/v0.3/development-plan.md)、[验收边界](planning/v0.3/acceptance-boundaries.md)：实施前目标与当前范围映射。
-5. [V0.3 至 V1.0 路线](planning/roadmap.md)：五个大阶段与版本门槛；[Embedding 安装指南](guides/embedding-setup.md)：模型选型、CPU 安装及验证。
-6. [依赖清单与维护](guides/dependencies.md)：requirements 分组入口、版本声明与锁定规则。
-7. [记忆、人格与情绪机制](planning/companion-model/README.md)：基于 V0.2 的长期设计提案；部分记忆机制已映射到 V0.3 实现，人格、情绪等仍为未来设计。
-8. [V0.4 环境评估](planning/v0.4/environment-assessment.md)、[开发计划](planning/v0.4/development-plan.md)、[验收边界](planning/v0.4/acceptance-boundaries.md)：实施前规划快照，实际证据以 versions/v0.4 为准。
-9. [V0.5 操作指南](versions/v0.5/operations.md)、[接口](versions/v0.5/interfaces.md)、[状态](versions/v0.5/delivery.md)、[测试](versions/v0.5/test-report.md)：Windows GUI 候选版；[原环境评估](planning/v0.5/environment-assessment.md)、[计划](planning/v0.5/development-plan.md)、[验收边界](planning/v0.5/acceptance-boundaries.md)保留为实施前快照。
-10. [V0.6 环境评估](planning/v0.6/environment-assessment.md)、[开发计划](planning/v0.6/development-plan.md)、[验收边界](planning/v0.6/acceptance-boundaries.md)：用户已要求[保存进度并暂停](versions/v0.6/pause-checkpoint-2026-10-19-1457.md)，阶段0仍未通过，尚未接入生产执行；[架构重评](versions/v0.6/execution-environment-architecture-review-2026-10-19.md)是后续路线建议，不是实际迁移批准。[进度](versions/v0.6/development-status.md)、[证据与剩余门槛](versions/v0.6/stage0-evidence.md)、[runtime 调查](versions/v0.6/runtime-investigation.md)、[权限静态审查](versions/v0.6/runtime-security-review.md)与[工具迁移表](versions/v0.6/tool-migration.md)记录实际范围。
-11. [V0.7 验收边界](planning/v0.7/acceptance-boundaries.md)、[开发计划](planning/v0.7/development-plan.md)、[环境评估](planning/v0.7/environment-assessment.md)：可选静态PNG桌宠、透明/拖动/点击、中性状态、DPI/多屏、加载/窗口生命周期与资源验收；人格情绪留 V0.8，Live2D 留正式版后更新。
-12. [2026-10-20 研究适配与测试取舍](planning/v0.7/research-and-test-scope-2026-10-20.md)：Coopanion/Cortico报告对V0.7的适用边界、推荐五张静态表情差分、状态防闪烁和精简T01–T08测试矩阵；不是已实现/已测试记录。
-13. [V0.8 开发计划](planning/v0.8/development-plan.md)、[验收边界](planning/v0.8/acceptance-boundaries.md)、[接口](versions/v0.8/interfaces.md)、[开发记录](versions/v0.8/development-status.md)、[最小测试报告](versions/v0.8/test-report.md)：默认关闭的声明式人格、有限情绪、显式偏好、后台管理与静态映射；测试范围与限制独立记录。
-14. [V0.8 拟人化优化提案](planning/v0.8/humanization-proposal.md)：多轮上下文、自然语言情境、稳定表达和可控偏好；[架构](planning/v0.8/humanization-architecture.md)与[实施计划](planning/v0.8/humanization-delivery-plan.md)保留设计依据，[开发记录](versions/v0.8/humanization-development-status.md)记录 H0–H6 材料。按[最小 HM01–HM08](planning/v0.8/humanization-minimal-test-plan.md)集中测试的实际结果见[本轮报告](versions/v0.8/humanization-test-report.md)；真实模型体验仍未验收通过。
-15. [HM08 改进与新测试计划](planning/v0.8/hm08-improvement-plan.md)、[实现与验证结果](versions/v0.8/hm08-improvement-report.md)：2026-10-23 按实际首败继续修补协议、范围、草稿事实和工具补充，加入显式原生 JSON 通道；离线复测通过，真实模型问题按用户要求列入[暂缓项](versions/v0.8/hm08-deferred-issues.md)，未整体验收。
-
-## 分类与命名规则
-
-```text
-docs/
-  README.md                         文档入口
-  user-guide/                       当前用户指南，按使用任务拆分
-    README.md                       安装、操作与维护阅读入口
-  developer-guide/                  当前开发者指南，按实现主题拆分
-    README.md                       文件架构、代码与扩展阅读入口
-  guides/
-    development.md                  跨版本开发约定
-    dependencies.md                 依赖分组、安装与维护
-    embedding-setup.md              中文向量模型安装与验证
-  versions/
-    v0.1/
-      development-plan.md
-      interfaces.md
-      test-plan.md
-      test-report.md
-      followup-test-report.md
-      delivery.md
-    v0.2/
-      development-plan.md
-      interfaces.md
-      environment-assessment.md
-      test-report.md
-      delivery.md
-    v0.3/
-      interfaces.md
-      test-report.md
-      delivery.md
-    v0.4/
-      interfaces.md
-      operations.md
-      test-report.md
-      delivery.md
-      development-status.md           开发交接及恢复记录
-    v0.5/
-      interfaces.md
-      operations.md
-      test-report.md
-      delivery.md
-      windows-checklist.md            实际屏幕与系统交互验收
-      development-status.md           开发交接及暂停记录
-      stability-investigation.md      低频停滞调查与测试屏障证据
-    v0.6/
-      development-status.md           阶段0实际进度与恢复点
-      runtime-investigation.md         受限启动与持久写入边界调查
-      runtime-security-review.md       文件/注册表权限盲点及实验提案
-      stage0-evidence.md               实机证据、覆盖缺口及依赖顺序
-      tool-migration.md               19个工具的目标执行类别
-  planning/
-    roadmap.md                      V0.3 至 V1.0 分阶段路线
-    companion-model/
-      README.md                     记忆、人格、情绪总体设计
-      memory.md                     记忆来源、修订、检索与删除
-      personality-emotion.md        人格、关系、情绪与表达
-      integration-and-acceptance.md 集成契约、阶段与验收
-    v0.3/
-      environment-assessment.md
-      development-plan.md
-      acceptance-boundaries.md
-    v0.4/
-      environment-assessment.md
-      development-plan.md
-      acceptance-boundaries.md
-    v0.5/
-      environment-assessment.md
-      development-plan.md
-      acceptance-boundaries.md
-    v0.6/
-      environment-assessment.md       本机盘点与Windows隔离选型
-      development-plan.md            A执行隔离→B本地自动规则
-      acceptance-boundaries.md       真进程/权限/停止/恢复门槛
-    v0.7/
-      environment-assessment.md       既有Qt、静态PNG、线程与资源环境
-      development-plan.md            状态契约→图片窗口→交互→实机验收
-      acceptance-boundaries.md       表现层边界与待执行验收矩阵
-      live2d-*-2026-10-19.md         延至正式版后的历史提案与调研
-      evidence/                     无敏感数据的环境与文档检查记录
-```
-
-文件名采用小写英文与连字符；版本由目录表示，不再重复加版本前缀。`guides` 保存持续维护的约定，`versions` 保存交付计划、契约及历史证据，`planning` 保存尚未交付的评估和提案。V0.3 实际契约与报告已在 `versions/v0.3`；原 planning 文档保留为规划快照并附状态映射，不能把规划自动视为通过。
-
-Markdown 链接相对于当前文档；正文中的 `src/...`、`docs/...` 等代码路径按仓库根目录解释。原始长期设计资料仍位于仓库根的 `doc/`，本次未移动或重写它们。真实配置、密钥、运行数据和模型缓存不属于文档目录。
-
-## 版本资料
-
-| 版本 | 计划与接口 | 测试证据 | 交付/环境 |
-| --- | --- | --- | --- |
-| V0.9 产品化补齐（未测试） | [计划](planning/v0.9/productization-development-plan.md)、[接口](versions/v0.9/interfaces.md) | [待执行最小清单](planning/v0.9/productization-minimal-test-plan.md)，本轮未运行测试 | [开发记录](versions/v0.9/development-status.md)、[操作说明](versions/v0.9/operations.md) |
-| V0.8 最小测试已执行 | [开发计划](planning/v0.8/development-plan.md)、[接口](versions/v0.8/interfaces.md) | [实际报告](versions/v0.8/test-report.md)、[最小计划](versions/v0.8/minimal-test-plan.md)，有明确边界 | [开发记录](versions/v0.8/development-status.md)、[运行说明](versions/v0.8/operations.md) |
-| V0.7 静态桌宠归档 | [开发计划](planning/v0.7/development-plan.md)、[验收边界](planning/v0.7/acceptance-boundaries.md) | [实际报告](versions/v0.7/test-report.md)；T08未整体通过 | [归档](versions/v0.7/delivery.md)、[后续测试](versions/v0.7/deferred-tests.md)、[环境评估](planning/v0.7/environment-assessment.md)；Live2D延至正式版后 |
-| V0.6 正式版后扩展 | [历史开发计划](planning/v0.6/development-plan.md)、[验收边界](planning/v0.6/acceptance-boundaries.md) | 原型暂停，未通过完整隔离/自动规则验收；本轮不恢复 | [进度](versions/v0.6/development-status.md)、[工具迁移表](versions/v0.6/tool-migration.md)、[原评估](planning/v0.6/environment-assessment.md) |
-| V0.5 rc1 | [接口](versions/v0.5/interfaces.md)、[操作指南](versions/v0.5/operations.md)、[验收边界](planning/v0.5/acceptance-boundaries.md) | [实际报告](versions/v0.5/test-report.md)、[Windows 实机记录](versions/v0.5/windows-checklist.md)、[稳定性调查](versions/v0.5/stability-investigation.md) | [候选状态](versions/v0.5/delivery.md)、[进度交接](versions/v0.5/development-status.md)、[原评估](planning/v0.5/environment-assessment.md) |
-| V0.4 | [实际接口](versions/v0.4/interfaces.md)、[操作指南](versions/v0.4/operations.md)、[原计划](planning/v0.4/development-plan.md) | [测试报告](versions/v0.4/test-report.md) | [交付](versions/v0.4/delivery.md)、[环境评估](planning/v0.4/environment-assessment.md) |
-| V0.3 | [实际接口](versions/v0.3/interfaces.md)、[原计划](planning/v0.3/development-plan.md) | [测试报告](versions/v0.3/test-report.md) | [交付](versions/v0.3/delivery.md) |
-| V0.1 | [计划](versions/v0.1/development-plan.md)、[接口](versions/v0.1/interfaces.md) | [测试计划](versions/v0.1/test-plan.md)、[原报告](versions/v0.1/test-report.md)、[后续补测](versions/v0.1/followup-test-report.md) | [交付](versions/v0.1/delivery.md) |
-| V0.2 | [计划](versions/v0.2/development-plan.md)、[接口](versions/v0.2/interfaces.md) | [测试报告](versions/v0.2/test-report.md) | [交付](versions/v0.2/delivery.md)、[开工前环境评估](versions/v0.2/environment-assessment.md) |
-
-V0.2 接口覆盖 V0.1 的双授权、Waiting 原计划确认等变更；未改变的基础 LLM/Tool/Memory 契约仍可追溯到 V0.1。V0.2 环境评估中的“缺少 mss”是开工前状态，实施后的安装与验收以交付报告为准。
-
-2026-10-16 状态：V0.3/V0.4 已有交付记录；V0.5 为实现后的 rc1，自动化与实机缺项分别记录。历史计划不代替实际接口与测试报告。
+设计约定以完整讨论、确认结论及用户后续明确决定为依据，摘要和实施记录不能自行改写约定；仍未验证的事项保留未验证状态。不要把存档中的真实资源路径、旧测试计数或封存对象当成可以再次操作的授权。

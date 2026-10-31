@@ -14,7 +14,7 @@ class TimerCreateTool(_SchedulingTool):
     def spec(self) -> ToolSpec:
         return ToolSpec("timer_create", "Create a local countdown without waiting for it. Duration is 1 to 2678400 seconds. Due events are recorded by the running scheduler, and overdue timers are recovered on restart; this is not a notification service.",
                         _schema({"duration_seconds": {"type": "number", "minimum": 1, "maximum": MAX_DURATION_SECONDS},
-                                 "label": _string()}, ("duration_seconds",)), PermissionLevel.CONFIRM)
+                                 "label": _string()}, ("duration_seconds",)), PermissionLevel.AUTOMATIC, contract_version="2")
 
     def _execute(self, args: Mapping[str, Any], context: ToolContext) -> Any:
         return self._service.create_timer(args["duration_seconds"], label=args.get("label", "Timer"),
@@ -37,7 +37,7 @@ class TimerCancelTool(_SchedulingTool):
     @property
     def spec(self) -> ToolSpec:
         return ToolSpec("timer_cancel", "Cancel a pending local timer by id. Returns cancelled=false for a missing, fired or already cancelled timer; recorded events remain queryable.",
-                        _schema({"id": _string(100)}, ("id",)), PermissionLevel.CONFIRM)
+                        _schema({"id": _string(100)}, ("id",)), PermissionLevel.AUTOMATIC, contract_version="2")
 
     def _execute(self, args: Mapping[str, Any], context: ToolContext) -> Any:
         return {"id": args["id"], "cancelled": self._service.cancel_timer(args["id"], task_id=context.task_id)}

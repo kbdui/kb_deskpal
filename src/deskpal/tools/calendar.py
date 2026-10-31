@@ -49,7 +49,7 @@ class CalendarCreateTool(_SchedulingTool):
         return ToolSpec("calendar_create", "Create a one-off local calendar entry. Times need ISO seconds and an explicit offset/Z; timezone is IANA display metadata. Optional reminder_at must be no later than start_at.",
                         _schema({"title": _string(), "start_at": _string(40), "timezone": _string(100),
                                  "end_at": _string(40), "reminder_at": _string(40)},
-                                ("title", "start_at", "timezone")), PermissionLevel.CONFIRM)
+                                ("title", "start_at", "timezone")), PermissionLevel.AUTOMATIC, contract_version="2")
 
     def _execute(self, args: Mapping[str, Any], context: ToolContext) -> Any:
         return self._service.create_calendar(args["title"], args["start_at"], args["timezone"],
@@ -77,7 +77,7 @@ class CalendarUpdateTool(_SchedulingTool):
                                  "timezone": _string(100), "end_at": _string(40), "reminder_at": _string(40),
                                  "clear_end": {"type": "boolean", "default": False},
                                  "clear_reminder": {"type": "boolean", "default": False}}, ("id",)),
-                        PermissionLevel.CONFIRM)
+                        PermissionLevel.AUTOMATIC, contract_version="2")
 
     def _execute(self, args: Mapping[str, Any], context: ToolContext) -> Any:
         changes = {key: args[key] for key in ("title", "start_at", "timezone", "end_at", "reminder_at") if key in args}
@@ -93,7 +93,7 @@ class CalendarDeleteTool(_SchedulingTool):
     @property
     def spec(self) -> ToolSpec:
         return ToolSpec("calendar_delete", "Delete a local calendar entry and its pending reminder by id; historical due events remain queryable.",
-                        _schema({"id": _string(100)}, ("id",)), PermissionLevel.CONFIRM)
+                        _schema({"id": _string(100)}, ("id",)), PermissionLevel.AUTOMATIC, contract_version="2")
 
     def _execute(self, args: Mapping[str, Any], context: ToolContext) -> Any:
         return {"id": args["id"], "deleted": self._service.delete_calendar(args["id"], task_id=context.task_id)}

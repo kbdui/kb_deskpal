@@ -28,8 +28,9 @@ def _date(value: str) -> datetime:
 
 class ReminderInbox:
     def __init__(self, store: WorkflowStore, scheduling: SchedulingManager, *,
-                 now: Callable[[], datetime] = utc_now) -> None:
+                 now: Callable[[], datetime] = utc_now, policy: Any = None) -> None:
         self.store, self.scheduling, self._now = store, scheduling, now
+        self.policy = policy
         self._started_at = now()
         self._lock = RLock()
         self._error: str | None = None
@@ -129,6 +130,8 @@ class ReminderInbox:
                             redacted = task is None or bool(task[0])
                         now = self._now()
                         missed = _date(event.due_at) < self._started_at or (now - _date(event.due_at)).total_seconds() > NOTIFICATION_TTL_SECONDS
+                        if self.policy is not None and not self.policy.allowed("reminder"):
+                            missed = True
                         state = "redacted" if redacted else "missed" if missed else "due"
                         candidate = {"source": source, "store_id": identity.store_id, "generation": identity.generation,
                             "occurrence_revision": event.occurrence_revision, "due_at": event.due_at,
@@ -243,6 +246,8 @@ class ReminderInbox:
             return {"schema_version": 1, "item": values[0] if values else None, "unavailable": not bool(values)}
 
     def notification(self, identity: str) -> dict[str, Any] | None:
+        if self.policy is not None and not self.policy.allowed("reminder"):
+            return None
         item = self.detail(identity)["item"]
         if item is None or item["acknowledged_at"] is not None or item["delivery_state"] != "due":
             return None

@@ -7,4 +7,5 @@ from deskpal.tools.models import ToolCall
 class Plan:
     reply: str = ""
     steps: tuple[ToolCall, ...] = ()
+    action: str = "answer"
 

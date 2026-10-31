@@ -5,6 +5,7 @@ another process holds it would create two independent owners.
 """
 
 import os
+import stat
 import sys
 import threading
 from pathlib import Path
@@ -49,6 +50,11 @@ class InstanceLock:
             fd: int | None = None
             try:
                 self.data_dir.mkdir(parents=True, exist_ok=True)
+                if os.path.lexists(self.path):
+                    info = self.path.lstat()
+                    if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
+                            or getattr(info, "st_file_attributes", 0) & 0x400):
+                        raise InstanceLockError("Unsafe instance lock file")
                 fd = os.open(self.path, os.O_RDWR | os.O_CREAT, 0o600)
                 # Windows byte-range locking needs a stable byte at offset zero.
                 if os.fstat(fd).st_size == 0:

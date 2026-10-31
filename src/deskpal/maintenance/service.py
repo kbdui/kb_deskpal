@@ -1,6 +1,7 @@
 """Bounded, local maintenance commands; no production worker or model chat."""
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Iterator
+from contextlib import contextmanager, ExitStack
 import json
 import os
 from pathlib import Path
@@ -14,9 +15,11 @@ from deskpal.llm.errors import LLMError
 from deskpal.llm.url_policy import validate_base_url
 
 from .errors import MaintenanceError, message_for
+from deskpal.application.profiles import PROFILE_OPERATIONS, resolve_profile_config
 
 
 OPERATIONS: dict[str, frozenset[str]] = {
+    **PROFILE_OPERATIONS,
     "setup_status": frozenset(),
     "setup_save": frozenset({"values", "expected_revision", "credential_secret", "credential_action"}),
     "setup_repair": frozenset({"values", "expected_revision", "credential_secret", "credential_action", "confirm"}),
@@ -147,7 +150,7 @@ class MaintenanceService:
         try:
             # Maintenance does not need a cloud credential and never loads a
             # chat provider. The same path/environment precedence still applies.
-            return load_config(self.config_path, provider_override="offline")
+            return resolve_profile_config(load_config(self.config_path, provider_override="offline"))
         except (ConfigError, OSError, UnicodeError):
             raise MaintenanceError("invalid_config") from None
 
@@ -158,7 +161,7 @@ class MaintenanceService:
         if result.get("config_exists") is not True or result.get("config_valid") is not True:
             return result
         try:
-            settings = load_config(self.config_path, provider_override=self._provider_override)
+            settings = resolve_profile_config(load_config(self.config_path, provider_override=self._provider_override))
             try:
                 validate_base_url(settings.llm.base_url)
             except LLMError:
@@ -208,6 +211,10 @@ class MaintenanceService:
         return _bounded(self._execute(operation, parameters))
 
     def _execute(self, operation: str, parameters: Mapping[str, Any]) -> dict[str, Any]:
+        if operation in PROFILE_OPERATIONS:
+            from deskpal.application.profiles import ProfileService
+            return ProfileService(self.config_path, cancelled=self._cancelled,
+                                  provider_override=self._provider_override).execute(operation, parameters)
         if operation == "connection_test":
             if not _flag(parameters, "confirm"):
                 raise MaintenanceError("confirmation_required")
@@ -219,10 +226,10 @@ class MaintenanceService:
                     status = SetupService(self.config_path).inspect()
                     if status["revision"] != _text(parameters, "expected_revision"):
                         raise MaintenanceError("revision_conflict")
-                    settings = load_config(self.config_path)
+                    settings = resolve_profile_config(load_config(self.config_path))
                     if settings.llm.provider == "offline" or not settings.llm.ready:
                         raise MaintenanceError("credential_missing")
-                    with InstanceLock(settings.storage.data_dir):
+                    with self._ownership(settings.storage.data_dir):
                         # Fixed public text only: no tools, memory, persona or conversation.
                         reply = OpenAILLMProvider(settings.llm, max_output_tokens=32).generate("Reply with the word OK.")
                         if not reply.strip():
@@ -264,7 +271,7 @@ class MaintenanceService:
                 return cache.status()
             # Every mutating/expensive action checks the configured application
             # ownership as well as the cache reader/writer lease itself.
-            with InstanceLock(settings.storage.data_dir):
+            with self._ownership(settings.storage.data_dir):
                 if operation == "cache_verify":
                     return cache.verify()
                 if operation == "cache_prepare":
@@ -277,17 +284,28 @@ class MaintenanceService:
             if operation == "backup_inspect":
                 return inspect_backup(Path(_text(parameters, "archive")))
             if operation == "backup_create":
-                return create_backup(self._settings().storage.data_dir, Path(_text(parameters, "destination")),
-                                     acknowledge_sensitive_data=_flag(parameters, "acknowledge_sensitive_data"))
+                with self._ownership(None):
+                    backup_source = self._settings().storage.data_dir
+                    root = load_config(self.config_path, provider_override="offline").storage.data_dir
+                    if backup_source.resolve() == root.resolve():
+                        raise MaintenanceError("archive_source_uninitialized")
+                    return create_backup(backup_source, Path(_text(parameters, "destination")),
+                                         acknowledge_sensitive_data=_flag(parameters, "acknowledge_sensitive_data"))
             try:
-                current = self._settings().storage.data_dir
+                current: Path | None = self._settings().storage.data_dir
             except MaintenanceError as error:
                 if error.code not in {"config_missing", "invalid_config"}:
                     raise
                 current = None
-            return restore_backup(Path(_text(parameters, "archive")), Path(_text(parameters, "target_dir")),
-                                  acknowledge_data_rollback=_flag(parameters, "acknowledge_data_rollback"),
-                                  resume=_flag(parameters, "resume"), current_data_dir=current)
+            target = Path(_text(parameters, "target_dir"))
+            with self._ownership(None):
+                # Archive restoration also owns the current profile lock.
+                root = load_config(self.config_path, provider_override="offline").storage.data_dir
+                if current is not None and current.resolve() == root.resolve():
+                    current = None
+                return restore_backup(Path(_text(parameters, "archive")), target,
+                                      acknowledge_data_rollback=_flag(parameters, "acknowledge_data_rollback"),
+                                      resume=_flag(parameters, "resume"), current_data_dir=current)
         from .setup import SetupService
         status = self._setup_status(SetupService(self.config_path).inspect())
         result: dict[str, Any] = {"config_path": str(self.config_path.absolute()),
@@ -302,3 +320,13 @@ class MaintenanceService:
         except MaintenanceError as error:
             result["configuration_issue"] = safe_error(error)
         return result
+
+    @contextmanager
+    def _ownership(self, profile_dir: Path | None) -> Iterator[None]:
+        """Application-wide ownership also gates maintenance of inactive roots."""
+        root = load_config(self.config_path, provider_override="offline").storage.data_dir
+        with ExitStack() as owned:
+            owned.enter_context(InstanceLock(root))
+            if profile_dir is not None and profile_dir.resolve() != root.resolve():
+                owned.enter_context(InstanceLock(profile_dir))
+            yield

@@ -1,4 +1,4 @@
-"""Explicit per-task Provider views with a single, bounded attempt per purpose."""
+"""任务绑定的模型调用；规划有总预算，其余用途保持单次边界。"""
 
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict
@@ -16,7 +16,7 @@ from .providers import OfflineLLMProvider, UnavailableLLMProvider
 
 
 _T = TypeVar("_T")
-_PURPOSES = frozenset({"planning", "expression", "memory_evaluation"})
+_PURPOSES = frozenset({"context_understanding", "planning", "expression", "memory_evaluation"})
 
 
 class ModelCallGateway:
@@ -49,10 +49,11 @@ class ModelCallGateway:
             return self._reserve(task_id, purpose)
         with self._lock:
             key = (task_id, purpose)
-            if key in self._attempts:
+            count = sum(1 for task, item in self._attempts if task == task_id and item.split(":")[0] == purpose)
+            if count >= (24 if purpose == "planning" else 3 if purpose == "memory_evaluation" else 1):
                 raise LLMError("Model call budget exhausted")
             call_id = str(uuid4())
-            self._attempts[key] = call_id
+            self._attempts[(task_id, purpose + ":" + str(count))] = call_id
             self._outcomes[call_id] = "reserved"
             return call_id
 
