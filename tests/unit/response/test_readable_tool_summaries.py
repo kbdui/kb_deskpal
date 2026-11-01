@@ -98,6 +98,11 @@ def test_unknown_structures_are_recorded_but_user_json_strings_stay_literal() ->
 
 
 class TimerPlanner:
+    def plan_context(self, request: str, *, memories: Any = (), references: Any = (), tools: Any = (), llm: Any = None) -> Plan:
+        if any(item.get('kind') == 'execution_observations' for item in references):
+            return Plan('计时器已建立。')
+        return self.plan(request, tools=tools)
+
     def plan(self, request: str, *, memories: Any = (), tools: Any = ()) -> Plan:
         return Plan("建立一个计时器。", (ToolCall("timer_create", {"duration_seconds": 60, "label": "休息一下"}, "timer-call"),))
 
@@ -110,12 +115,9 @@ def test_real_core_composer_and_facade_publish_natural_timer_reply_but_keep_exac
         conversation = app.conversation_ensure_default()
         task = app.submit("一分钟后提醒休息", command_id="natural-timer-submission", conversation_id=conversation["id"],
                           expected_context_epoch=conversation["context_epoch"])
-        assert app.wait(task.id, 5).status == TaskStatus.WAITING
-        review = app.task_review(task.id)
-        assert facade.execute("confirm", {"task_id": task.id, "plan_hash": review["plan_hash"], "expected_revision": review["task_revision"],
-            "ordinary_tools": ["timer_create"], "high_risk_tools": [], "command_id": "natural-timer-confirmation"})["accepted"]
         result = app.wait(task.id, 5)
         assert result.status == TaskStatus.COMPLETED and result.tool_results[0].success is True
+        assert len(result.tool_results) == 1
         output = result.tool_results[0].output
         assert "已建立" in result.response and "休息一下" in result.response
         for internal in (output["id"], output["due_at"], output["created_at"], "tool_results", "memory_claims", "unverified_assistant_draft"):

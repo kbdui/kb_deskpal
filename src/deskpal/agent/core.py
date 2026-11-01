@@ -660,6 +660,31 @@ class AgentCore:
             current = self.tasks.get(task_id)
             if current is not None and current.status != TaskStatus.RUNNING:
                 self._transition(task_id, TaskStatus.RUNNING)
+            phase = "memory"
+            # P4：只有统一反馈入口负责学习；工具明细保留在执行账本。
+            if self._feedback is not None:
+                try:
+                    warnings.extend(self._feedback.finish(task_id=task_id, request=request, response=plan.reply,
+                        observations=tuple(_result_data(item) for item in results), context=prepared))
+                except (TaskCancellationRequested, WorkflowBlocked):
+                    raise
+                except Exception:
+                    warnings.append("本轮反馈整理失败；已完成操作保留，继续发布实际结果。")
+            self._boundary(task_id)
+            if self._interaction is not None and prepared is not None:
+                # 学习可能通过既有受控入口刷新角色或撤下旧记忆引用。
+                prepared = self._interaction.current_turn(task_id)
+            learning_receipt: dict[str, Any] = {"status": "not_run", "saved_understandings": []}
+            if self._feedback is not None:
+                receipt = getattr(self._feedback, 'receipt', None)
+                if callable(receipt):
+                    try:
+                        learning_receipt = receipt(task_id)
+                    except (TaskCancellationRequested, WorkflowBlocked):
+                        raise
+                    except Exception:
+                        learning_receipt = {"status": "unavailable", "saved_understandings": []}
+                        warnings.append("本轮学习回执暂不可用，不能确认保存成功。")
             phase = "reflection"
             # 工具结果是事实来源；回复模型只负责组织表达，不获得工具调用能力。
             self._stage(task_id, "Reflect")
@@ -674,9 +699,9 @@ class AgentCore:
                         style=style, history=tuple(dict(item) for item in prepared.history) if prepared else (),
                         memories=prepared.memories if prepared else (),
                         role_context=json.loads(prepared.role_json) if prepared and prepared.role_json else None,
-                        context_warnings=prepared.warnings if prepared else (),
+                        context_warnings=tuple(warnings), learning_receipt=learning_receipt,
                         tool_results=tuple(_result_data(item) for item in results),
-                        structured=self._interaction is not None)
+                        structured=getattr(client, "supports_json_output", False) is True)
                     self._boundary(task_id)
                     # Only host-generated, bounded protocol paths/codes cross
                     # this boundary; provider text and exception details do not.
@@ -692,7 +717,7 @@ class AgentCore:
                         if composed.degraded_reason:
                             warnings.append(composed.degraded_reason)
                     else:
-                        response = tool_response_fallback(tuple(_result_data(item) for item in results)) if results else plan.reply
+                        response = tool_response_fallback(tuple(_result_data(item) for item in results)) if results else "回复整理暂不可用，请重试。"
                         warnings.append("Expression was reset; generated text and signals were discarded")
                 except (_Cancelled, TaskCancellationRequested):
                     raise
@@ -702,26 +727,15 @@ class AgentCore:
                     # changes permit a neutral, still-valid response.
                     if self._interaction is not None:
                         self._interaction.check(task_id)
-                    response = tool_response_fallback(tuple(_result_data(item) for item in results)) if results else plan.reply
+                    response = tool_response_fallback(tuple(_result_data(item) for item in results)) if results else "回复整理暂不可用，请重试。"
                     warnings.append("Expression context changed; using neutral feedback")
                 except Exception:
-                    response = tool_response_fallback(tuple(_result_data(item) for item in results)) if results else plan.reply
+                    response = tool_response_fallback(tuple(_result_data(item) for item in results)) if results else "回复整理暂不可用，请重试。"
                     warnings.append("Response generation failed; authoritative evidence is unchanged")
             self._boundary(task_id)
             if prepared is not None and prepared.origin == 'proactive':
                 if plan.action == 'quiet' or (self._proactive_publication is not None and not self._proactive_publication(task_id)):
                     response = ''
-            phase = "memory"
-            # P4：只有统一反馈入口负责学习；工具明细保留在执行账本。
-            if self._feedback is not None:
-                try:
-                    warnings.extend(self._feedback.finish(task_id=task_id, request=request, response=response,
-                        observations=tuple(_result_data(item) for item in results), context=prepared))
-                except (TaskCancellationRequested, WorkflowBlocked):
-                    raise
-                except Exception:
-                    warnings.append("本轮反馈整理失败；已完成操作保留，继续发布实际结果。")
-            self._boundary(task_id)
             phase = "completion audit and task storage"
             # 终态提交与对话发布按隐私屏障排序，避免清理后又发布旧上下文。
             with self._companion_lock, (self._publication_control() if self._publication_control is not None else nullcontext()), (self._interaction.publication(task_id)
@@ -729,7 +743,7 @@ class AgentCore:
                 # Order publication with privacy reset as well as generation.
                 # Optional memory work may have outlasted the expression call.
                 if companion_generation != self._companion_generation:
-                    response = tool_response_fallback(tuple(_result_data(item) for item in results)) if results else plan.reply
+                    response = tool_response_fallback(tuple(_result_data(item) for item in results)) if results else "回复整理暂不可用，请重试。"
                     response_signals = {}
                     warnings.append("Expression context was reset before completion; optional expression was discarded")
                 if self._interaction is not None:
@@ -737,7 +751,7 @@ class AgentCore:
                         self._interaction.check(task_id, expression=True)
                     except WorkflowBlocked:
                         self._interaction.check(task_id)
-                        response = tool_response_fallback(tuple(_result_data(item) for item in results)) if results else plan.reply
+                        response = tool_response_fallback(tuple(_result_data(item) for item in results)) if results else "回复整理暂不可用，请重试。"
                         response_signals = {}
                 if self._journal is not None and self._journal.unconsumed_amendments(task_id):
                     warnings.append("有追加要求未赶上最后一次模型判断，未纳入本次执行；请继续发起续办。")

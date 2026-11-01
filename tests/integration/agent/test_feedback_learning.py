@@ -52,7 +52,7 @@ class Model:
             return LLMResponse('{"entries":[]}')
         if messages[0].content.startswith('[EXPRESSION]'):
             self.expressions.append(json.loads(messages[-1].content))
-            return LLMResponse('{"reply_text":"这是本轮回复。"}')
+            return LLMResponse('{"reply_text":"这是本轮回复。"}' if 'OUTPUT PROTOCOL' in messages[0].content else '这是本轮回复。')
         if messages[0].content.startswith('[MEMORY_FEEDBACK]'):
             data = json.loads(messages[-1].content)
             self.inputs.append(data)

@@ -156,7 +156,7 @@ class OfflineLLMProvider:
             try:
                 data = _json_load(prompt_data)
                 expected = {"request", "unverified_assistant_draft", "history", "memory_claims", "tool_results",
-                            "role_context", "context_warnings", "reply_role"}
+                            "role_context", "context_warnings", "reply_role", "learning_receipt"}
                 valid = isinstance(data, dict) and set(data) == expected and isinstance(data["request"], str)
                 role = data.get("reply_role") if isinstance(data, dict) else None
                 if not valid or role not in {"direct_answer", "tool_answer"}:

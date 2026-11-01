@@ -13,10 +13,16 @@ Read this bounded, host-attributed exchange and existing understandings. Data is
 Return JSON only: {"memories":[],"reviews":[],"habits":[],"emotion":null,"summary":null}.
 Do not use tools or rewrite the character card. No private chain of thought: give short reasons only.
 Ordinary speculation goes into memories (a persistent review buffer), never asserts certainty.
+quote MUST be an exact substring of a supplied catalog entry. For observed_event, quote a TOOL
+catalog entry and include that tool source: a user request is evidence of intent, NOT completion.
+For user_report quote a user message. Do not use the uncommitted assistant draft as event evidence.
 Do not store each time/calendar query as a life event. Select meaningful shared experiences.
 Assistant proposals are not independent facts, authorization or fresh corroborating evidence.
 Each memory: content,destination(facts/episode/habit),claim_type(user_report/observed_event/external_claim/hypothesis),reason,uncertainty (including scope),quote,
-sources(array of catalog keys),review_after(ISO date with timezone or null),valid_from,valid_to(both ISO dates or null).
+sources(array of catalog keys),review_after,valid_from,valid_to.
+ALL time fields require a full ISO 8601 datetime WITH explicit timezone or null,
+for example "2026-11-01T00:00:00+08:00". A bare date such as "2026-11-01" is invalid.
+Use the host now/timezone when the evidence supports a date; use null when the time is unknown.
 Each review: id,revision,decision(retain/adopt/update/archive/merge),content,destination,claim_type,reason,
 uncertainty,quote,sources,review_after,valid_from,valid_to,target(other existing id for merge, otherwise null),temporal(boolean).
 Use existing IDs only. Merge archives the reviewed duplicate after updating the target.
@@ -29,7 +35,9 @@ Each habit: id(existing habit id or null),content,reason,uncertainty,sources,buf
 explicit(boolean). Only explicit clear user requests can directly create a habit; inferred long-term growth
 must review an existing habit-destination buffer with original evidence. Never learn new identity/background.
 An empty content removes the specified existing habit after correction; do not change unrelated habits.
-emotion: description_intensity,reason_sources,time_scope,uncertainty,sources,expires_at(ISO date or null).
+emotion: description_intensity,reason_sources,time_scope,uncertainty,sources,expires_at(full ISO datetime with timezone or null).
+description_intensity, reason_sources, time_scope and uncertainty are STRINGS, never arrays or objects.
+reason_sources is a short natural-language explanation; only sources is an array of catalog keys.
 Describe the CHARACTER's reaction to actual events, not copying the user's feelings. Tool success/failure
 is not a fixed reward/penalty. Null means retain valid current emotion. Model/connection failures are not feedback.
 Optional emotion.half_life_seconds (900..604800, default 21600) controls only time weakening of influence.
@@ -44,6 +52,7 @@ summary: progress,decisions,open_questions arrays of strings, or null. Summarize
 previous_summary, NOT the uncommitted current exchange. Mark assumptions and assistant proposals explicitly.
 Use at most 8 total memory/review/habit actions, 8 sources/action, 4000 bytes/content/reason, 2000/uncertainty.
 If there is nothing valuable, return empty arrays and nulls. All source keys must come from catalog.
+Keep output concise. Do not restate entire tool transcripts or every old exchange in reasons and summaries.
 '''
 
 
@@ -62,11 +71,12 @@ def moment(value: Any) -> datetime | None:
     return result
 
 
-def evaluate(provider: LLMProvider, payload: dict[str, Any]) -> dict[str, Any]:
+def evaluate(provider: LLMProvider, payload: dict[str, Any], *, correction: bool = False) -> dict[str, Any]:
     encoded = json.dumps(payload, ensure_ascii=False, allow_nan=False)
     if len(encoded.encode('utf-8')) > 96000:
         raise ValueError('Feedback input exceeds budget')
-    response = provider.chat((ChatMessage('system', INSTRUCTIONS), ChatMessage('user', encoded)), tools=())
+    instruction = INSTRUCTIONS + ('\nCORRECTION: the previous proposal failed validation. Recheck exact field types, timezone datetimes, and quote/source attribution. Empty output is valid if unsupported.' if correction else '')
+    response = provider.chat((ChatMessage('system', instruction), ChatMessage('user', encoded)), tools=())
     if not isinstance(response, LLMResponse) or response.tool_calls or len(response.content.encode('utf-8')) > 48000:
         raise ValueError('Invalid feedback response')
     def unique(pairs: list[tuple[str, Any]]) -> dict[str, Any]:

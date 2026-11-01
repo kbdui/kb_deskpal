@@ -13,7 +13,7 @@ def test_memory_defaults_are_automatic_and_loading_has_no_storage_side_effect(tm
     assert config.memory.model_cache_dir == tmp_path / "data" / "models" / "fastembed"
     assert (config.memory.max_context_bytes, config.memory.max_candidates) == (8000, 5)
     assert config.memory.semantic_threshold == .55
-    assert (config.memory.evaluation_timeout_seconds, config.memory.evaluation_max_output_tokens) == (15, 2048)
+    assert (config.memory.evaluation_timeout_seconds, config.memory.evaluation_max_output_tokens) == (40, 8192)
     assert not list(tmp_path.iterdir())
 
 

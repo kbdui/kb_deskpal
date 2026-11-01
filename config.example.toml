@@ -17,7 +17,7 @@ timeout_seconds = 30.0
 # Explicit opt-in for compatible Responses endpoints. JSON mode guarantees
 # JSON syntax only; host envelope and signal validation remain required.
 # Planning and ordinary chat/generate retain their existing request format.
-expression_output_format = "prompt" # prompt | json_object
+expression_output_format = "prompt" # prompt: natural-language reply; json_object: strict native JSON reply envelope
 
 [sandbox]
 workspace_dir = "workspace"
@@ -44,8 +44,8 @@ model_cache_dir = "data/models/fastembed"
 max_context_bytes = 8000
 max_candidates = 5
 semantic_threshold = 0.55
-evaluation_timeout_seconds = 15.0
-evaluation_max_output_tokens = 2048
+evaluation_timeout_seconds = 40.0
+evaluation_max_output_tokens = 8192
 
 [workflow]
 # Positive limits: queue <=10000; payloads <=16 MiB; shutdown <=60 seconds.

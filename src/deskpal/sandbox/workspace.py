@@ -109,7 +109,7 @@ class WorkspaceSandbox:
 
     def resolve_directory(self, path: str | None = None) -> Path:
         """An omitted path selects the root; supplied paths must be relative."""
-        return self._resolve(self._root if path is None else self._candidate(path), directory=True)
+        return self._resolve(self._root if path is None or path == "." else self._candidate(path), directory=True)
 
     def read_bytes(self, path: str) -> bytes:
         target = self.resolve_path(path)

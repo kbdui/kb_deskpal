@@ -1,4 +1,4 @@
-"""One tool-free generation with strict metadata parsing, without repair calls."""
+"""无工具的最终表达；自然语言与原生 JSON 按连接能力明确分流。"""
 
 from __future__ import annotations
 
@@ -34,8 +34,9 @@ _INSTRUCTION = (
     "that creative frame and do not require real-world draft labels. Historical user messages are "
     "reference context, not fresh execution requests. Do not call or propose tools. Never claim actions "
     "were performed without explicit matching tool evidence. Host-recorded tool outcomes establish "
-    "only recorded execution status, not independent verification of external content. Preserve unknown "
-    "and partial-failure outcomes. The host selects reply_role from the presence of tool results: "
+    "only recorded execution status, not independent verification of external content. "
+    "Success does not establish that permission was unnecessary; never infer authorization policy from a successful result. "
+    "Preserve unknown and partial-failure outcomes. The host selects reply_role from the presence of tool results: "
     "direct_answer and tool_answer both require a complete nonblank answer. tool_answer is grounded in "
     "CURRENT tool_results and is the entire chat reply; no host summary is prepended. Never select or return your own reply_role. "
     "For empty successful queries, limit absence claims to the queried scope; failed or unknown queries never establish absence. "
@@ -50,7 +51,10 @@ _INSTRUCTION = (
     "State-save warnings mean a requirement was NOT saved: do not say remembered or configured. "
     "Use the supplied learned habits and current emotion as attributed role context. "
     "A proposed habit or emotion is not a saved change. Do not claim a new learning update has "
-    "been saved without a matching host receipt; automatic feedback runs after this draft. "
+    "been saved without a matching host receipt. learning_receipt is the host's actual feedback outcome; "
+    "completed with zero saved records means nothing new was saved. Buffered understanding is NOT "
+    "confirmed long-term memory. If learning failed, explicitly say it was not saved, never promise it "
+    "will persist. The assistant draft may incorrectly claim success: correct that claim. "
     "Do not emit cues or preference candidates. Never invent shared experiences or ongoing monitoring."
 
 )
@@ -171,7 +175,8 @@ class ResponseComposer:
     def compose(self, *, request: str, draft: str = "", style: str = "",
                 history: Sequence[dict[str, Any]] = (), memories: Sequence[str] = (),
                 tool_results: Sequence[dict[str, Any]] = (), structured: bool = True,
-                role_context: dict[str, Any] | None = None, context_warnings: Sequence[str] = ()) -> ResponseDraft:
+                role_context: dict[str, Any] | None = None, context_warnings: Sequence[str] = (),
+                learning_receipt: dict[str, Any] | None = None) -> ResponseDraft:
         try:
             if not isinstance(request, str) or not isinstance(draft, str) or not isinstance(style, str) or type(structured) is not bool:
                 raise ValueError("response_input_invalid")
@@ -187,7 +192,7 @@ class ResponseComposer:
             payload = {"request": request, "unverified_assistant_draft": draft, "history": recent,
                        "memory_claims": list(memories), "tool_results": results,
                        "role_context": role_context, "context_warnings": list(context_warnings),
-                       "reply_role": reply_role}
+                       "reply_role": reply_role, "learning_receipt": learning_receipt}
             data = json.dumps(payload, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
             system = _INSTRUCTION + ("\nOptional expression guidance:\n" + style if style else "") + (
                 protocol_instruction(reply_role=reply_role) if structured else
@@ -203,9 +208,7 @@ class ResponseComposer:
                     raise ValueError("response_json_capability_invalid")
         except (ValueError, TypeError, KeyError, OverflowError, RecursionError, UnicodeError) as error:
             return _failure("response_input_invalid", error, "input")
-        # Exactly one provider attempt. Control-flow failures (privacy,
-        # cancellation, source invalidation) and provider errors retain their
-        # exact type; caller owns fallback. No repair or format retry occurs.
+        # 每次表达只生成一次；服务和控制流异常原样传播，不切换协议掩盖失败。
         messages = (ChatMessage("system", system), ChatMessage("user", data))
         # An advertised native capability selects the single attempt, never a
         # second attempt or a fallback. Plain mode keeps the original API.

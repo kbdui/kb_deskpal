@@ -259,7 +259,10 @@ class FeedbackLearning:
         return result
 
     def _draft(self, row: dict[str, Any], catalog: dict[str, Any], context: PreparedTurn) -> tuple[MemorySource, MemoryDraft]:
-        evidence = next((catalog[key] for key in row['sources'] if catalog[key].get('role') != 'assistant'
+        permitted = {'observed_event': {'tool_result'}, 'user_report': {'user_message', 'user_confirmation'},
+            'external_claim': {'user_message', 'user_confirmation', 'imported_document'},
+            'hypothesis': {'user_message', 'user_confirmation', 'tool_result', 'imported_document'}}
+        evidence = next((catalog[key] for key in row['sources'] if catalog[key].get('origin') in permitted[row['claim_type']]
             and catalog[key].get('available', True) and row['quote'] in catalog[key]['content']), None)
         if evidence is None:
             raise ValueError('Learning quote has no available original evidence')
@@ -289,6 +292,22 @@ class FeedbackLearning:
                 raise WorkflowBlocked('Missing standalone turn identity')
             context = replace(context, conversation_id=link['conversation_id'])
         return self._run('turn:' + task_id, 'turn', task_id, request, response, observations, context)
+
+    def receipt(self, task_id: str) -> dict[str, Any]:
+        """只报告本轮已提交的事实，不把一次模型提议当作保存成功。"""
+        identity = 'turn:' + task_id
+        job = self.store.job(identity)
+        saved: list[dict[str, Any]] = []
+        if job and job['status'] == 'completed':
+            with self.store.memory._lock:
+                rows = self.store.memory._db.execute(
+                    'SELECT memory_id,action FROM learning_record WHERE job_id=? AND memory_id IS NOT NULL LIMIT 8',
+                    (identity,)).fetchall()
+                for row in rows:
+                    item = self.memory.repository.get(row['memory_id'])
+                    if item is not None:
+                        saved.append(dict(id=item.id, status=item.status.value, action=row['action']))
+        return dict(status=job['status'] if job else 'not_run', saved_understandings=saved)
 
     def review(self, command_id: str, context: PreparedTurn, batch: dict[str, Any] | None = None) -> tuple[str, ...]:
         """P5/独立整理复用同一协议；不发布聊天、不调用来源工具。"""
@@ -391,12 +410,12 @@ class FeedbackLearning:
                 if attention is None or attention['status'] != 'running' or not self.app.proactive.valid(dict(attention)):
                     raise WorkflowBlocked('Scheduled maintenance changed while reviewing')
         for _ in range(max(0, 3 - job['attempts'])):
-            self.store.attempt(identity)
+            attempt = self.store.attempt(identity)
             try:
                 guard()
                 provider = (self.app._interaction.calls(task_id, 'memory_evaluation') if kind == 'turn' else
                             self.app._interaction.gateway.bind(task_id, 'memory_evaluation', guard))
-                result = evaluate(provider, payload)
+                result = evaluate(provider, payload, correction=attempt > 1)
                 guard()
                 self._commit(identity, result, payload, refs, items, context, guard)
                 return ()
@@ -405,6 +424,12 @@ class FeedbackLearning:
             except (WorkflowBlocked, TaskCancellationRequested):
                 self.store.finish(identity, 'cancelled', 'source_or_task_invalidated')
                 raise
+            except ValueError:
+                current = self.store.job(identity)
+                if current and current['status'] == 'completed':
+                    return ('记忆已保存，后续状态投递将在后台恢复时核对。',)
+                self.store.finish(identity, 'failed', 'invalid_feedback_proposal')
+                continue
             except Exception:
                 current = self.store.job(identity)
                 if current and current['status'] == 'completed':
