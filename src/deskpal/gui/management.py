@@ -11,119 +11,36 @@ from .widgets import ArrowComboBox, label, notice_label, scroll, text_label
 from .task_card import TaskCard
 
 class MemoryPage(QWidget):
+    """记忆只读浏览；修改意图通过聊天进入统一模型管理链路。"""
     def __init__(self, bridge: Any, parent: Any = None) -> None:
         super().__init__(parent); self.channel = Channel(bridge, self)
-        layout = QVBoxLayout(self); layout.addWidget(text_label("记忆", heading=True)); layout.addWidget(text_label("查看记住的事实、共同经历和仍待明确的理解。系统会自动整理；你可以更正或遗忘。"))
-        self.notice = notice_label(); layout.addWidget(self.notice); self.channel.notice.connect(self.notice.setText)
-        self.page = PagedView("memories"); layout.addWidget(self.page, 3)
+        layout = QVBoxLayout(self)
+        layout.addWidget(text_label("记忆", heading=True))
+        layout.addWidget(text_label("查看记住的事实、共同经历和仍待明确的理解。需要补充、更正或遗忘时，请在聊天中告诉我。"))
+        self.notice = notice_label(); layout.addWidget(self.notice)
+        self.channel.notice.connect(self.notice.setText)
+        self.page = PagedView("memories"); layout.addWidget(self.page, 1)
         self.filter = ArrowComboBox()
         for value, title in [('facts', '记住的内容'), ('episode', '一起经历'), ('buffer', '仍待明确'), ('all', '全部记录')]:
             self.filter.addItem(title, value)
         self.page.toolbar.insertWidget(0, self.filter)
-        self.filter.currentIndexChanged.connect(self._filter); self.page.refresh_requested.connect(self.refresh)
-        self.page.selected.connect(self._selected)
-        self.memory_actions = QPushButton('更多操作 ···')
-        self.memory_actions.hide()
-        self.page.details_layout.insertWidget(0, self.memory_actions)
-        self.memory_actions.clicked.connect(self._more_memory_actions)
+        self.filter.currentIndexChanged.connect(self._filter)
+        self.page.refresh_requested.connect(self.refresh)
+        self.page.selected.connect(self.page.show_detail)
         self.page.action_scroll.hide()
-        assert self.page.memory_tree is not None
-        self.page.memory_tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-        self.page.memory_tree.customContextMenuRequested.connect(self._memory_context_menu)
-        self.forms = QStackedWidget()
-        self.correct = CommandForm("更正采用当前审阅版本，发生冲突时保留编辑内容。", [("content", "更正内容", None)])
-        self.remember = CommandForm("新记忆用途随设置中的新增输入策略；正在读取当前策略。", [("content", "内容", None)])
-        self._new_memory_policy: str | None = None; self.remember.submit.setEnabled(False)
-        self.correct.submit.setText("保存更正"); self.remember.submit.setText("保存记忆")
-        self._latest_for_edit: dict[str, Any] = {}
-        self.adopt_revision = QPushButton('采用刚读取的版本，保留更正草稿')
-        self.adopt_revision.clicked.connect(self._adopt_revision); self.adopt_revision.hide()
-        correct_layout = self.correct.layout(); assert isinstance(correct_layout, QFormLayout)
-        correct_layout.addRow(self.adopt_revision)
-        self.forms.addWidget(self.correct); self.forms.addWidget(self.remember)
-        editor_buttons = QHBoxLayout()
-        self.create_memory = QPushButton("新建记忆")
         self.learning_button = QPushButton('学习记录')
         self.learning_button.clicked.connect(self._learning_records)
-        editor_buttons.addWidget(self.create_memory); editor_buttons.addWidget(self.learning_button); editor_buttons.addStretch(); layout.addLayout(editor_buttons)
-        self.correct.submitted.connect(lambda values: self.action("correct", values)); self.remember.submitted.connect(lambda values: self.action("remember", values))
-        self.create_memory.clicked.connect(lambda: self._open_editor(1))
-        # Keep the detail and editor in the existing right-hand panel so a
-        # selected record stays visible while its correction is being made.
-        self.right_tabs = QTabWidget()
-        self.right_tabs.setObjectName("memory_detail_editor_tabs")
-        self.right_tabs.setMinimumWidth(0)
-        self.right_tabs.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        self.page.detail_panel.takeWidget()
-        self.right_tabs.addTab(self.page.detail_content, "记录详情")
-        self.form_stack = QStackedWidget()
-        self.form_placeholder = text_label("选择一条记录查看详情。")
-        self.form_stack.addWidget(self.form_placeholder)
-        self.form_scroll = scroll(self.forms)
-        self.form_scroll.setMinimumHeight(0)
-        self.form_stack.addWidget(self.form_scroll)
-        self.right_tabs.addTab(self.form_stack, "编辑记忆")
-        self.page.detail_panel.setWidget(self.right_tabs)
-        self.right_tabs.setCurrentIndex(0)
-        for index in range(layout.count()):
-            entry = layout.itemAt(index)
-            header = entry.widget() if entry is not None else None
-            if isinstance(header, QLabel): header.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
-        self._snapshot: dict[str, Any] = {}; self._pending = False
-        self._read_epoch = 0
-        self._reading = False; self._read_again = False; self._settings_reading = False
-        if hasattr(bridge, "privacy_changed"): bridge.privacy_changed.connect(self.clear_sensitive)
-
-    def _open_editor(self, index: int) -> None:
-        if index == 0 and not self._snapshot:
-            self.notice.setText("请先选择要更正的记忆。"); return
-        self.forms.setCurrentWidget(self.correct if index == 0 else self.remember)
-        self.form_stack.setCurrentWidget(self.form_scroll)
-        self.right_tabs.setCurrentIndex(1)
-        (self.correct if index == 0 else self.remember).fields["content"].setFocus()
-
-    def _memory_context_menu(self, position: Any) -> None:
-        tree = self.page.memory_tree
-        if tree is None:
-            return
-        row = tree.itemAt(position)
-        item = row.data(0, Qt.ItemDataRole.UserRole) if row is not None else None
-        if row is None or not isinstance(item, dict) or not item.get("id"):
-            return
-        tree.setCurrentItem(row)
-        self._show_memory_actions(item, tree.viewport().mapToGlobal(position))
-
-    def _more_memory_actions(self) -> None:
-        from PySide6.QtCore import QPoint
-        self._show_memory_actions(self._snapshot, self.memory_actions.mapToGlobal(QPoint(0, self.memory_actions.height())))
-
-    def _show_memory_actions(self, item: dict[str, Any], position: Any) -> None:
-        if not item or not item.get('id'): return
-        tree = self.page.memory_tree
-        assert tree is not None
-        status = str(item.get("status", "")).lower()
-        menu = QMenu(tree)
-        if status != "deleted":
-            menu.addAction("更正这条记忆", lambda: self._open_editor(0))
-            menu.addSeparator()
-            menu.addAction("遗忘这条记忆及相关正文", lambda: self.action("forget"))
-        if menu.actions():
-            if hasattr(menu, 'close'): tree.currentItemChanged.connect(menu.close)
-            menu.exec(position)
+        buttons = QHBoxLayout(); buttons.addWidget(self.learning_button); buttons.addStretch()
+        layout.addLayout(buttons)
+        self._read_epoch = 0; self._reading = False; self._read_again = False
+        if hasattr(bridge, 'privacy_changed'): bridge.privacy_changed.connect(self.clear_sensitive)
 
     def _filter(self, index: int) -> None:
         self.page.offset = 0; self.refresh()
 
     def refresh(self) -> None:
-        if str(getattr(self.channel.bridge, "state", "")) != "Ready": return
+        if str(getattr(self.channel.bridge, 'state', '')) != 'Ready': return
         self.page.loading()
-        if not self._settings_reading:
-            self._settings_reading = True
-            epoch = self._read_epoch
-            def settings_done(data: dict[str, Any]) -> None:
-                if epoch != self._read_epoch: return
-                self._settings_reading = False; self._settings(data)
-            if self.channel.send("settings", {}, settings_done) is None: self._settings_reading = False
         if self._reading:
             self._read_again = True; return
         self._read_memories()
@@ -171,73 +88,12 @@ class MemoryPage(QWidget):
         self.channel.send('learning_records', {'limit': 20}, loaded)
         fit_dialog(dialog, self); dialog.open()
 
-    def _settings(self, data: dict[str, Any]) -> None:
-        if "_error" in data or type(data.get("request_use_default")) is not bool: return
-        self._new_memory_policy = "cloud_allowed" if data["request_use_default"] else "local_only"
-        self.remember.description.setText("新记忆用途随设置中的新增输入策略：" + label(self._new_memory_policy) + "。已有记忆的用途保持不变。")
-        self.remember.submit.setEnabled(True)
-
-    def _selected(self, item: dict[str, Any]) -> None:
-        if self.correct.dirty and item.get("id") == self._snapshot.get("id"):
-            self.page.show_detail(item)
-            if item.get('revision') != self._snapshot.get('revision'):
-                self._latest_for_edit = dict(item)
-                self.adopt_revision.setVisible(item.get('status') != 'deleted')
-                self.notice.setText('当前记录已有新版本，草稿已保留。请核对详情，再采用刚读取的版本继续更正。')
-            return
-        self._latest_for_edit.clear(); self.adopt_revision.hide()
-        self._snapshot = dict(item); self.page.show_detail(item)
-        self.memory_actions.setVisible(bool(item) and item.get('status') != 'deleted')
-        if not item:
-            self.form_stack.setCurrentWidget(self.form_placeholder)
-            return
-        if item:
-            self.correct.populate({"content": item.get("content", item.get("draft", {}).get("content", ""))})
-        else:
-            self.correct.clear_sensitive()
-        self.form_stack.setCurrentWidget(self.form_placeholder)
-
-    def _adopt_revision(self) -> None:
-        if not self._latest_for_edit or self._latest_for_edit.get('id') != self._snapshot.get('id'): return
-        self._snapshot = dict(self._latest_for_edit)
-        self._latest_for_edit.clear(); self.adopt_revision.hide()
-        self.notice.setText('已采用刚读取的版本；更正草稿仍在，保存后才会修改记忆。')
-
-    def action(self, action: str, values: dict[str, Any] | None = None) -> None:
-        if self._pending: return
-        params = {"action": action, **(values or {})}
-        if action == "remember":
-            if self._new_memory_policy is None: self.notice.setText("请先读取设置中的新增输入策略，再保存记忆。"); return
-            params["use_policy"] = self._new_memory_policy
-        if action != "remember":
-            if not self._snapshot: self.notice.setText("请先选择并审阅一条记忆。"); return
-            status = str(self._snapshot.get("status", "")).lower()
-            if action == "correct" and status == "deleted":
-                self.notice.setText("已遗忘的记忆不能更正。"); return
-            if action == "forget" and status == "deleted":
-                self.notice.setText("这条记忆已经遗忘。"); return
-            params.update(memory_id=self._snapshot["id"], expected_revision=self._snapshot["revision"])
-        self._pending = True
-        def done(data: dict[str, Any]) -> None:
-            self._pending = False
-            if "_error" not in data:
-                self.notice.setText("操作已受理，正在读取当前记忆。"); self.correct.mark_clean(); self.remember.mark_clean(); self.refresh()
-        if self.channel.send("request_forget" if action == "forget" else "memory", {key: value for key, value in params.items() if action != "forget" or key != "action"}, done, mutation=True) is None: self._pending = False
-
     def clear_sensitive(self, epoch: int = 0) -> None:
-        from .components import Menu
-        for menu in self.findChildren(Menu): menu.close()
         for dialog in self.findChildren(QDialog):
             for value in dialog.findChildren(QLabel): value.clear()
             dialog.close()
-        self._read_epoch += 1; self._reading = False; self._read_again = False; self._settings_reading = False
-        self.channel.invalidate()
-        self.page.clear_sensitive(); self._snapshot = {}; self.correct.clear_sensitive(); self.remember.clear_sensitive(); self._pending = False
-        self.memory_actions.hide()
-        self._latest_for_edit.clear(); self.adopt_revision.hide()
-        self._new_memory_policy = None; self.remember.submit.setEnabled(False)
-        self.right_tabs.setCurrentIndex(0)
-        self.form_stack.setCurrentWidget(self.form_placeholder)
+        self._read_epoch += 1; self._reading = False; self._read_again = False
+        self.channel.invalidate(); self.page.clear_sensitive()
 
 class ArrangementsPage(QWidget):
     open_conversation = Signal(str, str)

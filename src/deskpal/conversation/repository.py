@@ -17,6 +17,7 @@ from deskpal.workflow.store import WorkflowStore, canonical
 
 from .models import ConversationRef, ConversationTurn
 from .runtime import ConversationConflict, MAX_HISTORY_BYTES, MAX_TURNS
+from .summary import validate_summary
 
 MAX_DIRECTORY_ENTRIES = 10000
 MAX_TIMELINE_ITEMS = 100000
@@ -28,22 +29,34 @@ class ConversationRepository:
         self.session_id = str(uuid4())
 
     def save_context_summary(self, identity: str, epoch: int, expected_revision: int,
-                             content: Mapping[str, Any], refs: tuple[ConversationRef, ...]) -> dict[str, Any]:
-        """P4 的摘要写入口；摘要是会话进展，不是长期事实或新指令。"""
-        if (set(content) != {"progress", "decisions", "open_questions"} or not refs or len(refs) > 384
-                or any(not isinstance(values, list) or len(values) > 16 or
-                       any(not isinstance(text, str) or not text.strip() for text in values)
-                       for values in content.values())):
+                             content: Mapping[str, Any], refs: tuple[ConversationRef, ...], *,
+                             delivery_id: str | None = None, reset_sources: bool = False) -> dict[str, Any]:
+        """有来源的任务进展和聊天背景，不是长期事实或新指令。"""
+        validate_summary(content)
+        if not refs or len(refs) > 384:
             raise ValueError("Invalid conversation summary")
         body = canonical(dict(content))
         if len(body.encode("utf-8")) > 4096:
             raise ValueError("Summary exceeds context budget")
         with self.store.transaction() as conn:
+            self.store.check_privacy(conn)
             self._row(conn, identity, epoch, writable=True)
+            if delivery_id:
+                delivered = conn.execute('SELECT revision FROM conversation_summary_delivery WHERE job_id=?', (delivery_id,)).fetchone()
+                if delivered:
+                    return dict(revision=delivered[0], conversation_id=identity, epoch=epoch)
             for ref in refs:
                 role = ref.id.rsplit(":", 1)
-                source = conn.execute("SELECT r.sequence FROM turn_ref r JOIN conversation_turn t ON t.task_id=r.task_id WHERE r.task_id=? AND r.conversation_id=? AND r.epoch=? AND t.published=1",
-                                      (role[0], identity, epoch)).fetchone()
+                # User messages are visible at submission. The assistant's
+                # draft does not become evidence until publication.
+                stored_user = len(role) == 2 and role[1] == "user"
+                source = conn.execute(
+                    """SELECT r.sequence FROM turn_ref r JOIN conversation_turn t ON t.task_id=r.task_id
+                       WHERE r.task_id=? AND r.conversation_id=? AND r.epoch=? AND
+                       (t.published=1 OR (? AND EXISTS (
+                           SELECT 1 FROM conversation_item i WHERE i.task_id=r.task_id
+                           AND i.kind='user_message' AND i.redacted_at IS NULL AND i.body!='')))""",
+                    (role[0], identity, epoch, stored_user)).fetchone()
                 version = conn.execute("SELECT revision,active,use_policy FROM dependency_version WHERE kind=? AND object_id=?",
                                        (ref.kind, ref.id)).fetchone()
                 if (ref.kind != "dialogue_turn" or len(role) != 2 or role[1] not in ("user", "assistant")
@@ -54,9 +67,17 @@ class ConversationRepository:
             if type(expected_revision) is not int or expected_revision != (prior[0] if prior else 0):
                 raise ConversationConflict("Summary revision changed")
             revision = expected_revision + 1
-            policy = "local_only" if any(ref.use_policy == "local_only" for ref in refs) else "cloud_allowed"
+            if reset_sources or prior is None:
+                conn.execute('DELETE FROM conversation_summary_source WHERE conversation_id=?', (identity,))
+            # 只接收本轮新增来源；历史关联留在数据库，不随每轮提示词增长。
+            conn.executemany('INSERT OR REPLACE INTO conversation_summary_source VALUES(?,?,?,?,?,?)',
+                [(identity, epoch, ref.kind, ref.id, ref.revision, ref.use_policy) for ref in refs])
+            restricted = conn.execute("SELECT 1 FROM conversation_summary_source WHERE conversation_id=? AND epoch=? AND use_policy='local_only' LIMIT 1", (identity, epoch)).fetchone()
+            policy = "local_only" if restricted else "cloud_allowed"
             conn.execute("INSERT INTO conversation_context_summary VALUES(?,?,?,?,?,?) ON CONFLICT(conversation_id) DO UPDATE SET epoch=excluded.epoch,revision=excluded.revision,content=excluded.content,refs=excluded.refs,use_policy=excluded.use_policy",
-                         (identity, epoch, revision, body, canonical([ref.to_dict() for ref in refs]), policy))
+                         (identity, epoch, revision, body, '[]', policy))
+            if delivery_id:
+                conn.execute('INSERT INTO conversation_summary_delivery VALUES(?,?,?,?)', (delivery_id, identity, epoch, revision))
             return {"revision": revision, "conversation_id": identity, "epoch": epoch}
 
     def context_summary(self, identity: str, epoch: int, *, allow_restricted: bool = False) -> dict[str, Any] | None:
@@ -66,22 +87,31 @@ class ConversationRepository:
             row = conn.execute("SELECT * FROM conversation_context_summary WHERE conversation_id=? AND epoch=?", (identity, epoch)).fetchone()
             if row is None:
                 return None
-            for ref in json.loads(row["refs"]):
-                source = conn.execute("SELECT revision,active FROM dependency_version WHERE kind=? AND object_id=?",
-                                      (ref["kind"], ref["id"])).fetchone()
-                if source is None or source[0] != ref["revision"] or not source[1]:
-                    return {"unavailable": True, "revision": row['revision']}
+            invalid = conn.execute("""SELECT 1 FROM conversation_summary_source s
+                LEFT JOIN dependency_version d ON d.kind=s.kind AND d.object_id=s.object_id
+                WHERE s.conversation_id=? AND s.epoch=? AND
+                (d.object_id IS NULL OR d.revision!=s.revision OR d.active=0) LIMIT 1""", (identity, epoch)).fetchone()
+            if invalid:
+                return {"unavailable": True, "revision": row['revision']}
             if row["use_policy"] == "local_only" and not allow_restricted:
                 return {"unavailable": True, "revision": row['revision']}
+            # 快照及检索归因只带近期代表来源，完整来源由上面的查询校验。
+            recent_refs = conn.execute(
+                """SELECT kind,object_id AS id,revision,use_policy FROM conversation_summary_source
+                   WHERE conversation_id=? AND epoch=?
+                   ORDER BY revision DESC,object_id LIMIT 8""", (identity, epoch)).fetchall()
             return {"kind": "conversation_summary", "content": json.loads(row["content"]),
                     "revision": row["revision"], "instruction": False,
-                    "externally_verified": False, "refs": json.loads(row["refs"])}
+                    "externally_verified": False, "refs": [dict(ref) for ref in recent_refs]}
 
     def invalidate_memory_summaries(self, memory_id: str) -> None:
         """原记忆更正后，相关会话摘要须重建，不能继续引用旧值。"""
         with self.store.transaction() as db:
-            db.execute("DELETE FROM conversation_context_summary WHERE conversation_id IN "
-                "(SELECT i.conversation_id FROM conversation_item i JOIN conversation_item_source s ON s.item_id=i.id WHERE s.source_kind='memory' AND s.source_id=?)", (memory_id,))
+            identities = [row[0] for row in db.execute("SELECT DISTINCT i.conversation_id FROM conversation_item i JOIN conversation_item_source s ON s.item_id=i.id WHERE s.source_kind='memory' AND s.source_id=?", (memory_id,))]
+            for identity in identities:
+                db.execute('DELETE FROM conversation_context_summary WHERE conversation_id=?', (identity,))
+                db.execute('DELETE FROM conversation_summary_source WHERE conversation_id=?', (identity,))
+
 
     def _meta(self, conn: sqlite3.Connection) -> dict[str, Any]:
         privacy = conn.execute("SELECT epoch FROM privacy_control WHERE id=1").fetchone()
@@ -364,14 +394,30 @@ class ConversationRepository:
                 for ref in refs:
                     conn.execute("INSERT OR REPLACE INTO conversation_item_source VALUES(?,?,?,?,?)", (item[0], ref.kind, ref.id, ref.revision, ref.use_policy))
 
-    def load(self, identity: str, epoch: int, before_sequence: int) -> tuple[ConversationTurn, ...]:
+    def load(self, identity: str, epoch: int, before_sequence: int, *,
+             search_terms: tuple[str, ...] = ()) -> tuple[ConversationTurn, ...]:
         # Copy a bounded candidate page, then release the workflow lock before
         # visiting Memory or another independent source authority.
         with self.store.read_connection() as conn:
             self.store.check_privacy(conn)
             self._row(conn, identity, epoch)
             privacy_epoch = self._meta(conn)["privacy_epoch"]
-            rows = [dict(row) for row in conn.execute("SELECT r.sequence,r.task_id,COALESCE(u.body,'') AS request,a.body AS response,a.use_policy,c.refs,c.facts,t.revision AS task_revision,COALESCE(u.revision,0) AS user_revision,a.revision AS assistant_revision FROM turn_ref r JOIN conversation_turn c ON c.task_id=r.task_id LEFT JOIN conversation_item u ON u.task_id=r.task_id AND u.kind='user_message' JOIN conversation_item a ON a.task_id=r.task_id AND a.kind='assistant_message' JOIN task t ON t.id=r.task_id WHERE r.conversation_id=? AND r.epoch=? AND r.sequence<? AND c.published=1 AND t.scrubbed=0 AND u.redacted_at IS NULL AND a.redacted_at IS NULL ORDER BY r.sequence DESC LIMIT ?", (identity, epoch, before_sequence, MAX_TURNS)).fetchall()]
+            terms = tuple(term.lower() for term in search_terms[:8] if term)
+            matches = " OR ".join("instr(lower(COALESCE(u.body,'')),?)>0 OR instr(lower(a.body),?)>0" for _ in terms)
+            search_filter = " AND (" + matches + ")" if matches else ""
+            search_args = tuple(term for term in terms for _ in range(2))
+            rows = [dict(row) for row in conn.execute(
+                """SELECT r.sequence,r.task_id,COALESCE(u.body,'') AS request,a.body AS response,
+                          a.use_policy,c.refs,c.facts,t.revision AS task_revision,
+                          COALESCE(u.revision,0) AS user_revision,a.revision AS assistant_revision
+                   FROM turn_ref r JOIN conversation_turn c ON c.task_id=r.task_id
+                   LEFT JOIN conversation_item u ON u.task_id=r.task_id AND u.kind='user_message'
+                   JOIN conversation_item a ON a.task_id=r.task_id AND a.kind='assistant_message'
+                   JOIN task t ON t.id=r.task_id
+                   WHERE r.conversation_id=? AND r.epoch=? AND r.sequence<? AND c.published=1
+                   AND t.scrubbed=0 AND u.redacted_at IS NULL AND a.redacted_at IS NULL"""
+                + search_filter + " ORDER BY r.sequence DESC LIMIT ?",
+                (identity, epoch, before_sequence, *search_args, 32 if terms else MAX_TURNS))]
         validated: list[dict[str, Any]] = []
         for row in rows:
             try:
@@ -397,9 +443,12 @@ class ConversationRepository:
                 refs = tuple(ConversationRef(**ref) for ref in json.loads(row["refs"]))
                 facts = tuple(str(fact) for fact in json.loads(row["facts"]))
                 turn = ConversationTurn(row["sequence"], row["task_id"], row["request"], row["response"], refs, row["use_policy"], facts)
-                used += turn.history_bytes + sum(len(fact.encode("utf-8")) for fact in facts)
-                if used > MAX_HISTORY_BYTES:
+                size = turn.history_bytes + sum(len(fact.encode("utf-8")) for fact in facts)
+                if used + size > MAX_HISTORY_BYTES:
+                    if terms:
+                        continue
                     break
+                used += size
                 result.append(turn)
             return tuple(reversed(result))
 
@@ -420,8 +469,9 @@ class ConversationRepository:
             # First revoke old turns in the same transaction as scrubbing. Every
             # Started/model/publication guard also checks this context epoch.
             conn.execute("UPDATE conversation SET context_epoch=context_epoch+1,revision=revision+1,timeline_revision=timeline_revision+1,title=?,deleted_at=?,updated_at=? WHERE id=?",
-                         ("日常聊天" if row["kind"] == "default" else "已清空的会话", now if delete else None, now, identity))
+                         (row["title"], now if delete else None, now, identity))
             conn.execute("DELETE FROM conversation_context_summary WHERE conversation_id=?", (identity,))
+            conn.execute("DELETE FROM conversation_summary_source WHERE conversation_id=?", (identity,))
             ids = tuple(r[0] for r in conn.execute("""WITH RECURSIVE affected(task_id) AS (
                 SELECT task_id FROM turn_ref WHERE conversation_id=?
                 UNION SELECT d.task_id FROM context_dependency d JOIN affected a ON d.kind='dialogue_turn' AND d.object_id IN (a.task_id,a.task_id||':user',a.task_id||':assistant')
@@ -436,7 +486,10 @@ class ConversationRepository:
                 conn.execute("UPDATE task SET cancel_requested=1 WHERE id=? AND status NOT IN ('Completed','Failed','Cancelled')", (task_id,))
                 scrub(task_id)
             conn.execute("UPDATE conversation_item SET body='',redacted_at=?,revision=revision+1 WHERE conversation_id=? AND redacted_at IS NULL", (now, identity))
-            conn.execute("UPDATE desktop_reminder_inbox SET label='',delivery_state='redacted' WHERE conversation_id=?", (identity,))
+            conn.execute("UPDATE desktop_reminder_inbox SET conversation_id=NULL WHERE conversation_id=?", (identity,))
+            conn.execute("UPDATE task SET request='[聊天记录已清空]' WHERE id IN (SELECT task_id FROM turn_ref WHERE conversation_id=?)", (identity,))
+            conn.execute("UPDATE conversation_turn SET refs='[]',facts='[]',published=0 WHERE task_id IN (SELECT task_id FROM turn_ref WHERE conversation_id=?)", (identity,))
+            conn.execute("UPDATE dependency_version SET active=0 WHERE kind='dialogue_turn' AND object_id IN (SELECT task_id||':user' FROM turn_ref WHERE conversation_id=? UNION SELECT task_id||':assistant' FROM turn_ref WHERE conversation_id=?)", (identity, identity))
             conn.execute("UPDATE desktop_resource_link SET conversation_id=NULL WHERE conversation_id=?", (identity,))
             conn.execute("INSERT INTO conversation_cleanup VALUES(?,?,?,?,?,?,?)", (job_id, identity, operation, "Pending" if pending_tasks else "Completed", len(ids), now, canonical(pending_tasks)))
             self._receipt(conn, command_id, operation, payload, identity, job_id)
@@ -455,5 +508,5 @@ class ConversationRepository:
             return {"accepted": True, "job_id": job_id, "status": status, "conversation_id": row["conversation_id"],
                     "revision": conversation["revision"], "context_epoch": conversation["context_epoch"], "epoch": conversation["context_epoch"],
                     "affected_task_count": row["affected_count"],
-                    "cleared": ["conversation content", "dependent task projections and context copies", "linked reminder projections"],
-                    "retained": ["independent long-term memory", "already admitted requests and started external effects", "historical logs, backups, exports and external copies"], **self._meta(conn)}
+                    "cleared": ["conversation content and working context"],
+                    "retained": ["long-term memory and personality", "execution records, goals, calendar and reminders", "historical logs, backups, exports and external copies"], **self._meta(conn)}

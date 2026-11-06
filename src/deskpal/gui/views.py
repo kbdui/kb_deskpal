@@ -42,6 +42,7 @@ class PagedView(QWidget):
         self._list_only = False
         self.display_timezone: str | None = None
         self._memory_date_groups: dict[str, QTreeWidgetItem] = {}
+        self._tool_category_groups: dict[str, QTreeWidgetItem] = {}
         layout = QVBoxLayout(self)
         self.toolbar_host = QWidget()
         self.toolbar_host.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
@@ -108,11 +109,11 @@ class PagedView(QWidget):
         self.detail.setMinimumHeight(180)
         self.splitter.addWidget(self.list)
         self.memory_tree: QTreeWidget | None = None
-        if name == "memories":
-            # A date tree keeps the existing DTO/page contract while ensuring
-            # each expandable task still points to exactly one memory record.
+        if name in {"memories", "tools"}:
+            # Grouped trees retain the DTO/page contract while keeping records
+            # selectable beneath their category or date heading.
             self.memory_tree = QTreeWidget()
-            self.memory_tree.setObjectName("memories_grouped_list")
+            self.memory_tree.setObjectName("memories_grouped_list" if name == "memories" else "tools_grouped_list")
             self.memory_tree.setHeaderHidden(True)
             self.memory_tree.setMinimumWidth(0)
             self.splitter.replaceWidget(0, self.memory_tree)
@@ -205,6 +206,7 @@ class PagedView(QWidget):
         self.offset = int(data.get("offset", self.offset))
         self.has_more = bool(data.get("has_more", False))
         self._memory_date_groups.clear()
+        self._tool_category_groups.clear()
         self.list.blockSignals(True)
         self.list.clear()
         if self.memory_tree is not None:
@@ -217,7 +219,8 @@ class PagedView(QWidget):
             title = self._title(item)
             state = label(item.get("status", item.get("delivery_state", "")))
             if self.memory_tree is not None:
-                self._add_memory_tree_item(item, title, state)
+                if self.name == "tools": self._add_tool_tree_item(item, title, state)
+                else: self._add_memory_tree_item(item, title, state)
                 row = None
             else:
                 display = title.replace('\n', ' ')[:100]
@@ -241,7 +244,7 @@ class PagedView(QWidget):
         if self.memory_tree is not None:
             self.memory_tree.blockSignals(False)
             if previous_id is not None:
-                self._select_memory_id(previous_id)
+                (self._select_tool_id if self.name == "tools" else self._select_memory_id)(previous_id)
         else:
             self.list.setCurrentRow(selected)
         self.list.blockSignals(False)
@@ -340,6 +343,51 @@ class PagedView(QWidget):
                 # record, so selecting it opens that task's complete details.
                 detail.setData(0, Qt.ItemDataRole.UserRole, item)
                 row.addChild(detail)
+
+    def _add_tool_tree_item(self, item: dict[str, Any], title: str, state: str) -> None:
+        assert self.memory_tree is not None
+        identity = " ".join(str(item.get(key) or "") for key in ("id", "name", "tool_name", "summary")).casefold()
+        if any(word in identity for word in ("calendar", "timer", "schedule", "reminder")):
+            category = "日程管理"
+        elif "memory" in identity:
+            category = "记忆管理"
+        elif any(word in identity for word in ("character", "persona", "interaction", "attention", "goal")):
+            category = "角色与互动管理"
+        elif any(word in identity for word in ("file", "text", "document", "workspace")):
+            category = "文件与资料管理"
+        elif "screen" in identity or "screenshot" in identity:
+            category = "屏幕工具"
+        else:
+            category = "通用能力"
+        group = self._tool_category_groups.get(category)
+        if group is None:
+            group = QTreeWidgetItem([category])
+            group.setFlags(group.flags() & ~Qt.ItemFlag.ItemIsSelectable)
+            group.setExpanded(False)
+            self.memory_tree.addTopLevelItem(group)
+            self._tool_category_groups[category] = group
+        row = QTreeWidgetItem([title.replace("\n", " ")[:120] + ((" · " + state) if state else "")])
+        row.setData(0, Qt.ItemDataRole.UserRole, item)
+        row.setToolTip(0, str(item.get("summary") or title))
+        group.addChild(row)
+
+    def _select_tool_id(self, identity: Any) -> None:
+        if self.memory_tree is None: return
+        for group_index in range(self.memory_tree.topLevelItemCount()):
+            group = self.memory_tree.topLevelItem(group_index)
+            for row_index in range(group.childCount()):
+                row = group.child(row_index)
+                item = row.data(0, Qt.ItemDataRole.UserRole)
+                if isinstance(item, dict) and item.get("id", item.get("name")) == identity:
+                    self.memory_tree.blockSignals(True)
+                    self.memory_tree.setCurrentItem(row)
+                    self.memory_tree.blockSignals(False)
+                    self._memory_tree_selection(row, None)
+                    return
+        self.memory_tree.blockSignals(True)
+        self.memory_tree.setCurrentIndex(QModelIndex())
+        self.memory_tree.blockSignals(False)
+        self._memory_tree_selection(None, None)
 
     @staticmethod
     def _is_tool_result_origin(item: dict[str, Any]) -> bool:

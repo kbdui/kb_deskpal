@@ -1,13 +1,31 @@
 """The sole settings center. Secrets remain in the independent maintenance UI."""
 from typing import Any
 from PySide6.QtCore import Qt, QRectF
-from PySide6.QtGui import QGuiApplication, QPainter, QPainterPath, QPixmap
+from PySide6.QtGui import QColor, QGuiApplication, QPainter, QPainterPath, QPalette, QPixmap
 from PySide6.QtWidgets import (QFileDialog, QFormLayout, QGroupBox, QHBoxLayout, QLabel, QMessageBox, QSizePolicy, QVBoxLayout, QWidget)
 from .components import (ChoiceBox as QComboBox, PushButton as QPushButton, CheckBox as QCheckBox, LineEdit as QLineEdit, PlainTextEdit as QPlainTextEdit, TreeWidget as QTreeWidget, ScrollArea as QScrollArea, SpinBox as QSpinBox, DoubleSpinBox as QDoubleSpinBox, Slider as QSlider, ToolButton as QToolButton, Tabs as QTabWidget)
 from .channel import Channel
 from .views import CommandForm
 from .widgets import ArrowComboBox, fill_tree, notice_label, scroll, text_label
 from .display_text import compact_path
+from qfluentwidgets import qconfig
+
+
+def _style_numeric_field(spin: Any) -> None:
+    """Keep Fluent spin-box values readable in both themes and align them as controls."""
+    from qfluentwidgets import isDarkTheme
+    color = QPalette.ColorRole.Text
+    palette = spin.palette()
+    text_color = "#f1f3f1" if isDarkTheme() else "#202522"
+    palette.setColor(color, QColor(text_color))
+    spin.setPalette(palette)
+    spin.setMinimumWidth(150); spin.setMaximumWidth(210)
+    spin.setAlignment(Qt.AlignmentFlag.AlignLeft)
+    field = spin.lineEdit()
+    if field is not None:
+        field_palette = field.palette(); field_palette.setColor(QPalette.ColorRole.Text, palette.color(color))
+        field.setPalette(field_palette); field.setAlignment(Qt.AlignmentFlag.AlignLeft)
+        field.setStyleSheet(f"color:{text_color}; background:transparent;")
 
 
 def _summary(text: str = "尚未读取当前设置。") -> QLabel:
@@ -81,8 +99,8 @@ class InteractionSettings(QWidget):
         self.pending = False
         self.loading = False
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(24, 24, 24, 24); layout.setSpacing(16)
         layout.addWidget(text_label("角色卡", heading=True))
-        layout.addWidget(text_label("自由描述名字、背景、性格、价值取向和相处方式。角色卡会参与理解、规划与回答。回答所需的角色资料、相关记忆和有限历史会交给你在设置中选择的模型。"))
         self.card = QPlainTextEdit()
         self.card.setPlaceholderText("例如：沉稳、好奇，喜欢先了解实际条件；熟悉之后偶尔开玩笑。")
         self.card.setMinimumHeight(240)
@@ -93,16 +111,14 @@ class InteractionSettings(QWidget):
         row = QHBoxLayout()
         self.save_button = QPushButton("保存角色卡")
         self.save_button.clicked.connect(self.save)
-        refresh = QPushButton("重新读取（保留编辑）")
-        refresh.clicked.connect(self.refresh)
-        row.addWidget(self.save_button); row.addWidget(refresh); row.addStretch()
+        refresh = QPushButton("重新读取")
+        refresh.clicked.connect(self._reload_inputs)
+        row.addStretch(1); row.addWidget(self.save_button); row.addWidget(refresh)
         layout.addLayout(row)
-        self.status = text_label("根据交流自动学习；临时要求可以直接在聊天中提出。")
-        layout.addWidget(self.status)
-        layout.addWidget(text_label('逐渐形成的相处方式', heading=False))
-        self.habits_view = text_label('还没有形成长期相处习惯。'); layout.addWidget(self.habits_view)
-        layout.addWidget(text_label('当前情绪', heading=False))
-        self.emotion_view = text_label('目前没有需要保留的情绪状态。'); layout.addWidget(self.emotion_view)
+        habits_box = QGroupBox('逐渐形成的相处方式'); habits_layout = QVBoxLayout(habits_box)
+        self.habits_view = text_label('还没有形成长期相处习惯。'); habits_layout.addWidget(self.habits_view); layout.addWidget(habits_box)
+        emotion_box = QGroupBox('当前情绪'); emotion_layout = QVBoxLayout(emotion_box)
+        self.emotion_view = text_label('目前没有需要保留的情绪状态。'); emotion_layout.addWidget(self.emotion_view); layout.addWidget(emotion_box)
         if hasattr(coordinator.bridge, "privacy_changed"):
             coordinator.bridge.privacy_changed.connect(self.clear_sensitive)
 
@@ -181,7 +197,8 @@ class AppearanceSettings(QWidget):
     def __init__(self, coordinator: Any, preferences: Any) -> None:
         super().__init__(); self.coordinator = coordinator; self.controller = coordinator.appearance; self.preferences = preferences; self.channel = Channel(coordinator.bridge, self)
         self.generation = 0; self.token = ""; self.preview_request = ""; self._busy = False
-        layout = QVBoxLayout(self); self.notice = text_label("PNG/JPEG 静态图片，最大 5 MiB、单边 2048 像素。图片仅在本机处理。"); layout.addWidget(self.notice); self.channel.notice.connect(self.notice.setText)
+        layout = QVBoxLayout(self); layout.setContentsMargins(24, 24, 24, 24); layout.setSpacing(16)
+        self.notice = notice_label(); layout.addWidget(self.notice); self.channel.notice.connect(self.notice.setText)
         self.theme_choice = ArrowComboBox()
         for title, value in [('跟随系统', 'auto'), ('浅色', 'light'), ('深色', 'dark')]: self.theme_choice.addItem(title, value)
         self.theme_choice.setCurrentIndex(max(0, self.theme_choice.findData(getattr(preferences, 'theme', 'auto'))))
@@ -190,28 +207,41 @@ class AppearanceSettings(QWidget):
             value = str(self.theme_choice.currentData())
             self._pref('theme', value); select(value)
         self.theme_choice.currentIndexChanged.connect(theme_changed)
-        theme_row = QFormLayout(); theme_row.addRow('应用主题', self.theme_choice); layout.addLayout(theme_row)
+        self.theme_choice.setFixedWidth(260)
+        theme_row = QHBoxLayout(); theme_row.addWidget(text_label('应用主题')); theme_row.addStretch(1); theme_row.addWidget(self.theme_choice); layout.addLayout(theme_row)
+        self.user_display_name = QLineEdit(getattr(preferences, "user_display_name", "你")); self.user_display_name.setMaxLength(32)
+        self.character_display_name = QLineEdit(getattr(preferences, "character_display_name", "Deskpal")); self.character_display_name.setMaxLength(32)
+        self.user_display_name.setPlaceholderText("你")
+        self.character_display_name.setPlaceholderText("Deskpal")
+        for field in (self.user_display_name, self.character_display_name): field.setMaximumWidth(320)
+        user_row = QHBoxLayout(); user_row.addWidget(text_label("聊天中的你的称呼")); user_row.addStretch(1); user_row.addWidget(self.user_display_name); layout.addLayout(user_row)
+        character_row = QHBoxLayout(); character_row.addWidget(text_label("聊天中的角色称呼")); character_row.addStretch(1); character_row.addWidget(self.character_display_name); layout.addLayout(character_row)
+        self.user_display_name.editingFinished.connect(lambda: self._pref("user_display_name", self.user_display_name.text()))
+        self.character_display_name.editingFinished.connect(lambda: self._pref("character_display_name", self.character_display_name.text()))
         self.toggles: dict[str, QCheckBox] = {}
         for key, title in [("pet_enabled", "启用桌宠"), ("pet_visible", "显示桌宠"), ("pet_on_top", "桌宠置顶"), ("pet_click_through", "桌宠鼠标穿透（可回到这里关闭）")]:
-            check = QCheckBox(title); check.setChecked(bool(getattr(preferences, key, False))); check.toggled.connect(lambda value, key=key: self._pref(key, value)); layout.addWidget(check); self.toggles[key] = check
+            row = QHBoxLayout(); row.addWidget(text_label(title)); row.addStretch(1)
+            check = QCheckBox(); check.setAccessibleName(title); check.setChecked(bool(getattr(preferences, key, False))); check.toggled.connect(lambda value, key=key: self._pref(key, value)); row.addWidget(check); layout.addLayout(row); self.toggles[key] = check
         scale_row = QHBoxLayout(); self.scale = QSlider(Qt.Orientation.Horizontal); self.scale.setRange(60, 160); self.scale.setValue(round(float(getattr(preferences, "pet_scale", 1.0)) * 100)); self.scale_label = text_label(f"{self.scale.value()}%")
         self.scale.valueChanged.connect(lambda value: self.scale_label.setText(f"{value}%")); self.scale.sliderReleased.connect(lambda: self._pref("pet_scale", self.scale.value() / 100)); self.scale.actionTriggered.connect(lambda _: self._scale_keyboard())
         scale_row.addWidget(text_label("桌宠大小")); scale_row.addWidget(self.scale, 1); scale_row.addWidget(self.scale_label); layout.addLayout(scale_row)
-        presets = QHBoxLayout()
+        presets = QHBoxLayout(); presets.addStretch(1)
         for scale_percent in [80, 100, 120, 140]:
             button = QPushButton(f"{scale_percent}%"); button.clicked.connect(lambda checked=False, value=scale_percent: self._scale(value)); presets.addWidget(button)
         reset_position = QPushButton("恢复大小与位置"); reset_position.clicked.connect(self._reset_position); presets.addWidget(reset_position); layout.addLayout(presets)
+        layout.addWidget(text_label("桌宠形象与表情", heading=True))
         self.slot = ArrowComboBox()
-        for key, title in [("user_avatar", "用户头像"), ("character_avatar", "角色聊天头像"), ("pet_main", "桌宠主形象"), ("pet_thinking", "思考表情"), ("pet_focused", "专注表情"), ("pet_pleased", "愉悦表情"), ("pet_alert", "提示表情")]: self.slot.addItem(title, key)
-        layout.addWidget(self.slot); self.preview = ImagePreview(); self.preview.setText("选择图片以预览显示区域"); layout.addWidget(self.preview)
-        self.mode = ArrowComboBox()
-        for mode_key, title in [("contain", "完整显示，保持比例"), ("square", "方形头像"), ("circle", "圆形头像")]: self.mode.addItem(title, mode_key)
-        layout.addWidget(self.mode); self.mode.currentIndexChanged.connect(self._preview_update)
-        crop_box = QGroupBox("显示区域（0–100%，不会修改源文件）"); form = QFormLayout(crop_box); self.crop: list[QDoubleSpinBox] = []
+        self.slot.setFixedWidth(260)
+        for key, title in [("pet_main", "桌宠主形象"), ("pet_thinking", "思考表情"), ("pet_focused", "专注表情"), ("pet_pleased", "愉悦表情"), ("pet_alert", "提示表情")]: self.slot.addItem(title, key)
+        slot_row = QHBoxLayout(); slot_row.addWidget(text_label("形象槽位")); slot_row.addStretch(1); slot_row.addWidget(self.slot); layout.addLayout(slot_row)
+        self.preview = ImagePreview(); self.preview.setText("选择桌宠图片以预览显示区域"); layout.addWidget(self.preview)
+        crop_box = QGroupBox("显示区域（0–100%，不会修改源文件）"); form = QVBoxLayout(crop_box); self.crop: list[QDoubleSpinBox] = []
         for title, percentage in [("左侧", 0), ("顶部", 0), ("宽度", 100), ("高度", 100)]:
-            spin = QDoubleSpinBox(); spin.setRange(0, 100); spin.setValue(percentage); spin.setSuffix(" %"); spin.valueChanged.connect(self._preview_update); self.crop.append(spin); form.addRow(title, spin)
+            row = QHBoxLayout(); row.addWidget(text_label(title)); row.addStretch(1)
+            spin = QDoubleSpinBox(); spin.setRange(0, 100); spin.setValue(percentage); spin.setSuffix(" %"); _style_numeric_field(spin)
+            spin.valueChanged.connect(self._preview_update); self.crop.append(spin); row.addWidget(spin); form.addLayout(row)
         layout.addWidget(crop_box)
-        row = QHBoxLayout(); self.choose = QPushButton("选择本地图片"); self.apply = QPushButton("保存应用"); self.reset = QPushButton("此槽位恢复默认"); discard = QPushButton("丢弃本次预览")
+        row = QHBoxLayout(); row.addStretch(1); self.choose = QPushButton("选择本地图片"); self.apply = QPushButton("保存应用"); self.reset = QPushButton("此槽位恢复默认"); discard = QPushButton("丢弃本次预览")
         for button in [self.choose, self.apply, self.reset, discard]: row.addWidget(button)
         layout.addLayout(row); self.choose.clicked.connect(self._choose); self.apply.clicked.connect(self._apply); self.reset.clicked.connect(self._reset); discard.clicked.connect(self._discard); self.slot.currentIndexChanged.connect(self._slot)
         collect = QPushButton("回收未使用的托管图片"); collect.clicked.connect(self._collect); layout.addWidget(collect)
@@ -237,19 +267,19 @@ class AppearanceSettings(QWidget):
         if key == "pet_scale": self.scale.blockSignals(True); self.scale.setValue(round(float(value) * 100)); self.scale.blockSignals(False); self.scale_label.setText(f"{self.scale.value()}%")
         if key == 'theme':
             self.theme_choice.blockSignals(True); self.theme_choice.setCurrentIndex(self.theme_choice.findData(value)); self.theme_choice.blockSignals(False)
+        if key == "user_display_name": self.user_display_name.setText(str(value))
+        if key == "character_display_name": self.character_display_name.setText(str(value))
     def _profiles(self) -> None:
         values = [spin.value() / 100 for spin in self.crop]
         valid = values[2] > 0 and values[3] > 0 and values[0] + values[2] <= 1 and values[1] + values[3] <= 1
         self.apply.setEnabled(bool(self.token) and not self._busy and valid); self.reset.setEnabled(self.slot.currentData() in self.controller.profiles and not self._busy)
         self.slot.setEnabled(not self._busy); self.choose.setEnabled(not self._busy)
-        self.mode.setEnabled(not self._busy and str(self.slot.currentData()).endswith("avatar"))
         for spin in self.crop: spin.setEnabled(not self._busy)
     def _metadata_changed(self) -> None:
         self._profiles()
         if not self.token and not self._busy: self._slot(self.slot.currentIndex())
     def _slot(self, index: int) -> None:
         self._discard(); profile = self.controller.profiles.get(str(self.slot.currentData()), {})
-        avatar = str(self.slot.currentData()).endswith("avatar"); self.mode.setEnabled(avatar); self.mode.setCurrentIndex(self.mode.findData(profile.get("display_mode", "contain")) if avatar else 0)
         for spin, value in zip(self.crop, profile.get("crop", [0, 0, 1, 1])): spin.setValue(float(value) * 100)
         asset_id = profile.get("effective_asset_id")
         if asset_id: self._request_preview({"asset_id": asset_id})
@@ -276,7 +306,7 @@ class AppearanceSettings(QWidget):
         pixmap = QPixmap(); png = envelope.get("image", {}).get("png")
         if isinstance(png, bytes) and pixmap.loadFromData(png, "PNG"): self.preview.pixmap_value = pixmap; self._preview_update()
     def _preview_update(self, *args: Any) -> None:
-        self.preview.mode = str(self.mode.currentData()); values = [spin.value() / 100 for spin in self.crop]
+        self.preview.mode = "contain"; values = [spin.value() / 100 for spin in self.crop]
         if values[2] <= 0 or values[3] <= 0 or values[0] + values[2] > 1.00001 or values[1] + values[3] > 1.00001:
             self.notice.setText("显示区域必须有宽高，且不能超出图片边界。"); self.apply.setEnabled(False); return
         self.preview.crop = values; self.preview.update(); self._profiles()
@@ -286,7 +316,7 @@ class AppearanceSettings(QWidget):
         crop = [spin.value() / 100 for spin in self.crop]
         if crop[2] <= 0 or crop[3] <= 0 or crop[0] + crop[2] > 1 or crop[1] + crop[3] > 1: self.notice.setText("显示区域超出图片，请先调整。"); return
         self._busy = True; self._profiles()
-        if self.channel.send("appearance_apply", {"slot": self.slot.currentData(), "token": self.token, "expected_revision": profile["revision"], "generation": self.generation, "display_mode": self.mode.currentData(), "crop": crop}, self._saved) is None:
+        if self.channel.send("appearance_apply", {"slot": self.slot.currentData(), "token": self.token, "expected_revision": profile["revision"], "generation": self.generation, "display_mode": "contain", "crop": crop}, self._saved) is None:
             self._busy = False; self._profiles()
     def _saved(self, data: dict[str, Any]) -> None:
         self._busy = False
@@ -316,34 +346,54 @@ class SettingsPage(QWidget):
         self.tabs.setUsesScrollButtons(True)
         persona = QWidget(); vbox = QVBoxLayout(persona); self.interaction = InteractionSettings(coordinator); vbox.addWidget(self.interaction)
         self.companion = self.interaction
-        reload = QPushButton("放弃本区未保存编辑并重新读取"); reload.clicked.connect(self._reload_persona); vbox.addWidget(reload)
         self.tabs.addTab(scroll(persona), "角色")
         self.appearance = AppearanceSettings(coordinator, preferences); self.tabs.addTab(scroll(self.appearance), "外观")
-        notification = QWidget(); vbox = QVBoxLayout(notification); vbox.addWidget(text_label("通知仅显示通用状态，提醒详情需主动打开查看。"))
+        notification = QWidget(); vbox = QVBoxLayout(notification); vbox.setContentsMargins(24, 24, 24, 24); vbox.setSpacing(16)
+        vbox.addWidget(text_label("通知仅显示通用状态，提醒详情需主动打开查看。"))
         self.notification_controls: dict[str, QCheckBox] = {}
         for key, title in [("notifications_enabled", "启用系统通知"), ("close_to_tray", "关闭主窗口后留在托盘")]:
-            check = QCheckBox(title); check.setChecked(bool(getattr(preferences, key, False))); check.toggled.connect(lambda value, key=key: self.appearance._pref(key, value)); self.notification_controls[key] = check; vbox.addWidget(check)
+            control_row = QHBoxLayout(); control_row.addWidget(text_label(title)); control_row.addStretch(1)
+            check = QCheckBox(); check.setAccessibleName(title); check.setChecked(bool(getattr(preferences, key, False)))
+            check.toggled.connect(lambda value, key=key: self.appearance._pref(key, value)); self.notification_controls[key] = check
+            control_row.addWidget(check); vbox.addLayout(control_row)
         self.chat_pause = QPushButton("暂停主动聊天")
         self.reminder_pause = QPushButton("暂停约定提醒")
         self._notification_policy: dict[str, Any] = {}
         self.chat_pause.setEnabled(False); self.reminder_pause.setEnabled(False)
         self.chat_pause.clicked.connect(lambda: self._toggle_policy('chat'))
         self.reminder_pause.clicked.connect(lambda: self._toggle_policy('reminder'))
-        vbox.addWidget(self.chat_pause); vbox.addWidget(self.reminder_pause)
-        row = QFormLayout(); self.quiet_start = QSpinBox(); self.quiet_end = QSpinBox()
-        for key, spin, title, default in [("quiet_start", self.quiet_start, "免打扰开始小时", 22), ("quiet_end", self.quiet_end, "结束小时", 8)]: spin.setRange(0, 23); spin.setValue(int(getattr(preferences, key, default))); row.addRow(title, spin); spin.valueChanged.connect(self._quiet)
-        vbox.addLayout(row); vbox.addStretch(); self.tabs.addTab(scroll(notification), "通知")
-        privacy = QWidget(); vbox = QVBoxLayout(privacy); vbox.addWidget(text_label("清空聊天与遗忘长期记忆是独立操作。清空默认聊天保留固定入口。运行中的外部效果不能撤回，旧备份与云副本需另行处理。"))
+        for title, button in [("主动聊天", self.chat_pause), ("约定提醒", self.reminder_pause)]:
+            control_row = QHBoxLayout(); control_row.addWidget(text_label(title)); control_row.addStretch(1); control_row.addWidget(button); vbox.addLayout(control_row)
+        self.quiet_start = QSpinBox(); self.quiet_end = QSpinBox()
+        for key, spin, title, default in [("quiet_start", self.quiet_start, "免打扰开始小时", 22), ("quiet_end", self.quiet_end, "免打扰结束小时", 8)]:
+            spin.setRange(0, 23); spin.setValue(default); spin.setEnabled(False); _style_numeric_field(spin)
+            control_row = QHBoxLayout(); control_row.addWidget(text_label(title)); control_row.addStretch(1); control_row.addWidget(spin); vbox.addLayout(control_row)
+            spin.valueChanged.connect(self._quiet)
+        self.reminder_bypass = QCheckBox()
+        self.reminder_bypass.setAccessibleName('定时提醒可突破免打扰')
+        self.reminder_bypass.setEnabled(False)
+        self.reminder_bypass.toggled.connect(self._quiet)
+        row = QHBoxLayout(); row.addWidget(text_label('定时提醒可突破免打扰')); row.addStretch(1); row.addWidget(self.reminder_bypass); vbox.addLayout(row)
+        vbox.addWidget(text_label('关闭时，到期提醒保留在安排页，免打扰结束后汇总通知。主动聊天始终遵守免打扰。'))
+        vbox.addStretch(); self.tabs.addTab(scroll(notification), "通知")
+        privacy = QWidget(); vbox = QVBoxLayout(privacy); vbox.setContentsMargins(24, 24, 24, 24); vbox.setSpacing(16)
+        vbox.addWidget(text_label("清空聊天与遗忘长期记忆是独立操作。清空默认聊天保留固定入口。运行中的外部效果不能撤回，旧备份与云副本需另行处理。"))
         self.profiles_button = QPushButton("管理角色档案 · 切换、备份与恢复")
         if profiles is not None: self.profiles_button.clicked.connect(profiles)
         else: self.profiles_button.setEnabled(False)
-        vbox.addWidget(self.profiles_button)
-        self.clear_target = ArrowComboBox(); vbox.addWidget(self.clear_target); clear = QPushButton("清空选定会话记录（保留入口与独立长期记忆）"); clear.clicked.connect(self._clear_conversation); vbox.addWidget(clear)
+        profile_row = QHBoxLayout(); profile_row.addWidget(text_label("角色档案")); profile_row.addStretch(1); profile_row.addWidget(self.profiles_button); vbox.addLayout(profile_row)
+        self.clear_target = ArrowComboBox(); self.clear_target.setFixedWidth(260)
+        clear = QPushButton("清空选定会话记录（保留入口与独立长期记忆）"); clear.clicked.connect(self._clear_conversation)
+        clear_row = QHBoxLayout(); clear_row.addWidget(text_label("聊天记录")); clear_row.addStretch(1); clear_row.addWidget(self.clear_target); clear_row.addWidget(clear); vbox.addLayout(clear_row)
         self.memory_info = QTreeWidget(); self.memory_info.setHeaderLabels(["记忆与隐私配置", "当前值"]); self.memory_summary = _summary(); vbox.addWidget(self.memory_summary); _details(vbox, self.memory_info, "查看 / 复制完整位置与配置")
-        configure_privacy = QPushButton("调整记忆与隐私配置"); configure_privacy.clicked.connect(maintenance); vbox.addWidget(configure_privacy); vbox.addStretch(); self.tabs.addTab(scroll(privacy), "数据与隐私")
-        model = QWidget(); vbox = QVBoxLayout(model); vbox.addWidget(text_label("修改连接前会安全关闭角色后台，再进入设置表单。密钥写入系统凭据库且不回显，重新打开后台后生效。")); self.model_info = QTreeWidget(); self.model_info.setHeaderLabels(["连接", "当前生效值"]); self.model_summary = _summary(); vbox.addWidget(self.model_summary); _details(vbox, self.model_info, "查看当前连接技术详情")
+        configure_privacy = QPushButton("调整记忆与隐私配置"); configure_privacy.clicked.connect(maintenance)
+        privacy_config_row = QHBoxLayout(); privacy_config_row.addWidget(text_label("记忆与隐私设置")); privacy_config_row.addStretch(1); privacy_config_row.addWidget(configure_privacy); vbox.addLayout(privacy_config_row)
+        vbox.addStretch(); self.tabs.addTab(scroll(privacy), "数据与隐私")
+        model = QWidget(); vbox = QVBoxLayout(model); vbox.setContentsMargins(24, 24, 24, 24); vbox.setSpacing(16)
+        vbox.addWidget(text_label("修改连接前会安全关闭角色后台，再进入设置表单。密钥写入系统凭据库且不回显，重新打开后台后生效。")); self.model_info = QTreeWidget(); self.model_info.setHeaderLabels(["连接", "当前生效值"]); self.model_summary = _summary(); vbox.addWidget(self.model_summary); _details(vbox, self.model_info, "查看当前连接技术详情")
         self.model_page = model
-        open_model = QPushButton("编辑连接与密钥"); open_model.setObjectName("primary"); open_model.clicked.connect(maintenance); vbox.addWidget(open_model); vbox.addStretch(); self.tabs.addTab(scroll(model), "模型连接")
+        open_model = QPushButton("编辑连接与密钥"); open_model.setObjectName("primary"); open_model.clicked.connect(maintenance)
+        model_row = QHBoxLayout(); model_row.addStretch(1); model_row.addWidget(open_model); vbox.addLayout(model_row); vbox.addStretch(); self.tabs.addTab(scroll(model), "模型连接")
         tools = QWidget(); vbox = QVBoxLayout(tools); vbox.addWidget(text_label("能力提供方及真实可配置操作。当前只读能力没有启用或安装开关。")); self.plugin_info = QTreeWidget(); self.plugin_info.setHeaderLabels(["提供方与配置能力", "详情"]); self.plugin_summary = _summary(); vbox.addWidget(self.plugin_summary); _details(vbox, self.plugin_info); vbox.addStretch(); self.tabs.addTab(scroll(tools), "工具与插件")
         advanced = QWidget(); vbox = QVBoxLayout(advanced); maintenance_button = QPushButton("打开配置、备份与数据维护"); maintenance_button.clicked.connect(maintenance); vbox.addWidget(maintenance_button)
         self.diagnostics = QTreeWidget(); self.diagnostics.setHeaderLabels(["诊断", "内容"]); self.diagnostic_summary = _summary("读取诊断可查看后台运行和清理状态。"); vbox.addWidget(self.diagnostic_summary); _details(vbox, self.diagnostics, "查看 / 复制完整诊断")
@@ -356,25 +406,39 @@ class SettingsPage(QWidget):
             if isinstance(area, QScrollArea):
                 content = area.widget()
                 if content is not None: content.setMaximumWidth(960)
-                area.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+                area.setAlignment(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop)
         for button in self.findChildren(QPushButton):
             button.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
+        qconfig.themeChanged.connect(self._style_numeric_fields)
+        self._style_numeric_fields()
         coordinator.conversations_changed.connect(self._directory)
         if preferences is not None and hasattr(preferences, "changed"): preferences.changed.connect(self._preference_changed)
         if hasattr(coordinator.bridge, "privacy_changed"): coordinator.bridge.privacy_changed.connect(self._privacy)
 
-    def _reload_persona(self) -> None:
-        self.interaction.dirty = False; self.interaction.refresh(); self.companion._reload_inputs()
     def _directory(self) -> None:
         selected = self.clear_target.currentData(); self.clear_target.clear()
         for identity, item in self.coordinator.conversations.items(): self.clear_target.addItem(str(item.get("title", "会话")), identity)
         index = self.clear_target.findData(selected or self.coordinator.default_id)
         if index >= 0: self.clear_target.setCurrentIndex(index)
+
+    def _style_numeric_fields(self) -> None:
+        for spin in [*self.appearance.crop, self.quiet_start, self.quiet_end]:
+            _style_numeric_field(spin)
+
     def _quiet(self, *args: Any) -> None:
-        setter = getattr(self.preferences, "set_quiet_hours", None)
-        if setter is not None: setter(self.quiet_start.value(), self.quiet_end.value())
+        if not self._notification_policy: return
+        for widget in (self.quiet_start, self.quiet_end, self.reminder_bypass): widget.setEnabled(False)
+        def done(data: dict[str, Any]) -> None:
+            if '_error' in data:
+                self.channel.send('notification_policy', {}, self._policy_loaded)
+            else:
+                self._policy_loaded(data)
+        args = dict(quiet_start=self.quiet_start.value() * 60, quiet_end=self.quiet_end.value() * 60,
+                    reminder_bypass=self.reminder_bypass.isChecked())
+        if self.channel.send('notification_quiet', args, done, mutation=True) is None:
+            self._policy_loaded(self._notification_policy)
     def _preference_changed(self, key: str, value: Any) -> None:
-        widget = self.notification_controls.get(key) or {"quiet_start": self.quiet_start, "quiet_end": self.quiet_end}.get(key)
+        widget = self.notification_controls.get(key)
         if widget:
             widget.blockSignals(True)
             if isinstance(widget, QCheckBox): widget.setChecked(bool(value))
@@ -382,7 +446,7 @@ class SettingsPage(QWidget):
             widget.blockSignals(False)
     def _clear_conversation(self) -> None:
         identity = str(self.clear_target.currentData() or "")
-        if identity and QMessageBox.question(self, "清空聊天记录", "清空这个会话及其相关任务正文？独立长期记忆保留，固定日常聊天入口保留。", QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No) == QMessageBox.StandardButton.Yes: self.coordinator.remove_conversation(identity)
+        if identity and QMessageBox.question(self, "清空聊天记录", "清空这个会话的聊天记录和工作上下文？正在处理的相关工作会停止；长期记忆、人格、执行记录和日程提醒保留。", QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No) == QMessageBox.StandardButton.Yes: self.coordinator.remove_conversation(identity)
     def refresh(self) -> None:
         self.channel.send("settings", {}, self._settings); self.interaction.refresh(); self.companion.set_available(self.coordinator.available); self.companion.poll(); self.coordinator.appearance.refresh()
         self.channel.send('notification_policy', {}, self._policy_loaded)
@@ -399,6 +463,14 @@ class SettingsPage(QWidget):
         self.chat_pause.setEnabled(valid); self.reminder_pause.setEnabled(valid)
         if '_error' in data or not valid: return
         self._notification_policy = data
+        quiet = data.get('quiet', {})
+        for key, widget in [('quiet_start', self.quiet_start), ('quiet_end', self.quiet_end), ('reminder_bypass', self.reminder_bypass)]:
+            widget.setEnabled(key in quiet)
+            widget.blockSignals(True)
+            if key in quiet:
+                if key == 'reminder_bypass': widget.setChecked(bool(quiet[key]))
+                else: widget.setValue(int(quiet[key]) // 60)
+            widget.blockSignals(False)
         self.chat_pause.setText('恢复主动聊天' if data.get('chat', {}).get('paused') else '暂停主动聊天')
         self.reminder_pause.setText('恢复约定提醒' if data.get('reminder', {}).get('paused') else '暂停约定提醒')
 
@@ -451,9 +523,10 @@ class SettingsPage(QWidget):
             fill_tree(self.diagnostics, data)
             return
         pending = data.get("status") == "Pending" or bool(data.get("blocked"))
-        self.cleanup_state.setText(("相关正文已遮蔽，仍有清理工作等待完成。" if pending else "隐私清理已完成。") + (" 正在等待运行中的工作安全结束。" if data.get("waiting_for_worker") else ""))
+        self.cleanup_state.setText(("指定记忆已停止使用，仍有清理工作等待完成。" if pending else "隐私清理已完成。") + (" 正在等待运行中的工作安全结束。" if data.get("waiting_for_worker") else ""))
         fill_tree(self.diagnostics, data)
     def _privacy(self, epoch: int = 0) -> None:
         self.notice.clear(); self._notification_policy.clear()
+        for widget in (self.quiet_start, self.quiet_end, self.reminder_bypass): widget.setEnabled(False)
         self.chat_pause.setEnabled(False); self.reminder_pause.setEnabled(False)
         self.model_summary.clear(); self.memory_summary.clear(); self.plugin_summary.clear(); self.diagnostic_summary.clear(); self.model_info.clear(); self.memory_info.clear(); self.plugin_info.clear(); self.diagnostics.clear(); self.cleanup_state.clear(); self.companion.clear_sensitive()

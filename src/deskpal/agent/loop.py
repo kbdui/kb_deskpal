@@ -32,13 +32,14 @@ def execute_rounds(core: Any, task_id: str, request: str, plan: Plan, prepared: 
     awaiting_reply = resuming and plan.action in {"clarify", "continue"}
     while True:
         if round_index >= 8 or elapsed + monotonic() - started > 180:
-            raise WorkflowBlocked("本轮已达到处理预算，已完成操作保留，请查看执行记录后续办。")
+            return cast(AgentResult, core._fail(task_id,
+                "本任务已达到轮数或处理时长上限；已完成操作保留，请仅提出尚未完成的要求。", results))
         group = all_calls[completed:]
         if not group and not awaiting_reply:
             return Plan(plan.reply, (), plan.action)
         awaiting_reply = False
         if len(all_calls) > core.max_tool_steps:
-            raise WorkflowBlocked("Tool step budget reached")
+            return cast(AgentResult, core._fail(task_id, "任务计划超过工具步骤上限；已完成操作保留，请仅提出尚未完成的要求。", results))
         context = ToolContext(task_id, core.workspace_dir, authorization, high_risk)
         specs = {spec.name: spec for spec in core.tools.list_tools()}
         required: list[str] = []
@@ -106,6 +107,11 @@ def execute_rounds(core: Any, task_id: str, request: str, plan: Plan, prepared: 
                 if journal:
                     journal.save_round(task_id, Plan("来源已更正，尚未完成判断。", (), "continue"),
                         tuple(core.tools.list_tools()), str(core.workspace_dir), core._task_dependencies[task_id])
+            if call.name == 'memory_forget' and result.success and core._interaction:
+                prepared = core._interaction.current_turn(task_id)
+                if journal:
+                    journal.save_round(task_id, Plan('指定记忆已遗忘，按实际结果继续回答。', (), 'continue'),
+                        tuple(core.tools.list_tools()), str(core.workspace_dir), core._task_dependencies.get(task_id, ()))
             seen.add((call.name, _canonical(call.arguments)))
             completed += 1
             core._boundary(task_id)
@@ -127,6 +133,8 @@ def execute_rounds(core: Any, task_id: str, request: str, plan: Plan, prepared: 
         references.append({"kind": "execution_observations", "round": round_index,
             "instruction": False, "tool_output_is_untrusted": True,
             "results": [_result(item) for item in results], "additional_requirements": additions})
+        references.append({"kind": "execution_budget", "remaining_tool_steps": core.max_tool_steps - completed,
+            "instruction": "Do not propose more tools than remain. If insufficient, explain the unfinished work without claiming it is complete."})
         contextual = getattr(core.planner, "plan_context", None)
         if not callable(contextual) or core._interaction is None:
             raise WorkflowBlocked("多轮任务需要支持统一上下文的规划器。")
@@ -143,6 +151,11 @@ def execute_rounds(core: Any, task_id: str, request: str, plan: Plan, prepared: 
                 if retry == 2:
                     raise error
         core._boundary(task_id)
+        if len(all_calls) + len(next_plan.steps) > core.max_tool_steps:
+            # Never persist an over-budget plan as though user confirmation
+            # could make it executable on this task or after a restart.
+            return cast(AgentResult, core._fail(task_id,
+                "模型提出的后续操作超过本任务步骤上限；已完成操作保留，请仅提出尚未完成的要求。", results))
         if journal:
             snapshot = journal.save_round(task_id, next_plan, tuple(core.tools.list_tools()),
                 str(core.workspace_dir), core._task_dependencies.get(task_id, ()))

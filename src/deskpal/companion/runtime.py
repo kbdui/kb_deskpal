@@ -353,18 +353,6 @@ class CompanionRuntime:
             self._receipt(command_id, fingerprint)
             return int(state['revision'])
 
-    def forget_sources(self, task_ids: Iterable[str]) -> None:
-        identities = set(task_ids)
-        with self._lock, self._repository.transaction():
-            state = self._load()
-            for key in (*LAYERS, "habits"):
-                state[key] = [row for row in state[key] if row["source"].get("task_id") not in identities]
-            if state["emotion"] and state["emotion"]["source"].get("task_id") in identities:
-                state["emotion"] = None
-            state["revision"] += 1
-            self._repository.save(state)
-
-
     def style_instruction(self, request: str, *, cloud: bool = True,
                           preferences: dict[str, Any] | None = None,
                           constraints: dict[str, Any] | None = None, mode: str | None = None,

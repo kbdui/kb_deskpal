@@ -105,7 +105,7 @@ def user_turn(app):
 def enable(app):
     app.config = replace(app.config, proactive=replace(app.config.proactive, enabled=True))
     app.rules.config = app.config.proactive
-    app.rules._quiet_start = app.rules._quiet_end = 0
+    app.notification_policy.set_quiet(0, 0, False, "test-disable-quiet")
     for method in ('event', 'opportunity', 'fallback'):
         app.proactive.method(method, False)
 
@@ -658,13 +658,26 @@ def test_attention_page_readable_and_manual_approval_retired(setup):
 
 def test_pause_clarification_preserves_question(setup):
     app, model, _, _, _=setup
+    original = model.chat
+    expressions = []
+    def chat(messages, *, tools=()):
+        if messages[0].content.startswith('[EXPRESSION]'):
+            payload = json.loads(messages[-1].content)
+            expressions.append(payload)
+            assert payload['response_intent'] == 'clarify'
+            # 提示词模式输出正文；替身也须保留原问题，不能用固定完成语替换。
+            return LLMResponse('我想先确认一下：' + payload['unverified_assistant_draft'])
+        return original(messages, tools=tools)
+    model.chat = chat
     model.fn=lambda messages, tools: LLMResponse('{"action":"clarify","reply":"要处理哪一项？"}')
     task=app.submit('处理这个')
-    assert app.wait(task.id, 10).status==TaskStatus.AWAITING_INPUT
+    first = app.wait(task.id, 10)
+    assert first.status==TaskStatus.AWAITING_INPUT
+    assert first.response == '我想先确认一下：要处理哪一项？'
     app.pause_task(task.id, 'pause-question')
     assert app.continue_task(task.id, 'continue-question').status==TaskStatus.AWAITING_INPUT
-    assert app.wait(task.id, 10).response=='要处理哪一项？'
-    assert len(model.requests)==1
+    assert app.wait(task.id, 10).response==first.response
+    assert len(model.requests)==1 and len(expressions)==1
 
 
 def test_internal_trigger_register_and_remove_only_its_pending_attention(setup):

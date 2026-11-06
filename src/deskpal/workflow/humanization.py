@@ -2,12 +2,14 @@
 
 from collections.abc import Sequence
 import json
+from datetime import datetime, timezone
 from typing import Any
 from uuid import uuid4
 
 from .models import WorkflowBlocked
 from .store import WorkflowStore, canonical
 from .tasks import dependency_ref
+from deskpal.llm.diagnostics import sanitize
 
 
 _PURPOSES = frozenset({"context_understanding", "planning", "expression", "memory_evaluation"})
@@ -191,17 +193,47 @@ class HumanizationStore:
 
     def reserve_call(self, task_id: str, purpose: str, limit: int = 1) -> str:
         if purpose not in _PURPOSES or type(limit) is not int or not 1 <= limit <= 1:
-            raise ValueError("A model purpose has one attempt per root task")
+            raise ValueError("Callers cannot override the host model-call budget")
         limit = 24 if purpose == "planning" else 3 if purpose == "memory_evaluation" else 1
         with self.store.transaction() as conn:
             self.store.check_dependencies(conn, task_id)
             self.store.check_context_dependencies(conn, task_id, purpose)
+            if purpose == "expression":
+                # 普通任务仍只有一次表达。澄清后续办时，每个已结束的澄清决定
+                # 释放下一次答复额度；同一个决定不能重试表达，重启也不重置额度。
+                decisions = conn.execute(
+                    "SELECT canonical_json AS body,0 AS round FROM immutableplan WHERE task_id=? AND scrubbed=0 "
+                    "UNION ALL SELECT body,round FROM decision_round WHERE task_id=? ORDER BY round",
+                    (task_id, task_id)).fetchall()
+                limit = min(9, 1 + sum(json.loads(row['body']).get('action') == 'clarify'
+                                      for row in decisions[:-1]))
             count = int(conn.execute("SELECT COUNT(*) FROM task_call_attempt WHERE task_id=? AND purpose=?", (task_id, purpose)).fetchone()[0])
             if count >= limit:
                 raise WorkflowBlocked("Model call budget exhausted")
             call_id = str(uuid4())
             conn.execute("INSERT INTO task_call_attempt VALUES(?,?,?,?,?)", (call_id, task_id, purpose, count + 1, "reserved"))
+            conn.execute('INSERT INTO model_call_diagnostic(call_id,started_at) VALUES(?,?)',
+                (call_id, datetime.now(timezone.utc).isoformat()))
             return call_id
+
+    def diagnose_call(self, call_id: str, values: dict[str, Any]) -> None:
+        """保留每次尝试；成功不会覆盖旧尝试的失败诊断。"""
+        with self.store.transaction() as conn:
+            row = conn.execute('SELECT metadata FROM model_call_diagnostic WHERE call_id=?', (call_id,)).fetchone()
+            if row is None:
+                return  # 清理后的晚到计量不能复活旧记录。
+            merged = {**json.loads(row[0]), **sanitize(values)}
+            conn.execute('UPDATE model_call_diagnostic SET metadata=?,finished_at=? WHERE call_id=?',
+                (canonical(merged), datetime.now(timezone.utc).isoformat(), call_id))
+
+    def call_diagnostics(self, limit: int = 20) -> list[dict[str, Any]]:
+        if type(limit) is not int or not 1 <= limit <= 100:
+            raise ValueError('Invalid diagnostics page')
+        with self.store.read_connection() as conn:
+            rows = conn.execute('SELECT a.task_id,a.purpose,a.slot,a.status,d.started_at,d.finished_at,d.metadata '
+                'FROM model_call_diagnostic d JOIN task_call_attempt a ON a.id=d.call_id '
+                'ORDER BY d.started_at DESC,d.call_id LIMIT ?', (limit,)).fetchall()
+            return [{**dict(row), 'metadata': json.loads(row['metadata'])} for row in rows]
 
     def finish_call(self, call_id: str, status: str) -> None:
         if status not in {"finished", "unknown"}:

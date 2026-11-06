@@ -6,7 +6,7 @@ from uuid import uuid4
 from deskpal.tasks.models import utc_now
 
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 7
 SCHEMA_2 = (
     "ALTER TABLE task ADD COLUMN privacy_epoch INTEGER NOT NULL DEFAULT 0",
     "CREATE TABLE privacy_control(id INTEGER PRIMARY KEY CHECK(id=1),epoch INTEGER NOT NULL,blocked INTEGER NOT NULL CHECK(blocked IN (0,1)))",

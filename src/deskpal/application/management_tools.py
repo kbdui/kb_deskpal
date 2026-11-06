@@ -14,7 +14,8 @@ class ManagementTool:
     def __init__(self, app: Any, name: str, description: str, properties: dict[str, Any], required: list[str]) -> None:
         self.app, self.name = app, name
         self.spec = ToolSpec(name, description, {"type": "object", "properties": properties,
-            "required": required, "additionalProperties": False}, PermissionLevel.AUTOMATIC)
+            "required": required, "additionalProperties": False},
+            PermissionLevel.CONFIRM if name == "memory_forget" else PermissionLevel.AUTOMATIC)
 
     def execute(self, arguments: Mapping[str, Any], context: ToolContext) -> ToolResult:
         app = self.app
@@ -59,9 +60,7 @@ class ManagementTool:
             app._conversation_repository.invalidate_memory_summaries(arguments['memory_id'])
             output = {"id": item.id, "previous_id": arguments["memory_id"], "revision": item.revision, "content": item.draft.content, "status": "saved"}
         elif self.name == "memory_forget":
-            output = app.request_forget(arguments["memory_id"], arguments["expected_revision"],
-                "tool-forget:" + context.task_id + ":" + arguments["memory_id"])
-            # 接受清理不是完成；运行来源会被撤销，清理由现有安全边界继续。
+            output = app.forget_during_task(arguments['memory_id'], arguments['expected_revision'], context.task_id)
         elif self.name == "role_read":
             turn = app._humanization.turn(context.task_id)
             output = app.core.companion_runtime.context(turn["conversation_id"], turn["epoch"], context.task_id,
@@ -114,7 +113,7 @@ def management_tools(app: Any) -> tuple[ManagementTool, ...]:
         ManagementTool(app, "memory_search", "检索当前角色记忆；更正或遗忘前读取真实id和revision", {"query": text}, ["query"]),
         ManagementTool(app, "memory_remember", "保存用户明确要求记住的内容；不要将推测直接当事实", {"content": text}, ["content"]),
         ManagementTool(app, "memory_correct", "更正一条当前记忆，必须使用实际revision", {"memory_id": identity, "expected_revision": revision, "content": text}, ["memory_id", "expected_revision", "content"]),
-        ManagementTool(app, "memory_forget", "请求遗忘及关联清理；Pending只表示已接受，不能声称清理完成", {"memory_id": identity, "expected_revision": revision}, ["memory_id", "expected_revision"]),
+        ManagementTool(app, "memory_forget", "仅用于用户明确要求彻底遗忘或删除信息：会清理相关聊天及依赖任务正文，可能中止当前任务，执行前需用户确认。事情完成、日程结束或归档应更新状态/更正记忆，不要遗忘。Pending只表示已接受，不能声称清理完成", {"memory_id": identity, "expected_revision": revision}, ["memory_id", "expected_revision"]),
         ManagementTool(app, "role_read", "读取当前角色卡及其修订", {}, []),
         ManagementTool(app, "role_update", "按用户明确意图修改角色卡；先读取当前修订", {"text": text, "expected_revision": revision}, ["text", "expected_revision"]),
         ManagementTool(app, "task_cancel", "取消指定其它任务的后续步骤，不撤销已经完成的操作", {"task_id": identity}, ["task_id"]),

@@ -35,7 +35,7 @@ READ_OPERATIONS = frozenset({"attentions", "notification_policy", "conversation_
                              "bindings", "proposals", "proposal", "settings", "notification_feed",
                              "notification_validate", "presentation", "companion",
                              "conversation_snapshot", "interaction_snapshot", "cleanup_status", "learning_records"})
-CONTROL_OPERATIONS = frozenset({"task_pause", "task_continue", "notification_control", "task_append_requirement", "task_answer", "conversation_clear", "conversation_delete", "cancel", "diagnostics", "request_forget", "attention_end"})
+CONTROL_OPERATIONS = frozenset({"task_pause", "task_continue", "notification_control", "notification_quiet", "task_append_requirement", "task_answer", "conversation_clear", "conversation_delete", "cancel", "diagnostics", "request_forget", "attention_end"})
 PRIVACY_ACTIONS = frozenset({"forget", "correct", "accept", "reject"})
 MAX_PENDING = 32
 MAX_PARAMETERS_BYTES = 131072

@@ -41,7 +41,7 @@ def show_at(shell, qtbot, monkeypatch, width, page):
 
 
 @pytest.mark.parametrize("width", [720, 1280])
-def test_memory_reading_and_explicit_draft_editor_fit_complete_window(window, qtbot, monkeypatch, width):
+def test_readonly_memory_detail_fits_complete_window(window, qtbot, monkeypatch, width):
     shell, _ = window
     show_at(shell, qtbot, monkeypatch, width, 2)
     page = shell.memory_page; item = memory()
@@ -49,26 +49,17 @@ def test_memory_reading_and_explicit_draft_editor_fit_complete_window(window, qt
     page.page._select_memory_id(item["id"])
     qtbot.waitUntil(lambda: not page.page._orientation_pending)
     assert shell.width() == width and shell.height() == 760
-    assert page.form_scroll.isHidden()
+    assert page.page.action_scroll.isHidden()
     assert visible_rect(page.page.summary_body, shell).height() >= 140
     assert page.page.summary_body.toPlainText() == item["draft"]["content"]
     assert "2026年10月27日" in page.page.summary_meta.text()
     assert "版本" not in page.page.summary_meta.text()
     assert page.notice.isHidden()
     assert page.page.toolbar_host.height() <= 60
-    page._open_editor(0)
-    qtbot.waitUntil(lambda: page.form_scroll.isVisible())
-    assert visible_rect(page.form_scroll, shell).height() >= 170
-    editor = page.correct.fields["content"]
-    editor.setPlainText("还未保存的更正草稿")
     shell.resize(1280 if width == 720 else 720, 760)
     qtbot.waitUntil(lambda: not page.page._orientation_pending)
-    assert page.form_scroll.isVisible()
-    assert editor.toPlainText() == "还未保存的更正草稿"
-    page.right_tabs.setCurrentIndex(0); page._open_editor(0)
-    assert editor.toPlainText() == "还未保存的更正草稿"
-    page.create_memory.click()
-    assert page.forms.currentWidget() is page.remember
+    assert page.page.summary_body.toPlainText() == item["draft"]["content"]
+    assert page.learning_button.isVisible()
 
 
 @pytest.mark.parametrize("width", [720, 1280])

@@ -264,7 +264,7 @@ def test_clear_chat_preserves_memory_but_redacts_original_and_cancels_old_work(a
     assert all(not item.get('body') and item.get('redacted_at') for item in app.conversation_timeline(conversation['id'])['items'])
 
 
-def test_forget_removes_derived_buffers_and_learning_copies(app_model):
+def test_forget_preserves_derived_buffer_and_its_learning_record(app_model):
     app, model = app_model
     model.fn = lambda data: dict(empty(), memories=[draft('共同准备的重要面试', '一起准备面试', destination='episode')])
     turn(app, '一起准备面试')
@@ -277,8 +277,10 @@ def test_forget_removes_derived_buffers_and_learning_copies(app_model):
     child = next(item for item in app.memory.list_items() if item.id != parent.id)
     app.memory_command('forget', memory_id=parent.id, expected_revision=parent.revision)
     assert app.memory.repository.get(parent.id).status == MemoryStatus.DELETED
-    assert app.memory.repository.get(child.id).status == MemoryStatus.DELETED
-    assert not any(row['understanding'] or row['reason'] for row in app.learning.store.records())
+    assert app.memory.repository.get(child.id).status == MemoryStatus.CANDIDATE
+    records = app.learning.store.records()
+    assert not any(row['understanding'] or row['reason'] for row in records if row['memory_id'] == parent.id)
+    assert any(row['understanding'] == child.draft.content for row in records if row['memory_id'] == child.id)
 
 
 def test_emotion_and_explicit_habit_are_applied_once_and_used_next_turn(app_model):
@@ -327,7 +329,10 @@ def test_long_conversation_summary_is_generated_with_real_published_sources(app_
     conversation = app.conversation_ensure_default()
     saved = app._conversation_repository.context_summary(conversation['id'], conversation['context_epoch'])
     assert saved['content']['open_questions'] == ['尚未决定']
-    assert saved['refs'] and all(ref['kind'] == 'dialogue_turn' for ref in saved['refs'])
+    with app.store.read_connection() as db:
+        refs = db.execute("SELECT kind,object_id FROM conversation_summary_source WHERE conversation_id=?",
+                          (conversation['id'],)).fetchall()
+    assert refs and all(row['kind'] == 'dialogue_turn' for row in refs)
     turn(app, '第二种方案呢')
     assert 'conversation_summary' in str(model.planning[-1])
 
@@ -357,7 +362,7 @@ def test_temporal_change_and_negation_do_not_drop_related_history(app_model):
         row['temporal'] = True
         return dict(empty(), reviews=[row])
     model.fn = change
-    turn(app, '现在住杭州')
+    turn(app, '我以前住北京，现在住杭州')
     old_now = app.memory.repository.get(old.id)
     assert old_now.draft.valid_to is not None
     records = app.memory.retrieve('不是北京而是杭州了吗，2026年搬家').records
@@ -378,7 +383,7 @@ def test_schema_two_candidate_ttl_and_tool_metadata_migration(tmp_path):
         for key in ('destination', 'reason', 'uncertainty', 'review_after'):
             raw.pop(key)
         db.execute('UPDATE memory_revisions SET draft=?,default_expiry=1 WHERE id=?', (json.dumps(raw), candidate.id))
-        for table in ('learning_role_outbox', 'learning_record', 'learning_link', 'learning_job'):
+        for table in ('learning_summary_outbox', 'learning_role_outbox', 'learning_record', 'learning_link', 'learning_job'):
             db.execute(f'DROP TABLE {table}')
         db.execute('PRAGMA user_version=2')
     repo = SQLiteMemoryRepository(path)
@@ -386,7 +391,7 @@ def test_schema_two_candidate_ttl_and_tool_metadata_migration(tmp_path):
         assert repo.get(candidate.id).status == MemoryStatus.CANDIDATE
         assert repo.get(candidate.id).draft.expires_at is None
         assert repo.get(episode.id).status == MemoryStatus.ARCHIVED
-        assert repo._db.execute('PRAGMA user_version').fetchone()[0] == 3
+        assert repo._db.execute('PRAGMA user_version').fetchone()[0] == 4
     finally:
         repo.close()
 
@@ -419,6 +424,8 @@ def test_restart_resumes_claimed_learning_without_replanning_or_tools(app_model)
     app, model = app_model
     result = turn(app, '一段有意义的真实交流')
     with app.learning.repository.batch():
+        app.learning.repository._db.execute("DELETE FROM memory_learning_receipts WHERE token=?",
+            (app.learning.store._organized_token(result.task_id),))
         app.learning.repository._db.execute("UPDATE learning_job SET status='running',attempts=1 WHERE id=?", ('turn:' + result.task_id,))
     planning_calls = len(model.planning)
     assert app.close(timeout=10)
@@ -436,15 +443,20 @@ def test_restart_resumes_claimed_learning_without_replanning_or_tools(app_model)
 
 def test_summary_survives_more_than_recent_history_window(app_model):
     app, model = app_model
-    turn(app, '我们正在比较两个研究方案，暂未决定')
     model.fn = lambda data: dict(empty(), summary=dict(progress=['比较两个研究方案'], decisions=[], open_questions=['仍未决定']))
+    first = turn(app, '我们正在比较两个研究方案，暂未决定')
     for index in range(20):
         result = turn(app, f'继续第{index}次讨论')
         assert not any('记忆已保存' in warning for warning in result.warnings)
     conversation = app.conversation_ensure_default()
     saved = app._conversation_repository.context_summary(conversation['id'], conversation['context_epoch'])
     assert saved['revision'] >= 20
-    assert len(saved['refs']) >= 30
+    assert 0 < len(saved['refs']) <= 8
+    with app.store.read_connection() as db:
+        stored = {row[0] for row in db.execute(
+            'SELECT object_id FROM conversation_summary_source WHERE conversation_id=?', (conversation['id'],))}
+    assert first.task_id + ':user' in stored
+    assert len(stored) >= 21
     assert '比较两个研究方案' in str(model.planning[-1])
 
 
@@ -488,7 +500,7 @@ def test_local_review_of_legacy_restricted_source_keeps_derivation_restricted(ap
         item = next(row for row in data['understandings'] if row['id'] == original.id)
         return dict(empty(), memories=[draft('从受限资料得到的推测', '旧的受限记忆', sources=[item['original_source_key']])])
     model.fn = derive
-    turn(app, '聊别的话题')
+    turn(app, '聊旧的受限记忆')
     current = next(item for item in app.memory.list_items() if item.id != original.id)
     assert current.source.use_policy == UsePolicy.LOCAL_ONLY
 
@@ -544,7 +556,7 @@ def test_semantic_synonym_recall_is_used_across_conversations(app_model):
     other = app.conversation_create('另一段专项聊天', 'semantic-other')
     turn(app, '晨间饮品的习惯是什么', other)
     actual = '\n'.join(message.content for message in model.planning[-1])
-    assert '早餐喜欢拿铁' in actual and 'semantic' in actual
+    assert '早餐喜欢拿铁' in actual and item.id in actual
     assert app.memory.valid(((item.id, item.revision),))
 
 
@@ -621,3 +633,42 @@ def test_role_growth_cannot_commit_an_unreadable_required_context(tmp_path):
         assert runtime._repository.connection.execute("SELECT 1 FROM role_receipt WHERE id='overflow'").fetchone() is None
     finally:
         runtime.close()
+
+def test_summary_delivery_recovers_after_restart_without_relearning(app_model, monkeypatch):
+    app, model = app_model
+    conversation = app.conversation_ensure_default()
+    model.fn = lambda data: dict(empty(), summary=dict(progress=['已收到更新'], decisions=[], open_questions=[]))
+    def fail_delivery(*args, **kwargs):
+        raise OSError('synthetic summary write failure')
+    monkeypatch.setattr(app._conversation_repository, 'save_context_summary', fail_delivery)
+    result = turn(app, '应在重启后保存的摘要', conversation)
+    identity = 'turn:' + result.task_id
+    assert app.learning.store.job(identity)['status'] == 'completed'
+    assert any(row['job_id'] == identity for row in app.learning.store.pending_summaries())
+    learned = len(model.inputs)
+    assert app.close(timeout=10)
+    reopened = create_application(model.settings)
+    try:
+        wait_until(lambda: reopened._conversation_repository.context_summary(
+            conversation['id'], conversation['context_epoch']) is not None)
+        saved = reopened._conversation_repository.context_summary(conversation['id'], conversation['context_epoch'])
+        assert saved['content']['progress'] == ['已收到更新']
+        assert saved['revision'] == 1
+        assert len(model.inputs) == learned
+    finally:
+        assert reopened.close(timeout=10)
+
+
+def test_rolling_summary_crosses_old_provenance_limit(app_model):
+    app, model = app_model
+    conversation = app.conversation_ensure_default()
+    for index in range(386):
+        model.fn = lambda data: dict(empty(), summary=dict(progress=[str(index)], decisions=[], open_questions=[]))
+        turn(app, f'持续聊天第 {index} 轮', conversation)
+    saved = app._conversation_repository.context_summary(conversation['id'], conversation['context_epoch'])
+    assert saved['content']['progress'] == ['385']
+    assert saved['revision'] == 386
+    with app.store.read_connection() as db:
+        count = db.execute('SELECT COUNT(*) FROM conversation_summary_source WHERE conversation_id=?',
+                           (conversation['id'],)).fetchone()[0]
+    assert count > 384

@@ -15,7 +15,7 @@ class ArrowComboBox(ChoiceBox):
     """Fluent 下拉菜单，沿用已有选择值及调用方名称。"""
 
 
-LABELS = {"automatic": "自动学习与模型复核", "explicit_only": "自动学习与模型复核", "candidate_review": "自动学习与模型复核", "paused": "暂停记忆写入", "pending": "等待到期", "fired": "已到期", "cancelled": "已取消", "scheduled": "已安排", "reminded": "已提醒", "openai": "OpenAI 兼容服务", "offline": "离线演示", "responses": "Responses 协议", "prompt": "自然语言正文", "json_object": "原生 JSON 对象", "disabled": "关闭", "fastembed": "本地语义检索", "session": "仅选定会话", "today": "今天", "persistent": "持续保存", "brief": "简短", "normal": "适中", "detailed": "详细", "true": "允许", "false": "关闭", "Removed": "已移除", "unknown": "尚无法判断", "occurred": "已发生", "not_occurred": "未发生", "due": "已到期", "missed": "错过提醒", "suppressed": "已抑制", "redacted": "已清理", "execution_location": "执行位置", "provider": "服务提供方", "model": "模型名称", "protocol": "协议", "llm_ready": "连接配置就绪", "credential_mode": "凭据模式", "credential_source": "凭据来源", "active_revision": "当前生效版本", "request_use_default": "默认允许本次请求云处理", "memory_mode": "记忆模式", "embedding_provider": "检索模型", "data_dir": "数据目录", "cloud": "云模型", "local": "本地模型", "system_vault": "系统凭据库", "environment": "环境变量", "none": "无需凭据", "calendar": "日程", "timer": "计时器", "task": "任务", "Ignored": "已忽略", "Accepted": "已接受", "Expired": "已过期", "Invalidated": "已失效", "Planning": "正在理解", "Created": "已创建", "title": "名称", "status": "状态", "content": "内容", "request": "请求", "response": "回复",
+LABELS = {"automatic": "自动学习与模型复核", "explicit_only": "自动学习与模型复核", "candidate_review": "自动学习与模型复核", "paused": "暂停记忆写入", "pending": "等待到期", "fired": "已到期", "cancelled": "已取消", "scheduled": "已安排", "reminded": "已提醒", "openai": "OpenAI 兼容服务", "offline": "离线演示", "responses": "Responses 协议", "prompt": "自然语言正文", "json_object": "原生 JSON 对象", "disabled": "关闭", "fastembed": "本地语义检索", "session": "仅选定会话", "today": "今天", "persistent": "持续保存", "brief": "简短", "normal": "适中", "detailed": "详细", "true": "允许", "false": "关闭", "Removed": "已移除", "unknown": "尚无法判断", "occurred": "已发生", "not_occurred": "未发生", "due": "已到期", "missed": "错过提醒", "quiet": "免打扰结束后通知", "suppressed": "已抑制", "redacted": "已清理", "execution_location": "执行位置", "provider": "服务提供方", "model": "模型名称", "protocol": "协议", "llm_ready": "连接配置就绪", "credential_mode": "凭据模式", "credential_source": "凭据来源", "active_revision": "当前生效版本", "request_use_default": "默认允许本次请求云处理", "memory_mode": "记忆模式", "embedding_provider": "检索模型", "data_dir": "数据目录", "cloud": "云模型", "local": "本地模型", "system_vault": "系统凭据库", "environment": "环境变量", "none": "无需凭据", "calendar": "日程", "timer": "计时器", "task": "任务", "Ignored": "已忽略", "Accepted": "已接受", "Expired": "已过期", "Invalidated": "已失效", "Planning": "正在理解", "Created": "已创建", "title": "名称", "status": "状态", "content": "内容", "request": "请求", "response": "回复",
           "description": "说明", "path": "路径", "destination": "目标路径", "source": "来源", "source_id": "来源记录",
           "deadline": "截止时间", "success_criteria": "成功标准", "progress_note": "进度备注", "evidence": "人工证据",
           "use_policy": "可用范围", "revision": "版本", "created_at": "创建时间", "updated_at": "更新时间",
@@ -162,9 +162,23 @@ class MessageInput(QPlainTextEdit):
         super().__init__(parent)
         self._composing = False
         self._ime_commit_guard = False
-        self.setPlaceholderText("写点什么…  Enter 发送，Shift + Enter 换行")
+        self._context_placeholder = "写点什么…  Enter 发送，Shift + Enter 换行"
+        self.setPlaceholderText(self._context_placeholder)
         self.setMaximumHeight(132)
         self.setMinimumHeight(82)
+
+    def set_context_placeholder(self, text: str) -> None:
+        self._context_placeholder = text
+        if not self.hasFocus():
+            self.setPlaceholderText(text)
+
+    def focusInEvent(self, event: Any) -> None:
+        super().focusInEvent(event)
+        self.setPlaceholderText("")
+
+    def focusOutEvent(self, event: Any) -> None:
+        super().focusOutEvent(event)
+        self.setPlaceholderText(self._context_placeholder)
 
     def inputMethodEvent(self, event: QInputMethodEvent) -> None:
         self._composing = bool(event.preeditString())

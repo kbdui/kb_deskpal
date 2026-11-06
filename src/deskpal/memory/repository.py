@@ -22,7 +22,7 @@ from .contracts import (
 from .models import MemoryKind
 
 
-_VERSION = 3
+_VERSION = 4
 _ORIGINS = frozenset(("user_message", "user_confirmation", "tool_result", "imported_document",
                       "assistant_output", "legacy"))
 
@@ -233,7 +233,7 @@ class SQLiteMemoryRepository:
         self._db.execute("PRAGMA foreign_keys = ON")
         try:
             version = int(self._db.execute("PRAGMA user_version").fetchone()[0])
-            if version not in (0, 1, 2, _VERSION):
+            if version not in (0, 1, 2, 3, _VERSION):
                 raise MemoryError("Unsupported memory database schema version")
             tables = {str(row[0]) for row in self._db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
             if version == 0 and "memories" in tables:
@@ -242,12 +242,16 @@ class SQLiteMemoryRepository:
                 self._backup_v1(Path(path))
             with self._transaction():
                 from .schema_v3 import migrate, validate
-                if version != _VERSION:
+                if version < 3:
                     self._schema()
                     if version == 1:
                         self._migrate_v1()
                     migrate(self._db)
                 validate(self._db)
+                from .schema_v4 import migrate as migrate_v4, validate as validate_v4
+                if version < 4:
+                    migrate_v4(self._db)
+                validate_v4(self._db)
                 self._db.execute(f"PRAGMA user_version = {_VERSION}")
         except BaseException:
             self._db.close()
@@ -435,6 +439,22 @@ class SQLiteMemoryRepository:
                 _revision(revision)
             self._expire_candidates(self._now())
             return self._get(memory_id, revision)
+
+    def follow_replacement(self, memory_id: str) -> MemoryItem | None:
+        """Resolve explicit revisions that created a new memory identity."""
+        with self._lock:
+            self._open()
+            self._expire_candidates(self._now())
+            item = self._get(memory_id)
+            while item is not None and item.status == MemoryStatus.SUPERSEDED:
+                replacement = self._db.execute(
+                    """SELECT r.id FROM memory_revisions r
+                       JOIN memory_heads h ON h.id=r.id AND h.revision=r.revision
+                       WHERE r.supersedes=? LIMIT 2""", (item.id,)).fetchall()
+                if len(replacement) != 1:
+                    return None
+                item = self._get(replacement[0][0])
+            return item
 
     def list_items(self, *, status: MemoryStatus | None = None,
                    include_history: bool = False) -> tuple[MemoryItem, ...]:
@@ -686,26 +706,16 @@ class SQLiteMemoryRepository:
                 self._bump()
                 return updated
 
-    def _delete_ids(self, ids: set[str], now: datetime, *, shared_closure: bool = False) -> tuple[int, tuple[str, ...]]:
+    def _delete_ids(self, ids: set[str], now: datetime) -> tuple[int, tuple[str, ...]]:
         source_ids: set[str] = set()
-        tasks: set[str] = set()
-        item_tasks: dict[str, set[str]] = {}
         epoch = self._bump()
         for memory_id in sorted(ids):
             item = self._get(memory_id)
             if item is None or item.status == MemoryStatus.DELETED:
                 continue
-            affected: set[str] = set()
-            item_tasks[memory_id] = affected
             rows = self._db.execute("SELECT DISTINCT source_id FROM memory_revisions WHERE id=?", (memory_id,)).fetchall()
             for row in rows:
                 source_ids.add(str(row[0]))
-                source_row = self._db.execute("SELECT payload FROM memory_sources WHERE id=?", (row[0],)).fetchone()
-                if source_row is not None:
-                    source = _source_from(_object(str(source_row[0])))
-                    if source.task_id is not None:
-                        tasks.add(source.task_id)
-                        affected.add(source.task_id)
             self._db.execute("DELETE FROM memory_heads WHERE id=?", (memory_id,))
             self._db.execute("DELETE FROM memory_revisions WHERE id=?", (memory_id,))
             self._db.execute("DELETE FROM memory_embeddings WHERE memory_id=?", (memory_id,))
@@ -716,20 +726,14 @@ class SQLiteMemoryRepository:
                              (memory_id, item.revision + 1, _stamp(now), epoch))
             if self._db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='memories'").fetchone():
                 self._db.execute("DELETE FROM memories WHERE id=?", (memory_id,))
-        # Preserve only opaque task identifiers, never source text or content
-        # fingerprints. Every member of an explicit shared-source deletion
-        # retains the full closure's task scope for later idempotent receipts.
-        # Unrelated candidates expiring in one sweep retain their own scopes.
+        # 来源任务不属于删除范围；真正需要停止的运行工作由工作流层判断。
         from .learning_store import LearningStore
-        LearningStore(self).erase_copies(ids, tasks)
-        for memory_id, affected in item_tasks.items():
-            self._db.executemany("INSERT OR IGNORE INTO memory_deletion_tasks VALUES (?, ?)",
-                                 ((memory_id, task_id) for task_id in sorted(tasks if shared_closure else affected)))
+        LearningStore(self).erase_copies(ids)
         for source_id in sorted(source_ids):
             if not self._db.execute("SELECT 1 FROM memory_revisions WHERE source_id=?", (source_id,)).fetchone():
                 self._db.execute("DELETE FROM memory_sources WHERE id=?", (source_id,))
                 self._db.execute("INSERT OR IGNORE INTO memory_source_tombstones VALUES (?)", (source_id,))
-        return epoch, tuple(sorted(tasks))
+        return epoch, ()
 
     def _expire_candidates(self, now: datetime) -> None:
         # Stored timestamps are normalized to UTC by ingestion. Filter expiry
@@ -760,22 +764,8 @@ class SQLiteMemoryRepository:
                         "SELECT task_id FROM memory_deletion_tasks WHERE memory_id=? ORDER BY task_id", (memory_id,)))
                     return DeletionReceipt(memory_id, int(tombstone["revision"]), int(tombstone["epoch"]), tasks)
                 self._current(memory_id, expected_revision)
-                ids, sources = {memory_id}, set[str]()
-                # A shared source cannot be cropped safely without a span model.
-                while True:
-                    before = len(ids), len(sources)
-                    for item_id in tuple(ids):
-                        sources.update(str(row[0]) for row in self._db.execute(
-                            "SELECT source_id FROM memory_revisions WHERE id=?", (item_id,)))
-                    for source_id in tuple(sources):
-                        ids.update(str(row[0]) for row in self._db.execute(
-                            "SELECT id FROM memory_revisions WHERE source_id=?", (source_id,)))
-                    for item_id in tuple(ids):
-                        ids.update(str(row[0]) for row in self._db.execute(
-                            "SELECT memory_id FROM learning_link WHERE kind='memory' AND object_id=?", (item_id,)))
-                    if before == (len(ids), len(sources)):
-                        break
-                epoch, tasks = self._delete_ids(ids, now, shared_closure=True)
+                # 遗忘仅作用于指定记忆；来源共享不是级联删除的理由。
+                epoch, tasks = self._delete_ids({memory_id}, now)
                 deleted = self._get(memory_id)
                 if deleted is None:
                     raise MemoryError("Deletion result is inconsistent")

@@ -168,6 +168,9 @@ class DesktopFacade:
         if operation == "notification_policy":
             if args: raise ValueError("Notification policy takes no parameters")
             return app.notification_policy.snapshot()
+        if operation == "notification_quiet":
+            self._command(args)
+            return app.notification_policy.set_quiet(**args)
         if operation == "notification_control":
             self._command(args)
             return app.notification_control(**args)
@@ -272,6 +275,7 @@ class DesktopFacade:
             return app.diagnostics()
         if operation == "settings":
             config = app.config
+            quiet = app.notification_policy.snapshot()["quiet"]
             return {"provider": config.llm.provider, "model": config.llm.model,
                 "revision": config.configuration_revision, "active_revision": config.configuration_revision,
                 "llm_ready": config.llm.ready, "configured": config.llm.ready,
@@ -281,7 +285,9 @@ class DesktopFacade:
                 "memory_mode": config.memory.mode, "embedding_provider": config.memory.embedding_provider,
                 "workspace_dir": str(config.sandbox.workspace_dir), "data_dir": str(config.storage.data_dir),
                 "queue_capacity": config.workflow.queue_capacity, "timezone": config.proactive.timezone,
-                "quiet_start": config.proactive.quiet_start, "quiet_end": config.proactive.quiet_end,
+                "quiet_start": f"{quiet['quiet_start'] // 60:02d}:{quiet['quiet_start'] % 60:02d}",
+                "quiet_end": f"{quiet['quiet_end'] // 60:02d}:{quiet['quiet_end'] % 60:02d}",
+                "reminder_bypass": bool(quiet["reminder_bypass"]),
                 "proactive_enabled": config.proactive.enabled, "restart_required": True,
                 "configuration_source": "effective startup configuration; environment > .env > TOML > defaults"}
         if operation == "retry_cleanup":
@@ -316,7 +322,7 @@ class DesktopFacade:
                 current = self._notification_item(item["kind"], item["entity_id"])
                 if current is not None:
                     items.append(current)
-            return {"items": items}
+            return {"items": items, "notification_policy": app.notification_policy.snapshot()}
         writes: dict[str, Callable[..., Any]] = {
             "create_goal": app.goals.create, "update_goal": app.goals.revise,
             "goal_status": app.goals.set_status, "create_milestone": app.goals.add_milestone,
@@ -356,6 +362,7 @@ class DesktopFacade:
             return value
 
     def _notification_feed(self, args: dict[str, Any]) -> dict[str, Any]:
+        notification_policy = self.app.notification_policy.snapshot()
         after = args.pop("after_sequence", None)
         until = args.pop("until_sequence", None)
         limit = args.pop("limit", 100)
@@ -371,7 +378,7 @@ class DesktopFacade:
             maximum = int(db.execute("SELECT COALESCE(MAX(sequence),0) FROM audit_outbox").fetchone()[0])
             if after is None:
                 return {"items": [], "next_sequence": maximum, "until_sequence": maximum,
-                    "has_more": False, "baseline": True}
+                    "has_more": False, "baseline": True, "notification_policy": notification_policy}
             upper = maximum if until is None else min(until, maximum)
             if after > upper:
                 raise ValueError("Notification cursor exceeds its upper bound")
@@ -399,7 +406,7 @@ class DesktopFacade:
                 if current is not None:
                     items.append(current)
         return {"items": items, "next_sequence": next_sequence, "until_sequence": upper,
-            "has_more": more, "baseline": False}
+            "has_more": more, "baseline": False, "notification_policy": notification_policy}
 
     def _notification_item(self, kind: str, entity_id: str) -> dict[str, Any] | None:
         if not isinstance(entity_id, str) or not entity_id:

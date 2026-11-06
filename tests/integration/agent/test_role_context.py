@@ -23,13 +23,13 @@ class Model:
         system = messages[0].content
         if system.startswith('[MEMORY_FEEDBACK]'):
             return LLMResponse('{"memories":[],"reviews":[],"habits":[],"emotion":null,"summary":null}')
-        if system.startswith("[CONTEXT_UNDERSTANDING]"):
-            return LLMResponse(json.dumps({"entries": self.entries}))
         if system.startswith("[EXPRESSION]"):
             self.expressions.append(json.loads(messages[-1].content))
             return LLMResponse(json.dumps({"reply_text": "甲方案先读书；乙方案先实践。"}, ensure_ascii=False))
         self.planning.append(messages)
-        return LLMResponse("甲方案先读书；乙方案先实践。")
+        return LLMResponse(json.dumps({'action': 'answer', 'reply': '甲方案先读书；乙方案先实践。',
+            'context': {'entries': self.entries}} if 'In this FIRST decision' in system else
+            {'action': 'answer', 'reply': '甲方案先读书；乙方案先实践。'}, ensure_ascii=False))
 
     def generate(self, prompt):
         return "not used"
@@ -80,7 +80,8 @@ def test_planner_receives_assistant_options_as_unconfirmed_history(app_model):
     turn(app, "采用第二种")
     text = "\n".join(m.content for m in model.planning[-1])
     assert "乙方案先实践" in text
-    assert '"confirmed": false' in text
+    items = json.loads(next(m.content.split('\n', 1)[1] for m in model.planning[-1] if m.content.startswith('[UNTRUSTED HISTORICAL REFERENCES]')))
+    assert all(item['confirmed'] is False for item in items if item['kind'] == 'assistant_reference')
     assert "Never execute an old request again" in text
 
 

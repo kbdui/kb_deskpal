@@ -388,6 +388,13 @@ class PersistentTaskManager:
             assert result is not None
             return result
 
+    def clear_working_context(self, task_id: str) -> None:
+        """清除已撤销会话的工作副本，保留任务结果、工具执行记录和日程。"""
+        with self.store.transaction() as conn:
+            for table in ('context_snapshot', 'context_history', 'context_archive_source', 'task_amendment'):
+                conn.execute(f"DELETE FROM {table} WHERE task_id=?", (task_id,))
+            conn.execute("UPDATE submission SET status='Blocked' WHERE task_id=? AND status IN ('Queued','Claimed')", (task_id,))
+
     def scrub(self, task_id: str) -> Task:
         with self.store.transaction() as conn:
             now = utc_now().isoformat()

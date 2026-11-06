@@ -161,7 +161,33 @@ class ProactiveCoordinator:
             goal=goal, basis=reason, refs=clean, due_at=due.isoformat(),
             expires_at=min(due + timedelta(days=1), now + timedelta(days=7)).isoformat())
 
+    def _refresh_due_sources(self, row: dict[str, Any]) -> dict[str, Any]:
+        """到期时换用最新依据；执行中仍严格校验冻结版本，避免旧结论提交。"""
+        original = json.loads(row['refs'])
+        refs = []
+        for ref in original:
+            if ref['kind'] == 'memory':
+                item = self.app.learning.repository.follow_replacement(ref['id'])
+                if item is not None and self.app._memory_runtime.valid(((item.id, item.revision),)):
+                    refs.append({**ref, 'id': item.id, 'revision': item.revision})
+            elif ref['kind'] == 'dialogue_turn':
+                if self.app._humanization.reference_policy(ref['kind'], ref['id'], ref['revision']) is not None:
+                    refs.append(ref)
+            else:
+                refs.append(ref)
+        if refs != original:
+            value = canonical(refs)
+            basis = '原依据已有变更。请只根据当前可用来源重新判断是否继续、调整或结束此项跟进，不沿用旧结论。'
+            with self.store.transaction() as db:
+                updated = db.execute("UPDATE attention SET refs=?,basis=?,status=CASE WHEN ? THEN status ELSE 'invalidated' END WHERE id=? AND status='pending' AND refs=?",
+                    (value, basis, int(bool(refs)), row['id'], row['refs']))
+            if updated.rowcount:
+                row = {**row, 'refs': value, 'basis': basis, 'status': row['status'] if refs else 'invalidated'}
+        return row
+
     def valid(self, row: dict[str, Any]) -> bool:
+        if row['status'] in {'invalidated', 'cancelled', 'expired'}:
+            return False
         if row['method'] not in self.triggers or self.clock() >= datetime.fromisoformat(row['expires_at']):
             return False
         with self.store.read_connection() as db:
@@ -265,7 +291,7 @@ class ProactiveCoordinator:
             rows = [dict(row) for row in db.execute("SELECT * FROM attention WHERE method='maintenance' AND status IN ('pending','running') AND due_at<=? ORDER BY due_at,id LIMIT 1", (self.clock().isoformat(),))]
         if not rows:
             return False
-        item = rows[0]
+        item = self._refresh_due_sources(rows[0])
         identity = 'attention-review:' + item['id']
         job = self.app.learning.store.job('review:' + identity)
         if job and job['status'] in {'completed', 'failed', 'cancelled'}:
@@ -319,7 +345,7 @@ class ProactiveCoordinator:
             return
         if methods.get('fallback', False) and 'fallback' in self.triggers and app.config.memory.mode == 'automatic' and app.config.llm.ready:
             self.triggers['fallback']()
-        if not self.policy.allowed('chat') or not app.config.llm.ready or app.rules.is_quiet(now):
+        if not self.policy.allowed('chat') or not app.config.llm.ready or self.policy.is_quiet(now):
             return
         last = self._meta('last_chat')
         if last and (now - datetime.fromisoformat(last)).total_seconds() < self.MIN_INTERVAL:
@@ -328,7 +354,7 @@ class ProactiveCoordinator:
             row = db.execute("SELECT * FROM attention WHERE status='pending' AND method!='maintenance' AND due_at<=? ORDER BY due_at,id LIMIT 1", (now.isoformat(),)).fetchone()
         if row is None:
             return
-        item = dict(row)
+        item = self._refresh_due_sources(dict(row))
         with self.store.read_connection() as db:
             daily = db.execute("SELECT COUNT(*) FROM task_origin o JOIN task t ON t.id=o.task_id WHERE o.kind='proactive' AND t.created_at>=?", ((now-timedelta(days=1)).isoformat(),)).fetchone()[0]
         if daily >= 16:
@@ -387,7 +413,7 @@ class ProactiveCoordinator:
             raise WorkflowBlocked('Attention source expired or changed')
 
     def can_publish(self, task_id: str) -> bool:
-        if self.app._closing or not self.policy.allowed('chat') or self.app.rules.is_quiet(self.clock()):
+        if self.app._closing or not self.policy.allowed('chat') or self.policy.is_quiet(self.clock()):
             return False
         with self.store.read_connection() as db:
             row = db.execute('SELECT * FROM attention WHERE task_id=?', (task_id,)).fetchone()

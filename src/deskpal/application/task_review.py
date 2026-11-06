@@ -48,11 +48,6 @@ class TaskReviewService:
             snapshot = self._app.scheduling.source_snapshot(source, identity)
             if snapshot is None:
                 return unavailable
-            with self._app.store.read_connection() as connection:
-                scrubbed = connection.execute("SELECT t.scrubbed FROM desktop_resource_link r JOIN task t ON t.id=r.task_id WHERE r.source=? AND r.source_id=? AND r.store_id=? AND r.generation=?",
-                    (source, identity, snapshot.store_id, snapshot.generation)).fetchone()
-                if scrubbed is not None and scrubbed[0]:
-                    return unavailable
             payload = json.loads(snapshot.payload_json)
             return {**unavailable, "unavailable": False, "name": payload.get("label" if source == "timer" else "title", ""),
                 "due_at": payload.get("due_at" if source == "timer" else "reminder_at"),
@@ -109,6 +104,9 @@ class TaskReviewService:
                     blocked = "任务来源、工作区或工具契约已变化，请重新提出意图。"
         else:
             blocked = "没有完整的持久计划。" if execution_candidate else None
+        if snapshot is not None and len(snapshot.plan.steps) > app.core.max_tool_steps and execution_candidate:
+            blocked = (f"本计划共有 {len(snapshot.plan.steps)} 步，超过本任务 {app.core.max_tool_steps} 步上限。"
+                       f"已完成 {len(attempts)} 步且不会重做；请取消此请求，并仅提出尚未完成的要求。")
         if source is not None and source["scrubbed"]:
             blocked = "任务内容已清理。"
             steps = []

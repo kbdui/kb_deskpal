@@ -19,7 +19,7 @@ from deskpal.config import LLMConfig
 from deskpal.tools.models import ToolCall, ToolSpec
 
 from .errors import LLMError, RetryableLLMError
-from .models import ChatMessage, LLMResponse
+from .models import ChatMessage, LLMResponse, LLMUsage
 from .url_policy import validate_base_url, validate_connection_url
 
 
@@ -42,7 +42,7 @@ def _json_value(value: Any) -> None:
 def _json_dump(value: Any) -> str:
     try:
         _json_value(value)
-        return json.dumps(value, ensure_ascii=False, allow_nan=False)
+        return json.dumps(value, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
     except (TypeError, ValueError, RecursionError):
         raise LLMError("LLM data is not valid JSON") from None
 
@@ -139,9 +139,6 @@ class OfflineLLMProvider:
         _validate_inputs(messages, tools)
         if any(message.role == 'system' and message.content.startswith('[MEMORY_FEEDBACK]') for message in messages):
             return self._response(_json_dump(dict(memories=[], reviews=[], habits=[], emotion=None, summary=None)))
-        if any(message.role == "system" and message.content.startswith("[CONTEXT_UNDERSTANDING]") for message in messages):
-            # 显式离线演示不伪装理解或自动保存用户的交流要求。
-            return self._response(_json_dump({"entries": []}))
         # ResponseComposer sends an internal data envelope as the user message.
         # Only its host-owned system marker selects this path; ordinary user JSON
         # continues through the command demo unchanged.
@@ -156,7 +153,8 @@ class OfflineLLMProvider:
             try:
                 data = _json_load(prompt_data)
                 expected = {"request", "unverified_assistant_draft", "history", "memory_claims", "tool_results",
-                            "role_context", "context_warnings", "reply_role", "learning_receipt"}
+                            "role_context", "context_warnings", "reply_role", "learning_receipt",
+                            "conversation_summary", "response_intent"}
                 valid = isinstance(data, dict) and set(data) == expected and isinstance(data["request"], str)
                 role = data.get("reply_role") if isinstance(data, dict) else None
                 if not valid or role not in {"direct_answer", "tool_answer"}:
@@ -385,23 +383,33 @@ class OpenAILLMProvider:
                 status = getattr(stream, "status", None)
                 if status is None and hasattr(stream, "getcode"):
                     status = stream.getcode()
-                if status is not None and (not isinstance(status, int) or not 200 <= status < 300):
-                    raise LLMError("LLM HTTP request failed")
+                if status is not None and (type(status) is not int or not 200 <= status < 300):
+                    if type(status) is int and (status in {408, 429} or 500 <= status < 600):
+                        raise RetryableLLMError('LLM temporary HTTP failure',
+                            code='rate_limit' if status == 429 else 'http_transient', http_status=status)
+                    raise LLMError('LLM HTTP request failed', code='http_error',
+                        http_status=status if type(status) is int else None)
                 body = stream.read(4 * 1024 * 1024 + 1)
                 if not isinstance(body, (bytes, str)) or len(body) > 4 * 1024 * 1024:
                     raise LLMError("LLM response is invalid or exceeds the size limit")
             return _json_load(body)
-        except LLMError:
+        except LLMError as error:
             # Even an injected transport's LLMError message is untrusted.
-            raise LLMError("LLM response processing failed") from None
-        except urllib.error.HTTPError:
-            raise LLMError("LLM HTTP request failed") from None
+            from .diagnostics import failure
+            detail = failure(error)
+            kind = RetryableLLMError if isinstance(error, RetryableLLMError) else LLMError
+            raise kind('LLM response processing failed', code=str(detail.get('error_code', 'provider_error')),
+                http_status=error.http_status if type(error.http_status) is int else None) from None
+        except urllib.error.HTTPError as exc:
+            if exc.code in {408, 429} or 500 <= exc.code < 600:
+                raise RetryableLLMError("LLM temporary HTTP failure", code='rate_limit' if exc.code == 429 else 'http_transient', http_status=exc.code) from None
+            raise LLMError("LLM HTTP request failed", code='http_error', http_status=exc.code) from None
         except (TimeoutError, socket.timeout):
-            raise RetryableLLMError("LLM request timed out") from None
+            raise RetryableLLMError("LLM request timed out", code='timeout') from None
         except urllib.error.URLError as exc:
             if isinstance(exc.reason, TimeoutError):
-                raise RetryableLLMError("LLM request timed out") from None
-            raise RetryableLLMError("LLM network request failed") from None
+                raise RetryableLLMError("LLM request timed out", code='timeout') from None
+            raise RetryableLLMError("LLM network request failed", code='network') from None
         except Exception:
             # A trusted injected transport may use its own exception types.
             raise LLMError("LLM request failed") from None
@@ -411,7 +419,8 @@ class OpenAILLMProvider:
             raise LLMError("Malformed LLM response")
         if (raw.get("error") is not None or raw.get("incomplete_details") is not None
                 or raw.get("status", "completed") != "completed"):
-            raise LLMError("LLM response failed or is incomplete")
+            limit = isinstance(raw.get('incomplete_details'), dict) and raw['incomplete_details'].get('reason') == 'max_output_tokens'
+            raise LLMError("LLM response failed or is incomplete", code='output_limit' if limit else 'invalid_response')
         texts: list[str] = []
         calls: list[ToolCall] = []
         ids: set[str] = set()
@@ -451,7 +460,21 @@ class OpenAILLMProvider:
         content = "\n".join(texts)
         if not content.strip() and not calls:
             raise LLMError("LLM returned no usable output")
-        return LLMResponse(content, tuple(calls), "openai", self.model)
+        usage = raw.get('usage')
+        counted: LLMUsage | None = None
+        if isinstance(usage, dict):
+            def number(value: Any) -> int | None:
+                return value if type(value) is int and 0 <= value <= 2**53 else None
+            inputs = usage.get('input_tokens_details')
+            outputs = usage.get('output_tokens_details')
+            counted = LLMUsage(number(usage.get('input_tokens')),
+                number(inputs.get('cached_tokens')) if isinstance(inputs, dict) else None,
+                number(usage.get('output_tokens')),
+                number(outputs.get('reasoning_tokens')) if isinstance(outputs, dict) else None)
+        request_id = raw.get('id', '')
+        if not isinstance(request_id, str) or not re.fullmatch(r'[A-Za-z0-9_.:-]{1,160}', request_id):
+            request_id = ''
+        return LLMResponse(content, tuple(calls), "openai", self.model, counted, request_id)
 
 
 __all__ = ["OfflineLLMProvider", "OpenAILLMProvider"]

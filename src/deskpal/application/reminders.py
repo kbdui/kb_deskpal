@@ -58,7 +58,7 @@ class ReminderInbox:
             task = connection.execute("SELECT scrubbed FROM task WHERE id=?", (task_id,)).fetchone()
             if task is None:
                 return
-            turn = connection.execute("SELECT conversation_id FROM turn_ref WHERE task_id=?", (task_id,)).fetchone()
+            turn = connection.execute("SELECT r.conversation_id FROM turn_ref r JOIN conversation c ON c.id=r.conversation_id WHERE r.task_id=? AND r.epoch=c.context_epoch AND c.deleted_at IS NULL", (task_id,)).fetchone()
             conversation = None if turn is None or task["scrubbed"] else connection.execute("SELECT id FROM conversation WHERE id=? AND deleted_at IS NULL", (turn[0],)).fetchone()
             connection.execute("INSERT OR IGNORE INTO desktop_resource_link VALUES(?,?,?,?,?,?)",
                 (source, identity, snapshot.store_id, snapshot.generation, task_id, None if conversation is None else conversation[0]))
@@ -69,7 +69,7 @@ class ReminderInbox:
             # A timer can expire between scheduling's commit and this callback.
             # Attach only still-unassociated records; never revive redactions.
             if not task["scrubbed"] and conversation is not None:
-                pending = connection.execute("SELECT * FROM desktop_reminder_inbox WHERE source=? AND source_id=? AND store_id=? AND generation=? AND task_id IS NULL AND delivery_state IN ('due','missed')",
+                pending = connection.execute("SELECT * FROM desktop_reminder_inbox WHERE source=? AND source_id=? AND store_id=? AND generation=? AND task_id IS NULL AND delivery_state IN ('due','missed','quiet')",
                     (source, identity, snapshot.store_id, snapshot.generation)).fetchall()
                 connection.execute("UPDATE desktop_reminder_inbox SET task_id=?,conversation_id=? WHERE source=? AND source_id=? AND store_id=? AND generation=? AND task_id IS NULL AND delivery_state NOT IN ('redacted','suppressed')",
                     (task_id, conversation[0], source, identity, snapshot.store_id, snapshot.generation))
@@ -116,6 +116,8 @@ class ReminderInbox:
                         with self.store.transaction() as connection:
                             connection.execute("UPDATE desktop_reminder_cursor SET blocked=1 WHERE source=?", (source,))
                         break
+                    reminder_enabled = self.policy is None or self.policy.allowed('reminder')
+                    reminder_now = self.policy is None or self.policy.reminder_allowed_now()
                     with self.store.transaction() as connection:
                         self.store.check_privacy(connection)
                         # Inbox and stream advance commit together. Failed
@@ -124,19 +126,16 @@ class ReminderInbox:
                             (source, event.source_id, identity.store_id, identity.generation)).fetchone()
                         task_id = None if link is None else link["task_id"]
                         conversation_id = None if link is None else link["conversation_id"]
-                        redacted = False
-                        if task_id is not None:
-                            task = connection.execute("SELECT scrubbed FROM task WHERE id=?", (task_id,)).fetchone()
-                            redacted = task is None or bool(task[0])
                         now = self._now()
                         missed = _date(event.due_at) < self._started_at or (now - _date(event.due_at)).total_seconds() > NOTIFICATION_TTL_SECONDS
-                        if self.policy is not None and not self.policy.allowed("reminder"):
+                        if not reminder_enabled:
                             missed = True
-                        state = "redacted" if redacted else "missed" if missed else "due"
+                        quiet = not missed and not reminder_now
+                        state = "missed" if missed else "quiet" if quiet else "due"
                         candidate = {"source": source, "store_id": identity.store_id, "generation": identity.generation,
                             "occurrence_revision": event.occurrence_revision, "due_at": event.due_at,
                             "label": event.label, "recorded_at": event.recorded_at}
-                        if not redacted and not self._current(candidate, snapshot):
+                        if not self._current(candidate, snapshot):
                             state = "suppressed"
                         reminder_id = sha256(canonical([source, identity.store_id, identity.generation, event.id]).encode()).hexdigest()
                         if connection.execute("SELECT COUNT(*) FROM desktop_reminder_inbox").fetchone()[0] >= MAX_INBOX_ROWS and connection.execute("SELECT 1 FROM desktop_reminder_inbox WHERE id=?", (reminder_id,)).fetchone() is None:
@@ -145,14 +144,30 @@ class ReminderInbox:
                             (reminder_id, source, event.source_id, event.id, identity.store_id, identity.generation,
                              event.occurrence_revision, event.due_at, event.recorded_at,
                              "" if state in {"redacted", "suppressed"} else event.label, conversation_id, task_id, None, state)).rowcount
-                        if inserted and state in {"due", "missed"}:
+                        if inserted and state == "quiet":
+                            connection.execute('INSERT OR IGNORE INTO notification_deferred VALUES(?,NULL)', (reminder_id,))
+                        if inserted and state in {"due", "missed", "quiet"}:
                             self._append_timeline(connection, reminder_id, conversation_id, task_id, event)
                             if state == "due":
                                 self.store.record_event("desktop_reminder_due", data={"id": reminder_id})
                         connection.execute("UPDATE desktop_reminder_cursor SET after_id=?,anchor=? WHERE source=?", (event.id, event_anchor, source))
                     processed += 1
+            self._release_quiet()
             self._error = None
         return processed
+
+    def _release_quiet(self) -> None:
+        if self.policy is None or not self.policy.reminder_allowed_now():
+            return
+        with self.store.read_connection() as db:
+            rows = db.execute("SELECT * FROM desktop_reminder_inbox WHERE delivery_state='quiet' AND acknowledged_at IS NULL LIMIT 100").fetchall()
+        current = self._revalidate(rows)
+        with self.store.transaction() as db:
+            for item in current:
+                changed = db.execute("UPDATE desktop_reminder_inbox SET delivery_state='due' WHERE id=? AND delivery_state='quiet' AND acknowledged_at IS NULL", (item['id'],))
+                if changed.rowcount:
+                    db.execute('UPDATE notification_deferred SET released_at=? WHERE reminder_id=?', (self._now().isoformat(), item['id']))
+                    self.store.record_event('desktop_reminder_due', data={'id': item['id']})
 
     def _append_timeline(self, connection: Any, identity: str, conversation_id: str | None,
                          task_id: str | None, event: ScheduleEvent) -> None:
@@ -176,25 +191,23 @@ class ReminderInbox:
         result: list[dict[str, Any]] = []
         for row in rows:
             snapshot = self.scheduling.source_snapshot(row["source"], row["source_id"])
-            # Re-read under the privacy write boundary. A task scrub occurring
-            # during the scheduling read must never resurrect its copied label.
+            # 校验日程自身是否已取消或变更；来源聊天的状态不参与此判断。
             with self.store.transaction() as connection:
                 self.store.check_privacy(connection)
                 fresh = connection.execute("SELECT * FROM desktop_reminder_inbox WHERE id=?", (row["id"],)).fetchone()
                 if fresh is None:
                     continue
-                task = None if fresh["task_id"] is None else connection.execute("SELECT scrubbed FROM task WHERE id=?", (fresh["task_id"],)).fetchone()
-                redacted = fresh["delivery_state"] == "redacted" or (fresh["task_id"] is not None and (task is None or task[0]))
-                if redacted or fresh["delivery_state"] == "suppressed" or not self._current(fresh, snapshot):
-                    connection.execute("UPDATE desktop_reminder_inbox SET label='',delivery_state=? WHERE id=?",
-                        ("redacted" if redacted else "suppressed", fresh["id"]))
+                # 日程自身的状态是唯一依据，聊天来源清理不撤销提醒。
+                if fresh["delivery_state"] == "suppressed" or not self._current(fresh, snapshot):
+                    connection.execute("UPDATE desktop_reminder_inbox SET label='',delivery_state='suppressed' WHERE id=?", (fresh["id"],))
                     item_id = "reminder:" + fresh["id"]
                     changed = connection.execute("UPDATE conversation_item SET body='',redacted_at=?,revision=revision+1 WHERE id=? AND redacted_at IS NULL", (self._now().isoformat(), item_id)).rowcount
                     if changed and fresh["conversation_id"] is not None:
                         connection.execute("UPDATE conversation SET timeline_revision=timeline_revision+1 WHERE id=?", (fresh["conversation_id"],))
                     continue
                 value = dict(fresh)
-                if value["delivery_state"] == "due" and _date(value["due_at"]) < self._started_at:
+                deferred = connection.execute('SELECT released_at FROM notification_deferred WHERE reminder_id=?', (value['id'],)).fetchone()
+                if value["delivery_state"] == "due" and _date(value["due_at"]) < self._started_at and not (deferred and deferred[0]):
                     value["delivery_state"] = "missed"
                     connection.execute("UPDATE desktop_reminder_inbox SET delivery_state='missed' WHERE id=?", (value["id"],))
                 value["status"] = value["delivery_state"]
@@ -219,7 +232,7 @@ class ReminderInbox:
             with self.store.read_connection() as connection:
                 self.store.check_privacy(connection)
                 view_epoch = connection.execute("SELECT epoch FROM privacy_control WHERE id=1").fetchone()[0]
-                rows = connection.execute("SELECT * FROM desktop_reminder_inbox WHERE delivery_state IN ('due','missed') AND (?=0 OR acknowledged_at IS NULL) AND (recorded_at,id)>(?,?) ORDER BY recorded_at,id LIMIT ?",
+                rows = connection.execute("SELECT * FROM desktop_reminder_inbox WHERE delivery_state IN ('due','missed','quiet') AND (?=0 OR acknowledged_at IS NULL) AND (recorded_at,id)>(?,?) ORDER BY recorded_at,id LIMIT ?",
                     (int(unread), *anchor, limit + 1)).fetchall()
                 streams = [dict(row) for row in connection.execute("SELECT source,blocked FROM desktop_reminder_cursor ORDER BY source")]
             chosen = rows[:limit]
@@ -228,7 +241,7 @@ class ReminderInbox:
                 self.store.check_privacy(connection)
                 if connection.execute("SELECT epoch FROM privacy_control WHERE id=1").fetchone()[0] != view_epoch:
                     raise WorkflowBlocked("Reminder privacy view changed; refresh the inbox")
-                unread_count = connection.execute("SELECT COUNT(*) FROM desktop_reminder_inbox WHERE acknowledged_at IS NULL AND delivery_state IN ('due','missed')").fetchone()[0]
+                unread_count = connection.execute("SELECT COUNT(*) FROM desktop_reminder_inbox WHERE acknowledged_at IS NULL AND delivery_state IN ('due','missed','quiet')").fetchone()[0]
             return {"schema_version": 1, "items": values, "has_more": len(rows) > limit,
                 "next_cursor": canonical([chosen[-1]["recorded_at"], chosen[-1]["id"]]) if chosen and len(rows) > limit else None,
                 "unread_count": unread_count, "streams": streams}
@@ -251,7 +264,10 @@ class ReminderInbox:
         item = self.detail(identity)["item"]
         if item is None or item["acknowledged_at"] is not None or item["delivery_state"] != "due":
             return None
-        age = (self._now() - _date(item["due_at"])).total_seconds()
+        with self.store.read_connection() as db:
+            deferred = db.execute('SELECT released_at FROM notification_deferred WHERE reminder_id=?', (identity,)).fetchone()
+        anchor = deferred[0] if deferred and deferred[0] else item['due_at']
+        age = (self._now() - _date(anchor)).total_seconds()
         if not 0 <= age <= NOTIFICATION_TTL_SECONDS:
             return None
         return {"kind": "reminder", "entity_id": identity, "revision": item["occurrence_revision"], "status": "due"}

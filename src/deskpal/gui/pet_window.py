@@ -6,7 +6,6 @@ from PySide6.QtGui import (QCloseEvent, QContextMenuEvent, QMouseEvent, QMoveEve
 from PySide6.QtWidgets import QApplication, QWidget
 
 CANVAS = 240
-LABEL = QRect(8, CANVAS, CANVAS - 16, 36)
 
 
 def clamp_position(position: QPoint, size: tuple[int, int], areas: list[QRect]) -> QPoint:
@@ -36,7 +35,6 @@ class PetWindow(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
         self.setWindowTitle("DeskPal 桌宠")
         self._canvas = CANVAS
-        self._label = QRect(LABEL)
         self._scale = 1.0
         self._dpr = self.devicePixelRatioF()
         self._screen_connected = False
@@ -51,7 +49,7 @@ class PetWindow(QWidget):
         self._metrics_timer = QTimer(self)
         self._metrics_timer.setSingleShot(True)
         self._metrics_timer.timeout.connect(self._metrics_changed)
-        self.setFixedSize(CANVAS, CANVAS + 44)
+        self.setFixedSize(CANVAS, CANVAS)
         self.set_stable_mask(None)
         app = QApplication.instance()
         if isinstance(app, QApplication):
@@ -67,9 +65,8 @@ class PetWindow(QWidget):
     def set_scale(self, scale: float) -> None:
         self._scale = min(1.6, max(.6, scale))
         self._canvas = round(CANVAS * self._scale)
-        # Text remains readable at 60%; its position and usable width follow the canvas.
-        self._label = QRect(8, self._canvas, self._canvas - 16, 36)
-        self.setFixedSize(self._canvas, self._canvas + 44)
+        # Keep the native window bounded to the visible pet canvas.
+        self.setFixedSize(self._canvas, self._canvas)
         self.set_stable_mask(self._neutral)
         self.fit_to_screens()
         self.display_metrics_changed.emit()
@@ -136,7 +133,7 @@ class PetWindow(QWidget):
             region = QRegion(logical.mask())
             region.translate((self._canvas - logical.width()) // 2,
                              (self._canvas - logical.height()) // 2)
-        self._mask_region = region | QRegion(self._label)
+        self._mask_region = region
         self.setMask(self._mask_region)
 
     def present(self, pixmap: QPixmap | None, status: str, diagnostic: str = "") -> None:
@@ -160,11 +157,6 @@ class PetWindow(QWidget):
                 painter.setBrush(Qt.GlobalColor.lightGray)
                 painter.drawEllipse(self._fallback_rect())
                 painter.drawText(self._fallback_rect(), Qt.AlignmentFlag.AlignCenter, "◈")
-            painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(Qt.GlobalColor.white)
-            painter.drawRoundedRect(self._label, 8, 8)
-            painter.setPen(Qt.GlobalColor.black)
-            painter.drawText(self._label, Qt.AlignmentFlag.AlignCenter, self._status)
         except Exception:
             self._pixmap = None
             if not self._paint_failed:

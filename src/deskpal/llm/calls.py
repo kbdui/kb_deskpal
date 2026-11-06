@@ -6,6 +6,7 @@ import json
 from threading import RLock
 from typing import TypeVar, cast
 from uuid import uuid4
+from time import monotonic
 
 from deskpal.tools.models import ToolSpec
 
@@ -13,6 +14,7 @@ from .errors import LLMError
 from .models import ChatMessage, LLMResponse
 from .ports import LLMProvider
 from .providers import OfflineLLMProvider, UnavailableLLMProvider
+from .diagnostics import failure, sanitize
 
 
 _T = TypeVar("_T")
@@ -25,13 +27,16 @@ class ModelCallGateway:
     def __init__(self, provider: LLMProvider,
                  reserve: Callable[[str, str], str] | None = None,
                  finish: Callable[[str, str], None] | None = None, *,
-                 providers: Mapping[str, LLMProvider] | None = None) -> None:
+                 providers: Mapping[str, LLMProvider] | None = None,
+                 diagnose: Callable[[str, dict[str, object]], None] | None = None) -> None:
         self._provider = provider
         self.capability = ("offline_demo" if isinstance(provider, OfflineLLMProvider) else
                            "unavailable" if isinstance(provider, UnavailableLLMProvider) else
                            "local" if getattr(provider, "is_cloud", True) is False else "remote")
         self._reserve = reserve
         self._finish = finish
+        self._diagnose = diagnose
+        self._latest: dict[tuple[str, str], str] = {}
         self._providers = dict(providers or {})
         if not set(self._providers) <= _PURPOSES:
             raise ValueError("Unknown model purpose")
@@ -65,16 +70,21 @@ class ModelCallGateway:
                 self._outcomes[call_id] = status
 
     def _invoke(self, task_id: str, purpose: str, guard: Callable[[], None],
-                operation: Callable[[], _T]) -> _T:
+                operation: Callable[[], _T], *, request_bytes: int = 0) -> _T:
         # A reservation remains consumed even when the following guard rejects,
         # the send fails or the caller cannot know whether bytes were written.
         guard()
         call_id = self._reserve_attempt(task_id, purpose)
+        with self._lock:
+            self._latest[(task_id, purpose)] = call_id
+        started = monotonic()
         try:
             guard()
             result = operation()
             guard()
-        except BaseException:
+        except BaseException as error:
+            self.annotate(task_id, purpose, {**failure(error), 'request_bytes': request_bytes,
+                'elapsed_ms': int((monotonic() - started) * 1000)})
             try:
                 self._finish_attempt(call_id, "unknown")
             except Exception:
@@ -83,9 +93,26 @@ class ModelCallGateway:
                 pass
             raise
         self._finish_attempt(call_id, "finished")
+        details: dict[str, object] = dict(error_code='ok', request_bytes=request_bytes,
+            elapsed_ms=int((monotonic() - started) * 1000))
+        if isinstance(result, LLMResponse):
+            details.update(response_bytes=len(result.content.encode('utf-8')), request_id=result.request_id)
+            if result.usage is not None:
+                details.update({key: value for key, value in asdict(result.usage).items() if value is not None})
+        self.annotate(task_id, purpose, details)
         # Privacy failures are deliberately propagated as their original type.
         guard()
         return result
+
+    def annotate(self, task_id: str, purpose: str, values: dict[str, object]) -> None:
+        with self._lock:
+            call_id = self._latest.get((task_id, purpose))
+        if call_id and self._diagnose is not None:
+            # 诊断失败不改变工具结果或触发模型重发；生命周期清理仍由原边界处理。
+            try:
+                self._diagnose(call_id, sanitize(values))
+            except Exception:
+                pass
 
 
 class _BoundProvider:
@@ -135,7 +162,7 @@ class _BoundProvider:
                 raise LLMError("Model returned an invalid response")
             return response
         response = self._gateway._invoke(self._task_id, self._purpose, self._guard,
-            operation)
+            operation, request_bytes=len(encoded.encode('utf-8')))
         if self._purpose != "planning" and response.tool_calls:
             raise LLMError("This model purpose returned forbidden tool calls")
         return response
@@ -145,4 +172,4 @@ class _BoundProvider:
             raise LLMError("Model input exceeds byte budget")
         provider = self._gateway._providers.get(self._purpose, self._gateway._provider)
         return self._gateway._invoke(self._task_id, self._purpose, self._guard,
-            lambda: provider.generate(prompt))
+            lambda: provider.generate(prompt), request_bytes=len(prompt.encode('utf-8')))

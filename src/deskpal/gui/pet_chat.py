@@ -2,8 +2,7 @@
 
 from PySide6.QtCore import QEvent, QObject, QPoint, Qt, QTimer, Signal
 from PySide6.QtGui import QCloseEvent, QKeySequence, QScreen, QShortcut
-from PySide6.QtWidgets import (QApplication, QHBoxLayout, QVBoxLayout, QWidget)
-from .components import (PushButton as QPushButton)
+from PySide6.QtWidgets import (QApplication, QVBoxLayout, QWidget)
 
 from .chat import ChatCoordinator, ChatView
 from .pet_window import clamp_position
@@ -15,7 +14,7 @@ class PetChatWindow(QWidget):
 
     def __init__(self, coordinator: ChatCoordinator, parent: QWidget | None = None) -> None:
         # A separate native focusable window; never inherits the canvas's no-focus flags.
-        super().__init__(parent, Qt.WindowType.Tool | Qt.WindowType.WindowCloseButtonHint)
+        super().__init__(parent, Qt.WindowType.Tool | Qt.WindowType.FramelessWindowHint)
         self.setWindowTitle("DeskPal · 聊天")
         self.setObjectName('deskpalWorkspace')
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground)
@@ -25,12 +24,6 @@ class PetChatWindow(QWidget):
         self._deactivate_timer.setSingleShot(True)
         self._deactivate_timer.timeout.connect(self._hide_if_inactive)
         layout = QVBoxLayout(self)
-        row = QHBoxLayout()
-        row.addStretch()
-        close = QPushButton("收起")
-        close.clicked.connect(self.hide)
-        row.addWidget(close)
-        layout.addLayout(row)
         self.chat_view = ChatView(coordinator, compact=True, parent=self)
         self.chat_view.expand_requested.connect(self.expand_requested)
         layout.addWidget(self.chat_view, 1)

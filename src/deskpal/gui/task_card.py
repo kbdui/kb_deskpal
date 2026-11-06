@@ -308,6 +308,8 @@ class TaskCard(QFrame):
         if not self.compact and has_tool_details(review):
             records_button = QPushButton('执行记录'); records_button.clicked.connect(self._show_results); row.addWidget(records_button)
         if waiting:
+            if any(step.get("tool_name") == "memory_forget" for step in steps):
+                self.layout_box.addWidget(text_label("遗忘会清理这条记忆关联的聊天记录和任务正文，也可能中止当前请求。仅标记事情已完成时，请取消并要求更正记忆。"))
             permissions = review.get("missing_permissions", {})
             ordinary = list(permissions.get("ordinary_tools", []))
             high = list(permissions.get("high_risk_tools", []))

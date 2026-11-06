@@ -281,7 +281,8 @@ class SubmissionDispatcher:
         if isinstance(error, TaskCancellationRequested) or current.cancel_requested:
             task = self.tasks.update_status(task_id, TaskStatus.CANCELLED, result=current.result)
         else:
-            task = self.tasks.block_for_review(task_id, "Execution interrupted; explicit review required")
+            self.tasks.store.record_event("execution_interrupted", task_id, {"error_type": type(error).__name__})
+            task = self.tasks.block_for_review(task_id, "执行中断，请查看任务状态与执行记录后重新处理。")
         return stored_result(task, self.journal), False
 
     def _work(self) -> None:
@@ -353,6 +354,8 @@ class SubmissionDispatcher:
                         snapshot = self.journal.get_plan(task.id)
                         if snapshot is None or any(item.status not in {"Succeeded", "Failed"} for item in self.journal.attempts(task.id)):
                             raise WorkflowBlocked("No intact unstarted plan remains for confirmation")
+                        if len(snapshot.plan.steps) > self.core.max_tool_steps:
+                            raise WorkflowBlocked("Plan exceeds the task tool-step budget")
                         # Only the sole execution worker restores Core state;
                         # acceptance can queue safely while another task runs.
                         self.core.restore_pending(task.id, snapshot.plan, snapshot.memory_refs)

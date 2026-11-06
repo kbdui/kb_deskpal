@@ -157,6 +157,23 @@ def test_internal_followup_runs_without_chat_and_can_end_emotion_concern(proacti
     assert attention_task(app, identity)['status'] == 'done'
 
 
+def test_due_followup_rechecks_using_corrected_memory(proactive_setup):
+    app, model, _, clock, _ = proactive_setup
+    old = app.memory.remember("旧项目资料，需要在到期时重新核对。")
+    enable(app)
+    identity = app.proactive.schedule_followup("memory-followup", goal="复查项目资料", reason="需要核对",
+        due_at=(clock() + timedelta(minutes=16)).isoformat(), mode="internal",
+        refs=[dict(kind="memory", id=old.id, revision=old.revision)])
+    new = app.memory_command("correct", memory_id=old.id, expected_revision=old.revision,
+                             content="更正后的项目资料")
+    clock.advance(1000)
+    app.proactive.poll()
+    until(lambda: (app.learning.store.job('review:attention-review:' + identity) or {}).get('status') == 'completed')
+    job = next(payload for payload in model.feedback if payload.get("review_goal") == "复查项目资料")
+    assert any(row["id"] == new.id and row["revision"] == new.revision and
+               row["content"] == "更正后的项目资料" for row in job["understandings"])
+
+
 def test_feedback_schedules_same_followup_queue_with_idempotent_delivery(learning_setup):
     app, model = learning_setup
     due = (app.proactive.clock() + timedelta(hours=1)).isoformat()

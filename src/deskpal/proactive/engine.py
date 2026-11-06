@@ -56,6 +56,7 @@ class LocalRuleEngine:
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self._lock = RLock()
         self._zone = ZoneInfo(config.timezone)
+        self.quiet_check: Callable[[datetime | None], bool] | None = None
         self._quiet_start = self._minute(config.quiet_start)
         self._quiet_end = self._minute(config.quiet_end)
         self._cache_token = -1
@@ -93,6 +94,8 @@ class LocalRuleEngine:
         return datetime.fromisoformat(stamp(self._clock()))
 
     def is_quiet(self, now: datetime | None = None) -> bool:
+        if self.quiet_check is not None:
+            return self.quiet_check(now)
         local = (now or self._now()).astimezone(self._zone)
         minute = local.hour * 60 + local.minute
         start, end = self._quiet_start, self._quiet_end

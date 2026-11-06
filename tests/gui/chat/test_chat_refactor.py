@@ -34,6 +34,68 @@ def coordinator() -> tuple[FakeBridge, ChatCoordinator]:
     state.conversations = {key: {"id": key, "title": key, "revision": 1, "context_epoch": 1} for key in ["daily", "project"]}
     return bridge, state
 
+def test_redacted_history_has_explanation_and_user_author_is_on_right(qtbot: Any) -> None:
+    from PySide6.QtWidgets import QFrame, QLabel
+    bridge, state = coordinator(); view = ChatView(state); qtbot.addWidget(view)
+    view.set_conversation('daily'); view.resize(640, 700); view.show()
+    state._timeline('daily', {'items': [
+        {'id': 'gone', 'kind': 'user_message', 'body': '', 'redacted_at': 'now', 'sequence': 1},
+        {'id': 'new', 'kind': 'user_message', 'body': '仍然可见的新消息', 'sequence': 2},
+        {'id': 'reply', 'kind': 'assistant_message', 'body': '正常回复', 'sequence': 3}]}, False)
+    qtbot.waitUntil(lambda: len(view.findChildren(QFrame, 'user_message')) == 1)
+    frame = view.findChild(QFrame, 'user_message')
+    avatar = frame.findChild(QLabel, 'message_user_avatar'); name = frame.findChild(QLabel, 'message_author')
+    qtbot.waitUntil(lambda: avatar.x() > name.x())
+    assert view.findChild(QLabel, 'chat_redaction_notice') is not None
+    assert any(label.text() == '仍然可见的新消息' for label in frame.findChildren(QLabel))
+
+
+def test_submission_receipt_clears_stale_unknown_command_notice(qtbot: Any) -> None:
+    bridge, state = coordinator(); notices = []; state.notice.connect(notices.append)
+    state.edit_draft('daily', '新的要求'); state.submit('daily')
+    call = next(call for call in reversed(bridge.calls) if call[0] == 'submit')
+    state.notice.emit('后台尚无此命令回执')
+    bridge.respond(call, {'accepted': True, 'task_id': 'new-task'})
+    qtbot.waitUntil(lambda: not state.submissions)
+    assert notices[-1] == ''
+
+
+def test_new_dispatcher_state_releases_accepted_confirmation(qtbot: Any) -> None:
+    bridge, state = coordinator()
+    state.reviews['t'] = {'task_revision': 2, 'confirmation_revision': 3, 'confirmation_state': 'accepted', 'plan_hash': 'p'}
+    state.accepted['t'] = (2, 'p')
+    state.set_review('t', {'task_revision': 2, 'confirmation_revision': 4, 'confirmation_state': 'none',
+                         'plan_hash': 'p', 'available_actions': ['confirm'], 'status': 'NeedsReview'})
+    assert state.reviews['t']['confirmation_state'] == 'none'
+    assert 'confirm' in state.reviews['t']['available_actions']
+    assert 't' not in state.accepted
+
+
+def test_rejected_task_command_does_not_keep_retrying_stale_parameters(qtbot: Any) -> None:
+    bridge, state = coordinator()
+    state.task_commands['t'] = {'command_id': 'cmd', 'action': 'confirm', 'parameters': {}, 'at': 0}
+    state.task_pending.add('t')
+    state._task_receipt('t', {'_error': {'code': 'Blocked', 'message': '计划已失效'}})
+    state.reconcile_task('t')
+    call = next(call for call in reversed(bridge.calls) if call[0] == 'command_status')
+    bridge.respond(call, {'known': False, 'accepted': False})
+    qtbot.waitUntil(lambda: 't' not in state.task_commands)
+    assert 't' not in state.task_pending
+
+
+def test_late_reconciliation_cannot_overwrite_a_new_task_command(qtbot: Any) -> None:
+    bridge, state = coordinator(); notices = []; state.notice.connect(notices.append)
+    state.task_commands['t'] = {'command_id': 'old', 'action': 'confirm', 'parameters': {}, 'at': 0}
+    state.reconcile_task('t')
+    call = next(call for call in reversed(bridge.calls) if call[0] == 'command_status')
+    replacement = {'command_id': 'new', 'action': 'cancel', 'parameters': {}, 'at': 1}
+    state.task_commands['t'] = replacement; state.task_pending.add('t')
+    bridge.respond(call, {'known': False, 'accepted': False})
+    qtbot.waitUntil(lambda: 'task-receipt:t' not in state._reads)
+    assert state.task_commands['t'] is replacement
+    assert 't' in state.task_pending and not notices
+
+
 def test_two_views_share_revision_draft_and_submit_once(qtbot: Any) -> None:
     bridge, state = coordinator(); first = ChatView(state); second = ChatView(state, compact=True)
     qtbot.addWidget(first); qtbot.addWidget(second); first.set_conversation("daily"); second.set_conversation("daily")

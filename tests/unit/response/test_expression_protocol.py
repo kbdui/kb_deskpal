@@ -131,8 +131,9 @@ def test_history_provenance_and_host_outcomes_survive_projection_without_text_ex
     user, assistant = payload["history"]
     assert user["source_kind"] == "historical_user_reference" and user["instruction"] is False
     assert assistant["source_kind"] == "assistant_proposal" and assistant["confirmed"] is False
-    assert assistant["draft_id"] == "draft:assistant" and assistant["draft_version"] == 3
-    assert assistant["source_ref"] == source and assistant["refs"] == [source]
+    assert assistant["source"] == "history:1" and assistant["draft_version"] == 3
+    assert history[1]["source_ref"] == source and history[1]["refs"] == [source]
+    assert "source_ref" not in assistant and "refs" not in assistant
     assert [item["fact"] for item in assistant["tool_facts"]] == facts
     assert all(item["verified"] is True and item["external_content_verified"] is False for item in assistant["tool_facts"])
     assert payload["tool_results"] == [facts[1]]

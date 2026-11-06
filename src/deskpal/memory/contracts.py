@@ -106,8 +106,8 @@ class DeletionReceipt:
     revision: int
     epoch: int
     affected_task_ids: tuple[str, ...] = ()
-    cleared: tuple[str, ...] = ("memory", "source", "index", "profile")
-    retained: tuple[str, ...] = ("historical execution logs", "external copies and backups")
+    cleared: tuple[str, ...] = ("selected memory, revisions and retrieval index",)
+    retained: tuple[str, ...] = ("chat history, other memories and personality", "execution records, calendar and reminders", "external copies and backups")
 
 
 @dataclass(frozen=True)

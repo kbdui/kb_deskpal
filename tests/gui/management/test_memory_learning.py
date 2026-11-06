@@ -1,6 +1,4 @@
-from PySide6.QtCore import QObject, Signal
-from types import SimpleNamespace
-from deskpal.gui import management
+from PySide6.QtCore import QObject, Qt, Signal
 
 from deskpal.gui.management import MemoryPage
 
@@ -15,7 +13,7 @@ class Bridge(QObject):
         return 'synthetic-request'
 
 
-def test_buffer_is_readable_and_has_no_manual_approval_actions(qtbot, monkeypatch):
+def test_buffer_is_readable_and_memory_page_has_no_editing_actions(qtbot):
     page = MemoryPage(Bridge())
     qtbot.addWidget(page)
     page.resize(1000, 760)
@@ -31,20 +29,7 @@ def test_buffer_is_readable_and_has_no_manual_approval_actions(qtbot, monkeypatc
     assert '相处习惯' in page.page.summary_meta.text()
     assert '今天明确希望先倾诉' in page.page.summary_context.toPlainText()
     assert '暂时推测' in page.page.summary_context.toPlainText()
-    actions = []
-    class Menu:
-        def __init__(self, *args):
-            self.entries = []
-        def addAction(self, text, callback):
-            self.entries.append(SimpleNamespace(text=lambda: text))
-        def addSeparator(self):
-            pass
-        def actions(self):
-            return self.entries
-        def exec(self, *args):
-            actions.extend(action.text() for action in self.entries)
-    # Qt 的原生弹出菜单会进入嵌套事件循环；替换菜单工厂，仅验证真实页面生成的可用动作。
-    monkeypatch.setattr(management, 'QMenu', Menu)
-    page._memory_context_menu(tree.visualItemRect(row).center())
-    assert '更正这条记忆' in actions and '遗忘这条记忆及相关正文' in actions
-    assert not any('接受' in action or '拒绝' in action for action in actions)
+    assert tree.contextMenuPolicy() == Qt.ContextMenuPolicy.DefaultContextMenu
+    assert page.page.action_scroll.isHidden()
+    assert page.learning_button.isVisible()
+    assert not hasattr(page, 'forms')

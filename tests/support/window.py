@@ -98,7 +98,6 @@ def window(qtbot: Any) -> tuple[MainWindow, FakeBridge]:
     state.conversations["daily"] = daily
     state.model_ready = True
     widget.chat_view.set_conversation("daily")
-    widget.memory_page._settings({"request_use_default": False})
     widget.arrangements.goals._settings({'request_use_default': False})
     return widget, bridge
 

@@ -32,7 +32,7 @@ class ConversationService:
 
         def scrub(task_id: str) -> None:
             self.tasks.request_cancel(task_id)
-            self.tasks.scrub(task_id)
+            self.tasks.clear_working_context(task_id)
             affected.append(task_id)
 
         with self.privacy.exclusive():

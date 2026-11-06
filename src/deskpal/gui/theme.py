@@ -14,6 +14,7 @@ QLabel#chat_avatar { background:#e5eee2; border-radius:21px; color:#52735d; font
 QLabel#task_card_title { font-size:16px; font-weight:600; }
 QFrame#tool_result_card, QFrame#tool_result_summary { background:#fffefa; border:1px solid #dfe5da; border-radius:12px; }
 QFrame#tool_result_parameters { background:#f3f5ee; border-radius:8px; }
+QGroupBox { border:1px solid #dfe5da; border-radius:10px; margin-top:12px; padding:12px 10px 8px 10px; color:#405449; font-weight:600; }
 QLabel#tool_result_card_title, QLabel#tool_result_summary_title { font-size:16px; font-weight:600; }
 QLabel#tool_result_status { color:#52735d; }
 QLabel#tool_result_status[state="failure"] { color:#ab4943; }
@@ -29,6 +30,7 @@ QLabel#chat_avatar { background:#304536; border-radius:21px; color:#a6c4aa; font
 QLabel#task_card_title { font-size:16px; font-weight:600; }
 QFrame#tool_result_card, QFrame#tool_result_summary { background:#222925; border:1px solid #3a473d; border-radius:12px; }
 QFrame#tool_result_parameters { background:#29352d; border-radius:8px; }
+QGroupBox { border:1px solid #3a473d; border-radius:10px; margin-top:12px; padding:12px 10px 8px 10px; color:#c6d2c6; font-weight:600; }
 QLabel#tool_result_card_title, QLabel#tool_result_summary_title { font-size:16px; font-weight:600; }
 QLabel#tool_result_status { color:#a6c4aa; }
 QLabel#tool_result_status[state="failure"] { color:#efaaa2; }

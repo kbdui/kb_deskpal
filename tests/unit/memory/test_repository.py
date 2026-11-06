@@ -80,7 +80,7 @@ def test_v1_backup_migration_preserves_raw_data_and_never_confirms_legacy(tmp_pa
     with closing(sqlite3.connect(backup)) as copy, closing(sqlite3.connect(path)) as current:
         assert copy.execute("PRAGMA user_version").fetchone()[0] == 1
         assert copy.execute("SELECT * FROM memories").fetchone() == original
-        assert current.execute("PRAGMA user_version").fetchone()[0] == 3
+        assert current.execute("PRAGMA user_version").fetchone()[0] == 4
         assert current.execute("SELECT * FROM memories").fetchone() == original
     backup_bytes = backup.read_bytes()
     with SQLiteMemoryRepository(path, clock=clock) as reopened:
@@ -116,7 +116,7 @@ def test_migration_refuses_to_overwrite_existing_backup(tmp_path, clock):
     assert backup.read_bytes() == b"existing backup must survive"
 
 
-@pytest.mark.parametrize("version", [-1, 4, 500])
+@pytest.mark.parametrize("version", [-1, 5, 500])
 def test_unknown_schema_is_refused_without_mutation(tmp_path, clock, version):
     path = tmp_path / "future.sqlite"
     with closing(sqlite3.connect(path)) as connection:
@@ -290,7 +290,7 @@ def test_replaying_an_explicitly_expired_command_returns_tombstone(repository, c
 
 
 @pytest.mark.parametrize("expire_via", ["get", "list", "epoch", "forget"])
-def test_ttl_tombstone_retains_task_receipt_after_repeats_and_reopen(tmp_path, clock, expire_via):
+def test_ttl_tombstone_retains_memory_receipt_after_repeats_and_reopen(tmp_path, clock, expire_via):
     path = tmp_path / "ttl-tasks.sqlite"
     task_id = str(uuid4())
     with SQLiteMemoryRepository(path, clock=clock) as repo:
@@ -303,20 +303,20 @@ def test_ttl_tombstone_retains_task_receipt_after_repeats_and_reopen(tmp_path, c
         elif expire_via == "epoch":
             assert repo.epoch > 1
         receipt = repo.forget(candidate.id, candidate.revision)
-        assert receipt.affected_task_ids == (task_id,)
+        assert receipt.affected_task_ids == ()
         assert repo.forget(candidate.id, candidate.revision) == receipt
         assert repo.forget(candidate.id, receipt.revision) == receipt
     with SQLiteMemoryRepository(path, clock=clock) as reopened:
         assert reopened.forget(candidate.id, candidate.revision) == receipt
         assert reopened.get(candidate.id).source.content == ""
     with closing(sqlite3.connect(path)) as db:
-        assert db.execute("SELECT memory_id,task_id FROM memory_deletion_tasks").fetchall() == [(candidate.id, task_id)]
+        assert db.execute("SELECT memory_id,task_id FROM memory_deletion_tasks").fetchall() == []
         assert [row[1] for row in db.execute("PRAGMA table_info(memory_deletion_tasks)")] == ["memory_id", "task_id"]
         for table in ("memory_sources", "memory_revisions"):
             assert db.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] == 0
 
 
-def test_ttl_sweep_does_not_mix_unrelated_tombstones_task_scopes(tmp_path, clock):
+def test_ttl_sweep_keeps_independent_tombstones_without_task_deletion(tmp_path, clock):
     path = tmp_path / "separate-tasks.sqlite"
     first_task, second_task = str(uuid4()), str(uuid4())
     with SQLiteMemoryRepository(path, clock=clock) as repo:
@@ -324,14 +324,14 @@ def test_ttl_sweep_does_not_mix_unrelated_tombstones_task_scopes(tmp_path, clock
         second = repo.ingest(source("乙", task_id=second_task), draft("乙", expires_at=NOW + timedelta(days=7)))
         clock.now += timedelta(days=8)
         assert repo.list_items(status=MemoryStatus.CANDIDATE) == ()
-        assert repo.forget(first.id, first.revision).affected_task_ids == (first_task,)
-        assert repo.forget(second.id, second.revision).affected_task_ids == (second_task,)
+        assert repo.forget(first.id, first.revision).affected_task_ids == ()
+        assert repo.forget(second.id, second.revision).affected_task_ids == ()
     with SQLiteMemoryRepository(path, clock=clock) as reopened:
-        assert reopened.forget(first.id, first.revision).affected_task_ids == (first_task,)
-        assert reopened.forget(second.id, second.revision).affected_task_ids == (second_task,)
+        assert reopened.forget(first.id, first.revision).affected_task_ids == ()
+        assert reopened.forget(second.id, second.revision).affected_task_ids == ()
 
 
-def test_shared_source_delete_receipts_retain_task_scope_for_every_tombstone(tmp_path, clock):
+def test_shared_source_forgetting_preserves_other_memory_across_restart(tmp_path, clock):
     path = tmp_path / "shared-tasks.sqlite"
     task_id = str(uuid4())
     with SQLiteMemoryRepository(path, clock=clock) as repo:
@@ -339,12 +339,12 @@ def test_shared_source_delete_receipts_retain_task_scope_for_every_tombstone(tmp
         first = repo.ingest(entered, draft("甲"), accepted=True)
         second = repo.ingest(entered, draft("乙", expires_at=NOW + timedelta(days=7)))
         receipt = repo.forget(first.id, first.revision)
-        assert receipt.affected_task_ids == (task_id,)
+        assert receipt.affected_task_ids == ()
         assert repo.forget(first.id, first.revision) == receipt
-        assert repo.forget(second.id, second.revision).affected_task_ids == (task_id,)
+        assert repo.get(second.id) == second
     with SQLiteMemoryRepository(path, clock=clock) as reopened:
         assert reopened.forget(first.id, first.revision) == receipt
-        assert reopened.forget(second.id, second.revision).affected_task_ids == (task_id,)
+        assert reopened.get(second.id) == second
 
 
 def test_profile_conflicts_require_correction_but_scopes_owners_and_values_are_distinct(repository):
@@ -412,29 +412,29 @@ def test_revision_failures_are_atomic_and_do_not_cross_owner(repository):
         repository.reject("not-found", 1)
 
 
-def test_delete_shared_source_clears_history_indexes_and_replay(repository, tmp_path):
+def test_forget_clears_only_target_history_index_and_idempotent_replay(repository, tmp_path):
     entered = source("甲乙", id="source-to-forget", task_id="task-to-invalidate")
     first = repository.ingest(entered, draft("甲"), accepted=True, idempotency_key="first")
     second = repository.ingest(entered, draft("乙"), idempotency_key="second")
     second = repository.accept(second.id, 1)
     assert repository.put_embedding(first.id, 1, MANIFEST, (1.0, 0.0, 0.0))
     receipt = repository.forget(first.id, 1)
-    assert receipt.affected_task_ids == ("task-to-invalidate",)
+    assert receipt.affected_task_ids == ()
     assert receipt.revision == 2
-    assert repository.get(first.id).status == repository.get(second.id).status == MemoryStatus.DELETED
-    assert repository.get(second.id, revision=1).draft.content == ""
+    assert repository.get(first.id).status == MemoryStatus.DELETED
+    assert repository.get(second.id) == second
+    assert repository.get(second.id, revision=1).draft.content == "乙"
     assert repository.embeddings(MANIFEST) == ()
     assert repository.ingest(entered, draft("甲"), accepted=True, idempotency_key="first").status == MemoryStatus.DELETED
     assert not repository.put_embedding(first.id, 1, MANIFEST, (1.0, 0.0, 0.0))
-    with pytest.raises(MemoryError, match="forgotten source"):
-        repository.ingest(entered, draft("甲"))
     epoch = repository.epoch
     repeated = repository.forget(first.id, 1)
     assert repeated == receipt and repository.epoch == epoch
     with closing(sqlite3.connect(tmp_path / "memory.sqlite")) as db:
-        for table in ("memory_sources", "memory_revisions", "memory_embeddings"):
-            assert db.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] == 0
-        assert all(row[0] is None for row in db.execute("SELECT fingerprint FROM memory_ingestions"))
+        assert db.execute("SELECT COUNT(*) FROM memory_sources").fetchone()[0] == 1
+        assert db.execute("SELECT DISTINCT id FROM memory_revisions").fetchall() == [(second.id,)]
+        assert db.execute("SELECT COUNT(*) FROM memory_embeddings").fetchone()[0] == 0
+        assert db.execute("SELECT fingerprint FROM memory_ingestions WHERE memory_id=?", (first.id,)).fetchone()[0] is None
 
 
 def test_forget_legacy_clears_retained_v1_table_and_metadata(tmp_path, clock):
@@ -442,7 +442,7 @@ def test_forget_legacy_clears_retained_v1_table_and_metadata(tmp_path, clock):
     make_v1(path)
     with SQLiteMemoryRepository(path, clock=clock) as repo:
         receipt = repo.forget("legacy-id", 1)
-        assert receipt.affected_task_ids == ("old-task",)
+        assert receipt.affected_task_ids == ()
         assert repo.get("legacy-id").status == MemoryStatus.DELETED
     with closing(sqlite3.connect(path)) as db:
         for table in ("memories", "memory_legacy_metadata", "memory_sources", "memory_revisions"):

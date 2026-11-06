@@ -6,7 +6,7 @@
 
 from collections.abc import Mapping
 from contextlib import AbstractContextManager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 from deskpal.llm.ports import LLMProvider
@@ -36,6 +36,8 @@ class PreparedTurn:
     role_revision: int = 0
     role_json: str = ""
     origin: str = "user"
+    retrieval: RetrievalBundle = field(default_factory=RetrievalBundle)
+    conversation_summary: Mapping[str, Any] | None = None
 
 
 class TurnInteractionPort(Protocol):
@@ -50,6 +52,8 @@ class TurnInteractionPort(Protocol):
     def prepare(self, task_id: str, request: str, bundle: RetrievalBundle) -> PreparedTurn: ...
 
     def prepare_continuation(self, task_id: str) -> None: ...
+
+    def apply_decision(self, task_id: str, decision: dict[str, Any] | None) -> bool: ...
 
     def calls(self, task_id: str, purpose: str) -> LLMProvider: ...
 

@@ -288,9 +288,6 @@ class AgentCore:
                 self._pending.pop(task_id, None)
                 self._pending_dependencies.pop(task_id, None)
                 self.tasks.update_status(task_id, TaskStatus.CANCELLED)
-                scrub = getattr(self.tasks, "scrub", None)
-                if callable(scrub):
-                    scrub(task_id)
                 raise ValueError("Plan memory changed or expired; submit a new request and confirm its new plan")
             self._running = True
         try:
@@ -443,24 +440,10 @@ class AgentCore:
                 raise RuntimeError("Agent is closed or has a running request")
             self._running = True
         try:
-            if action == "forget":
-                self.reset_companion_for_privacy()
             result = getattr(runtime, action)(**parameters)
             if action in {"correct", "forget", "accept", "reject"}:
                 self._invalidate_memory_plans()
-            if isinstance(result, DeletionReceipt):
-                affected = set(result.affected_task_ids)
-                for task_id, refs in self._task_dependencies.items():
-                    if not runtime.valid(refs):
-                        affected.add(task_id)
-                scrub = getattr(self.tasks, "scrub", None)
-                if callable(scrub):
-                    for task_id in affected:
-                        if self.tasks.get(task_id) is not None:
-                            scrub(task_id)
-                else:
-                    from dataclasses import replace
-                    result = replace(result, retained=result.retained + ("custom task storage",))
+            # 记忆遗忘只撤销依赖该版本的待执行计划，不清空历史任务或角色状态。
             self._log.record("memory_command", None, {"action": action})
             return result
         finally:
@@ -483,9 +466,6 @@ class AgentCore:
                 current = self.tasks.get(task_id)
                 if current is not None and current.status == TaskStatus.WAITING:
                     self.tasks.update_status(task_id, TaskStatus.CANCELLED)
-                scrub = getattr(self.tasks, "scrub", None)
-                if callable(scrub):
-                    scrub(task_id)
 
     def _boundary(self, task_id: str) -> None:
         """在阶段边界集中检查取消、隐私屏障、执行日志和记忆有效性。"""
@@ -539,9 +519,12 @@ class AgentCore:
             raise ValueError("Invalid plan")
         if len(plan.steps) > self.max_tool_steps:
             raise ValueError("Plan exceeds max_tool_steps")
+        if plan.context is not None and (not isinstance(plan.context, dict)
+                or len(json.dumps(plan.context, ensure_ascii=False, allow_nan=False).encode('utf-8')) > 16384):
+            raise ValueError('Invalid context decision')
         if plan.action not in {"answer", "clarify", "quiet", "continue"}:
             raise ValueError("Unknown decision action")
-        if not plan.steps and not plan.reply.strip() and plan.action != "quiet":
+        if not plan.steps and not plan.reply.strip() and plan.action != "quiet" and plan.context is None:
             raise ValueError("Plan must contain a reply or tool calls")
         calls: list[ToolCall] = []
         ids: set[str] = set()
@@ -553,12 +536,13 @@ class AgentCore:
                 raise ValueError("Duplicate planned call_id")
             ids.add(call.call_id)
             calls.append(_call_copy(call))
-        return Plan(plan.reply, tuple(calls), plan.action)
+        return Plan(plan.reply, tuple(calls), plan.action, _json_copy(plan.context) if plan.context is not None else None)
 
     def _planning_tools(self, task_id: str) -> tuple[Any, ...]:
         from .loop import READ_ONLY_TOOLS
         if self._journal and self._journal.origin(task_id)['kind'] == 'proactive':
-            return tuple(spec for spec in self.tools.list_tools() if spec.name in READ_ONLY_TOOLS | {'attention_schedule', 'attention_end'} or int(spec.permission_level) > 0)
+            return tuple(spec for spec in self.tools.list_tools() if spec.name != 'memory_forget' and
+                (spec.name in READ_ONLY_TOOLS | {'attention_schedule', 'attention_end'} or int(spec.permission_level) > 0))
         return tuple(self.tools.list_tools())
 
     def _run(self, request: str, authorization: frozenset[str], high_risk: frozenset[str],
@@ -577,29 +561,34 @@ class AgentCore:
         phase = "observe"
         try:
             if confirmed_plan is None:
-                # 新请求先建立任务并审计输入；显式“记住”会在此处走直接写入分支。
+                # 新请求先建立任务并审计输入；记忆管理仍由模型规划对应工具。
                 self._event("task_status_changed", task_id, {"previous_status": None, "status": TaskStatus.CREATED.value})
                 self._stage(task_id, "Observe")
                 self._event("request_received", task_id, {"request": request,
                                                           "authorized_tools": sorted(authorization),
                                                           "high_risk_authorized_tools": sorted(high_risk)})
                 self._boundary(task_id)
-                if self._memory_runtime is not None:
+                if self._memory_runtime is not None and self._interaction is None:
                     # 检索结果携带 revision 引用，后续计划确认和执行都会验证它们仍有效。
-                    bundle = (self._interaction.retrieve(request) if self._interaction is not None
-                              else self._memory_runtime.retrieve(request))
+                    bundle = self._memory_runtime.retrieve(request)
                     warnings.extend(bundle.warnings)
                     memories = bundle.records
                     self._task_dependencies[task_id] = bundle.revisions
                     if self._journal is not None:
                         self._journal.set_dependencies(task_id, bundle.revisions)
-                else:
+                elif self._interaction is None:
                     memories = tuple(self.memory.search(request, limit=5))
+                else:
+                    memories = ()
                 phase = "planning"
-                # 规划只拿到合格记忆与结构化历史引用；表达风格由后面的回复阶段处理。
+                # 统一准备角色、交流方式和前情检索；角色参与理解与规划，最后再组织表达。
                 if self._interaction is not None:
                     prepared = self._interaction.prepare(task_id, request, bundle)
                     memories = prepared.memory_records
+                    bundle = prepared.retrieval
+                    self._task_dependencies[task_id] = bundle.revisions
+                    if self._journal is not None:
+                        self._journal.set_dependencies(task_id, bundle.revisions)
                     warnings.extend(prepared.warnings)
                 self._transition(task_id, TaskStatus.PLANNING)
                 self._stage(task_id, "Think")
@@ -615,6 +604,22 @@ class AgentCore:
                     plan = self._plan_copy(contextual(request, memories=memories,
                         tools=self._planning_tools(task_id), references=initial_references,
                         llm=self._interaction.calls(task_id, "planning")))
+                    recheck = self._interaction.apply_decision(task_id, plan.context)
+                    prepared = self._interaction.current_turn(task_id)
+                    bundle, memories = prepared.retrieval, prepared.memory_records
+                    self._task_dependencies[task_id] = bundle.revisions
+                    if self._journal is not None:
+                        self._journal.set_dependencies(task_id, bundle.revisions)
+                    warnings.extend(item for item in prepared.warnings if item not in warnings)
+                    if recheck or (not plan.steps and not plan.reply.strip() and plan.action != 'quiet'):
+                        # 补查后的模型才决定行动；首份草稿和工具提议不会执行。
+                        references = _json_copy(list(prepared.planning_items))
+                        if self._journal is not None:
+                            references.append({'kind': 'current_task_amendments', 'items': self._journal.consume_amendments(task_id, 0)})
+                        self._event('model_decision_attempt', task_id, {'round': 0, 'attempt': 2, 'observation_count': 0})
+                        plan = self._plan_copy(contextual(request, memories=memories,
+                            tools=self._planning_tools(task_id), references=references,
+                            llm=self._interaction.calls(task_id, 'planning')))
                 else:
                     if prepared is not None and prepared.planning_items:
                         raise ValueError("This custom planner does not support historical execution context")
@@ -653,16 +658,13 @@ class AgentCore:
                 prepared = self._interaction.current_turn(task_id)
             if plan.action == "quiet" and (prepared is None or prepared.origin != "proactive"):
                 raise ValueError("Only proactive tasks may end quietly")
-            if plan.action == "clarify":
-                self._transition(task_id, TaskStatus.AWAITING_INPUT,
-                    result={"response": plan.reply, "tool_results": [_result_data(item) for item in results]})
-                return AgentResult(task_id, TaskStatus.AWAITING_INPUT, plan.reply, tuple(results))
+            clarifying = plan.action == "clarify"
             current = self.tasks.get(task_id)
             if current is not None and current.status != TaskStatus.RUNNING:
                 self._transition(task_id, TaskStatus.RUNNING)
             phase = "memory"
             # P4：只有统一反馈入口负责学习；工具明细保留在执行账本。
-            if self._feedback is not None:
+            if self._feedback is not None and not clarifying:
                 try:
                     warnings.extend(self._feedback.finish(task_id=task_id, request=request, response=plan.reply,
                         observations=tuple(_result_data(item) for item in results), context=prepared))
@@ -675,7 +677,7 @@ class AgentCore:
                 # 学习可能通过既有受控入口刷新角色或撤下旧记忆引用。
                 prepared = self._interaction.current_turn(task_id)
             learning_receipt: dict[str, Any] = {"status": "not_run", "saved_understandings": []}
-            if self._feedback is not None:
+            if self._feedback is not None and not clarifying:
                 receipt = getattr(self._feedback, 'receipt', None)
                 if callable(receipt):
                     try:
@@ -699,6 +701,8 @@ class AgentCore:
                         style=style, history=tuple(dict(item) for item in prepared.history) if prepared else (),
                         memories=prepared.memories if prepared else (),
                         role_context=json.loads(prepared.role_json) if prepared and prepared.role_json else None,
+                        conversation_summary=prepared.conversation_summary if prepared else None,
+                        response_intent="clarify" if clarifying else "answer",
                         context_warnings=tuple(warnings), learning_receipt=learning_receipt,
                         tool_results=tuple(_result_data(item) for item in results),
                         structured=getattr(client, "supports_json_output", False) is True)
@@ -759,6 +763,11 @@ class AgentCore:
                     response = ''
                 payload = {"response": response, "tool_results": [_result_data(item) for item in results],
                            "warnings": list(warnings), "memory_effects": memory_effects}
+                if clarifying:
+                    # 问题也经过统一表达，但尚未完成的交流不触发反馈学习或完成发布。
+                    self._transition(task_id, TaskStatus.AWAITING_INPUT, result=payload)
+                    return AgentResult(task_id, TaskStatus.AWAITING_INPUT, response, tuple(results),
+                        warnings=tuple(warnings))
                 self._transition(task_id, TaskStatus.COMPLETED, result=payload, completed=True)
                 if self._interaction is not None and prepared is not None:
                     latest = self.tasks.get(task_id)

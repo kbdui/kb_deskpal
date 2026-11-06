@@ -105,6 +105,7 @@ class DesktopHost(QObject):
         if self.pet_chat is None:
             self.pet_chat = PetChatWindow(self.window.chat_coordinator)
             self.pet_chat.expand_requested.connect(self._expand_pet_chat)
+            self.pet_chat.chat_view.directory_requested.connect(self.window.open_conversations)
         self.pet_chat.open_for(self.pet.window if self.pet.window is not None else self.window)
 
     @Slot()
@@ -327,6 +328,11 @@ class DesktopHost(QObject):
             return
         operation = envelope.get("operation")
         data = envelope.get("data", {})
+        if envelope.get('ok'):
+            policy = data.get('notification_policy')
+            if operation in {'notification_policy', 'notification_quiet', 'notification_control'}:
+                policy = data
+            if isinstance(policy, dict): self.notifications.update_policy(policy)
         if operation == "settings" and envelope.get("ok"):
             try:
                 self._timezone = ZoneInfo(data["timezone"])

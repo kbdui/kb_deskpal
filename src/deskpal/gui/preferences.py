@@ -18,8 +18,6 @@ class GuiPreferences(QObject):
         "screen_name": "gui/screen_name",
         "close_to_tray": "gui/close_to_tray",
         "notifications_enabled": "gui/notifications_enabled",
-        "quiet_start": "gui/quiet_start",
-        "quiet_end": "gui/quiet_end",
         "pet_enabled": "pet/enabled",
         "pet_visible": "pet/visible",
         "pet_on_top": "pet/on_top",
@@ -28,6 +26,8 @@ class GuiPreferences(QObject):
         "pet_y": "pet/y",
         "pet_screen": "pet/screen",
         "pet_scale": "pet/scale",
+        "user_display_name": "gui/user_display_name",
+        "character_display_name": "gui/character_display_name",
     }
 
     def __init__(self, settings: QSettings | None = None, parent: QObject | None = None):
@@ -74,6 +74,28 @@ class GuiPreferences(QObject):
         if not isinstance(value, str) or len(value) > 256 or "\x00" in value:
             return False
         self._set("screen_name", value)
+        return True
+
+    @property
+    def user_display_name(self) -> str:
+        value = self._value("user_display_name", "你")
+        return value.strip()[:32] if isinstance(value, str) and value.strip() else "你"
+
+    def set_user_display_name(self, value: str) -> bool:
+        if not isinstance(value, str) or len(value.strip()) > 32 or "\x00" in value:
+            return False
+        self._set("user_display_name", value.strip() or "你")
+        return True
+
+    @property
+    def character_display_name(self) -> str:
+        value = self._value("character_display_name", "Deskpal")
+        return value.strip()[:32] if isinstance(value, str) and value.strip() else "Deskpal"
+
+    def set_character_display_name(self, value: str) -> bool:
+        if not isinstance(value, str) or len(value.strip()) > 32 or "\x00" in value:
+            return False
+        self._set("character_display_name", value.strip() or "Deskpal")
         return True
 
     @property
@@ -191,38 +213,4 @@ class GuiPreferences(QObject):
         self._settings.setValue(self._KEYS["pet_screen"], screen)
         self._settings.sync()
         self.changed.emit("pet_position", position)
-        return True
-
-    @property
-    def quiet_start(self) -> int:
-        return self._hour("quiet_start", 22)
-
-    @property
-    def quiet_end(self) -> int:
-        return self._hour("quiet_end", 8)
-
-    def _hour(self, name: str, default: int) -> int:
-        raw = self._value(name, default)
-        if isinstance(raw, bool):
-            return default
-        if isinstance(raw, int):
-            value = raw
-        elif isinstance(raw, str):
-            try:
-                value = int(raw)
-            except ValueError:
-                return default
-        else:
-            return default
-        return value if 0 <= value <= 23 else default
-
-    def set_quiet_hours(self, start: int, end: int) -> bool:
-        if (isinstance(start, bool) or isinstance(end, bool) or
-                not isinstance(start, int) or not isinstance(end, int) or
-                not 0 <= start <= 23 or not 0 <= end <= 23):
-            return False
-        self._settings.setValue(self._KEYS["quiet_start"], start)
-        self._settings.setValue(self._KEYS["quiet_end"], end)
-        self._settings.sync()
-        self.changed.emit("quiet_hours", (start, end))
         return True

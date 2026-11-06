@@ -1,5 +1,6 @@
 """同一记忆连接上的学习账本；这里不调用模型、不执行工具。"""
 import json
+from hashlib import sha256
 from typing import Any
 from uuid import uuid4
 
@@ -14,6 +15,32 @@ class LearningStore:
         with self.memory._lock:
             row = self.memory._db.execute('SELECT * FROM learning_job WHERE id=?', (identity,)).fetchone()
             return dict(row) if row else None
+
+    @staticmethod
+    def _organized_token(task_id: str) -> str:
+        return sha256(('organized-turn:' + task_id).encode('utf-8')).hexdigest()
+
+    def organized_turns(self, task_ids: set[str]) -> set[str]:
+        if not task_ids:
+            return set()
+        tokens = {self._organized_token(task_id): task_id for task_id in task_ids}
+        slots = ','.join('?' for _ in task_ids)
+        with self.memory._lock:
+            db = self.memory._db
+            covered = {tokens[row[0]] for row in db.execute(
+                f'SELECT token FROM memory_learning_receipts WHERE token IN ({slots})', tuple(tokens))}
+            covered.update(row[0] for row in db.execute(
+                f"SELECT task_id FROM learning_job WHERE id IN ({slots}) AND kind='turn' AND status='completed'",
+                tuple('turn:' + task_id for task_id in task_ids)))
+            return covered
+
+    def mark_organized(self, task_ids: set[str]) -> None:
+        """Write content-free receipts in the same transaction as learning."""
+        with self.memory.batch():
+            stamp = _stamp(self.memory._now())
+            self.memory._db.executemany(
+                'INSERT OR IGNORE INTO memory_learning_receipts VALUES (?, ?)',
+                ((self._organized_token(task_id), stamp) for task_id in task_ids))
 
     def register(self, identity: str, *, kind: str, task_id: str, conversation_id: str,
                  conversation_epoch: int, privacy_epoch: int, role_revision: int,
@@ -65,6 +92,17 @@ class LearningStore:
         with self.memory.batch():
             self.memory._db.execute("INSERT INTO learning_role_outbox VALUES(?,?,'pending')", (job_id, _json(payload)))
 
+    def summary_effect(self, job_id: str, payload: dict[str, Any]) -> None:
+        self.memory._db.execute("INSERT INTO learning_summary_outbox(job_id,payload) VALUES(?,?)", (job_id, _json(payload)))
+
+    def pending_summaries(self) -> list[dict[str, Any]]:
+        with self.memory._lock:
+            return [dict(row) for row in self.memory._db.execute("SELECT o.*,j.conversation_id,j.conversation_epoch,j.privacy_epoch FROM learning_summary_outbox o JOIN learning_job j ON j.id=o.job_id WHERE o.status='pending' ORDER BY j.created_at,j.id LIMIT 100")]
+
+    def summary_status(self, job_id: str, status: str, error: str = '') -> None:
+        with self.memory.batch():
+            self.memory._db.execute("UPDATE learning_summary_outbox SET status=?,error=?,payload=CASE WHEN ?='pending' THEN payload ELSE '{}' END WHERE job_id=?", (status, error, status, job_id))
+
     def pending_effects(self) -> list[dict[str, Any]]:
         with self.memory._lock:
             return [dict(row) for row in self.memory._db.execute("SELECT o.*,j.refs,j.task_id,j.conversation_id,j.conversation_epoch,j.privacy_epoch FROM learning_role_outbox o JOIN learning_job j ON j.id=o.job_id WHERE o.status='pending' ORDER BY j.created_at LIMIT 100")]
@@ -115,18 +153,21 @@ class LearningStore:
             if ids or changed_jobs:
                 self.memory._bump()
             db.execute("UPDATE learning_job SET status='cancelled',error='conversation_cleared' WHERE conversation_id=? AND status IN ('pending','running','failed')", (identity,))
+            db.execute("UPDATE learning_summary_outbox SET status='invalidated',payload='{}',error='conversation_cleared' WHERE status='pending' AND job_id IN (SELECT id FROM learning_job WHERE conversation_id=?)", (identity,))
             # 未投递的旧状态不能在重启后复活。已生效的长期习惯由角色服务保留。
             db.execute("UPDATE learning_role_outbox SET status='invalidated',payload='{}' WHERE status='pending' AND job_id IN (SELECT id FROM learning_job WHERE conversation_id=?)", (identity,))
 
-    def erase_copies(self, ids: set[str], tasks: set[str]) -> None:
-        """调用方已持同库事务；明确遗忘清除相关学习正文与待投递副本。"""
+    def erase_copies(self, ids: set[str]) -> None:
+        """仅清除指定记忆的学习正文；同轮其它理解及角色状态保持独立。"""
         db = self.memory._db
-        for job in db.execute('SELECT id,refs,task_id FROM learning_job').fetchall():
-            if job['task_id'] in tasks or any(ref['kind'] == 'memory' and ref['id'] in ids for ref in json.loads(job['refs'])):
-                tasks.add(job['task_id'])
-                db.execute("UPDATE learning_record SET understanding='',reason='',uncertainty='' WHERE job_id=?", (job['id'],))
-                db.execute("UPDATE learning_role_outbox SET status='invalidated',payload='{}' WHERE job_id=?", (job['id'],))
-                db.execute("UPDATE learning_job SET refs='[]',status='cancelled',error='source_forgotten' WHERE id=?", (job['id'],))
         for identity in ids:
             db.execute("UPDATE learning_record SET understanding='',reason='',uncertainty='' WHERE memory_id=?", (identity,))
             db.execute('DELETE FROM learning_link WHERE memory_id=?', (identity,))
+            db.execute("UPDATE learning_link SET available=0 WHERE kind='memory' AND object_id=?", (identity,))
+        for row in db.execute("SELECT o.job_id,j.refs FROM learning_summary_outbox o JOIN learning_job j ON j.id=o.job_id WHERE o.status='pending'").fetchall():
+            if any(ref['kind'] == 'memory' and ref['id'] in ids for ref in json.loads(row['refs'])):
+                db.execute("UPDATE learning_summary_outbox SET status='invalidated',payload='{}',error='memory_forgotten' WHERE job_id=?", (row['job_id'],))
+        # 未完成的旧学习不得重新引入已删除来源，但已完成记录不作级联擦除。
+        for job in db.execute("SELECT id,refs FROM learning_job WHERE status IN ('pending','running','failed')").fetchall():
+            if any(ref['kind'] == 'memory' and ref['id'] in ids for ref in json.loads(job['refs'])):
+                db.execute("UPDATE learning_job SET status='cancelled',error='source_forgotten' WHERE id=?", (job['id'],))

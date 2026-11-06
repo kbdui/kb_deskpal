@@ -79,7 +79,7 @@ def test_memory_refresh_coalesces_and_discards_obsolete_filter(qtbot):
         page.filter.setCurrentIndex(page.filter.findData(value))
         page.refresh()
     assert len(bridge.requests("memories")) == 1
-    assert len(page.channel.pending) == 2
+    assert len(page.channel.pending) == 1
     assert "正在读取" in page.page.status_label.text()
     bridge.answer(qtbot, page, first, {"items": [memory("obsolete body")]})
     latest = bridge.requests("memories")[-1]

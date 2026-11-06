@@ -6,6 +6,7 @@ import json
 from collections import deque
 from collections.abc import Mapping, Sequence
 from datetime import datetime
+from zoneinfo import ZoneInfo
 from typing import Callable, Protocol, TypeAlias
 
 from PySide6.QtCore import QObject, QSettings, Signal
@@ -46,6 +47,7 @@ class NotificationController(QObject):
     ) -> None:
         super().__init__(parent)
         self._preferences = preferences
+        self._quiet_policy: dict[str, object] | None = None
         self._settings = settings if settings is not None else QSettings()
         if show_message is None:
             self._show_message = None
@@ -207,28 +209,34 @@ class NotificationController(QObject):
             self._after_sequence = next_sequence
         self.tick()
 
+    def update_policy(self, policy: dict) -> None:
+        quiet = policy.get('quiet')
+        if isinstance(quiet, dict):
+            self._quiet_policy = dict(quiet)
+
     def _is_quiet(self, now: datetime) -> bool:
-        # The default clock is system-local aware time; an injected aware clock
-        # retains its timezone so DST boundaries remain testable.
-        local = now if now.tzinfo is not None else now.astimezone()
-        hour = local.hour
-        start = self._preferences.quiet_start
-        end = self._preferences.quiet_end
-        if start == end:
-            return False
-        if start < end:
-            return start <= hour < end
-        return hour >= start or hour < end
+        if self._quiet_policy is None:
+            return True  # 读取后端当前档案的统一配置后才投递。
+        local = now.astimezone(ZoneInfo(str(self._quiet_policy.get('timezone', 'UTC'))))
+        minute = local.hour * 60 + local.minute
+        start, end = int(self._quiet_policy['quiet_start']), int(self._quiet_policy['quiet_end'])
+        return start != end and (start <= minute < end if start < end else minute >= start or minute < end)
+
+    def _eligible(self, identity: Identity) -> bool:
+        if not self._is_quiet(self._clock()):
+            return True
+        return bool(identity[0] == 'reminder' and self._quiet_policy and self._quiet_policy.get('reminder_bypass'))
 
     def tick(self) -> None:
         """Request a current-state check; never display stale queued state directly."""
-        if not self._enabled or not self._pending or self._is_quiet(self._clock()):
+        if not self._enabled or not self._pending:
             return
         if self._validation_batch is not None:
             return
         self._validation_serial += 1
         request_id = self._validation_serial
-        batch = tuple(self._pending)
+        batch = tuple(identity for identity in self._pending if self._eligible(identity))
+        if not batch: return
         self._validation_batch = (request_id, batch)
         candidates = tuple((kind, entity_id) for kind, entity_id, _revision in batch)
         self.revalidation_requested.emit({"request_id": request_id, "candidates": candidates})
@@ -238,13 +246,9 @@ class NotificationController(QObject):
         pending_batch = self._validation_batch
         if pending_batch is None or (request_id is not None and request_id != pending_batch[0]):
             return
-        if self._is_quiet(self._clock()):
-            # The response crossed into quiet time. Retain all candidates and
-            # require a fresh backend check when quiet hours end.
-            self._validation_batch = None
-            return
         self._validation_batch = None
-        batch = pending_batch[1]
+        # 配置可能在异步校验期间变动；被免打扰挡住的项继续留在队列。
+        batch = tuple(identity for identity in pending_batch[1] if self._eligible(identity))
         batch_set = set(batch)
         valid_set = {identity for item in valid_items if (identity := self._identity(item)) in batch_set}
         self._pending = deque((identity for identity in self._pending if identity not in batch_set),

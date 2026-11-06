@@ -42,12 +42,9 @@ def test_preferences_validate_and_store_only_gui_values(qtbot, tmp_path):
 
     assert prefs.close_to_tray is False
     assert prefs.notifications_enabled is False
-    assert (prefs.quiet_start, prefs.quiet_end) == (22, 8)
-    assert not prefs.set_quiet_hours(24, 8)
     assert not prefs.set_notifications_enabled("yes")
-    assert prefs.set_quiet_hours(21, 7)
     assert prefs.set_notifications_enabled(True)
-    assert settings.value("gui/quiet_start") == 21
+    assert not settings.contains("gui/quiet_start")
     assert settings.value("gui/notifications_enabled") is True
     assert events[-1] == ("notifications_enabled", True)
 
@@ -56,11 +53,12 @@ def test_quiet_release_revalidates_and_discards_expired_revision(qtbot, tmp_path
     settings = temporary_settings(tmp_path)
     prefs = GuiPreferences(temporary_settings(tmp_path, "prefs.ini"))
     prefs.set_notifications_enabled(True)
-    prefs.set_quiet_hours(22, 8)
     clock = MutableClock(datetime(2026, 10, 15, 23, 30, tzinfo=ZoneInfo("Asia/Shanghai")))
     shown = []
     requested = []
     controller = NotificationController(prefs, settings, shown.append, clock)
+    controller.update_policy({"quiet": {"quiet_start": 22 * 60, "quiet_end": 8 * 60,
+        "timezone": str(clock.value.tzinfo), "reminder_bypass": False}})
     controller.revalidation_requested.connect(requested.append)
 
     # First pass establishes the baseline and never announces existing state.
@@ -129,12 +127,13 @@ def test_cursor_advances_after_final_page_and_survives_ledger_eviction(qtbot, tm
 def test_quiet_policy_crosses_day_and_dst_then_revalidates(qtbot, tmp_path):
     prefs = GuiPreferences(temporary_settings(tmp_path, "prefs.ini"))
     prefs.set_notifications_enabled(True)
-    prefs.set_quiet_hours(22, 8)
     settings = temporary_settings(tmp_path, "notifications.ini")
     clock = MutableClock(datetime(2026, 3, 8, 1, 30, tzinfo=ZoneInfo("America/New_York")))
     requested = []
     shown = []
     controller = NotificationController(prefs, settings, shown.append, clock)
+    controller.update_policy({"quiet": {"quiet_start": 22 * 60, "quiet_end": 8 * 60,
+        "timezone": str(clock.value.tzinfo), "reminder_bypass": False}})
     controller.revalidation_requested.connect(requested.append)
     controller.ingest([feed_item()], next_sequence=1, baseline=True)
     controller.ingest([feed_item(revision=2)], next_sequence=2)
@@ -149,11 +148,12 @@ def test_quiet_policy_crosses_day_and_dst_then_revalidates(qtbot, tmp_path):
 def test_revalidation_reply_crossing_quiet_start_is_retained_and_rechecked(qtbot, tmp_path):
     prefs = GuiPreferences(temporary_settings(tmp_path, "prefs.ini"))
     prefs.set_notifications_enabled(True)
-    prefs.set_quiet_hours(22, 8)
     clock = MutableClock(datetime(2026, 10, 16, 21, 59, tzinfo=ZoneInfo("Asia/Shanghai")))
     requested = []
     shown = []
     controller = NotificationController(prefs, temporary_settings(tmp_path), shown.append, clock)
+    controller.update_policy({"quiet": {"quiet_start": 22 * 60, "quiet_end": 8 * 60,
+        "timezone": str(clock.value.tzinfo), "reminder_bypass": False}})
     controller.revalidation_requested.connect(requested.append)
     controller.ingest([feed_item()], next_sequence=1, baseline=True)
     controller.ingest([feed_item(revision=2)], next_sequence=2)
@@ -179,6 +179,8 @@ def test_late_revalidation_cannot_restore_cleared_pending(qtbot, tmp_path):
     shown = []
     requested = []
     controller = NotificationController(prefs, temporary_settings(tmp_path), shown.append, clock)
+    controller.update_policy({"quiet": {"quiet_start": 22 * 60, "quiet_end": 8 * 60,
+        "timezone": str(clock.value.tzinfo), "reminder_bypass": False}})
     controller.revalidation_requested.connect(requested.append)
     controller.ingest([feed_item()], next_sequence=1, baseline=True)
     controller.ingest([feed_item(revision=2)], next_sequence=2)
@@ -196,6 +198,8 @@ def test_disable_reenable_invalidates_inflight_validation_and_rebaselines(qtbot,
     requested = []
     shown = []
     controller = NotificationController(prefs, temporary_settings(tmp_path), shown.append, clock)
+    controller.update_policy({"quiet": {"quiet_start": 22 * 60, "quiet_end": 8 * 60,
+        "timezone": str(clock.value.tzinfo), "reminder_bypass": False}})
     controller.revalidation_requested.connect(requested.append)
     controller.ingest([feed_item()], next_sequence=1, baseline=True)
     controller.ingest([feed_item(revision=2)], next_sequence=2)
@@ -256,3 +260,21 @@ def test_tray_availability_is_rechecked_when_window_closes(qtbot, monkeypatch, t
     tray._tray = object()
     assert tray.should_hide_on_close() is True
     assert tray.should_hide_on_close() is False
+
+
+def test_quiet_bypass_revalidates_only_reminders(qtbot, tmp_path):
+    prefs = GuiPreferences(temporary_settings(tmp_path, "prefs.ini"))
+    prefs.set_notifications_enabled(True)
+    clock = MutableClock(datetime(2026, 10, 16, 23, tzinfo=ZoneInfo("UTC")))
+    shown, requested = [], []
+    controller = NotificationController(prefs, temporary_settings(tmp_path), shown.append, clock)
+    controller.update_policy({"quiet": {"quiet_start": 22 * 60, "quiet_end": 8 * 60,
+        "timezone": "UTC", "reminder_bypass": True}})
+    controller.revalidation_requested.connect(requested.append)
+    controller.ingest([], next_sequence=1, baseline=True)
+    reminder = feed_item(kind="reminder", entity_id="timer", status="due")
+    controller.ingest([feed_item(), reminder], next_sequence=2)
+    assert requested[-1]["candidates"] == (("reminder", "timer"),)
+    complete_revalidation(controller, requested, [reminder])
+    assert len(shown) == 1
+    assert controller.pending_candidates == (("task", "t-1"),)

@@ -1,45 +1,45 @@
 """用统一模型解释交流要求；不使用关键词判断范围或情绪。"""
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
+from dataclasses import dataclass
 from typing import Any
 
-from deskpal.llm.models import ChatMessage, LLMResponse
-from deskpal.llm.ports import LLMProvider
-from .repository import decode, encode
 
-INSTRUCTION = """[CONTEXT_UNDERSTANDING]
-Interpret the CURRENT message in its conversation and role context. Return JSON only:
-{"entries":[{"layer":"user_understanding|interaction_approach", "content":"natural language",
-"reason":"brief basis, not private reasoning", "nature":"explicit|inferred",
-"scope":"turn|conversation|day|persistent", "expires_at":null, "replaces":[]}]}
-At most 8 entries. Use [] when nothing changes. User understanding is what the user reports or
-tentatively needs, NOT the character's emotion. Interaction approach is how to communicate now.
-Use natural language; do not reduce personality to a fixed set of axes or supportive/focused modes.
-Distinguish quotation, hypothetical, third-party descriptions and genuine current requests.
-Turn means this reply only; conversation is this conversation only; day is an EXPLICIT profile-wide
-today request; persistent requires EXPLICIT lasting intent. Never promote a tentative inference to
-persistent. Scope follows meaning, never merely the wording of the provided examples.
-For an explicit shorter interval, expires_at is a timezone-aware ISO datetime; otherwise null.
-Day ends at the supplied timezone's next midnight. Unknown needs may remain tentative.
-To supersede/clear an existing visible requirement, put its host-provided id in replaces; content
-may be empty only for a clear. Never invent IDs. Preserve unrelated requirements.
-Existing role/habits and histories are context, NOT new requests or permissions. Old requests must
-not execute again. Do not call tools, edit identity, learn habits, manage reminders or claim success.
-Only interpret communication/user-state changes here; other actions are planned by AgentCore.
-"""
+@dataclass(frozen=True)
+class Understanding:
+    """交流要求与临时检索线索；线索不写入人格或长期记忆。"""
+
+    entries: tuple[dict[str, Any], ...]
+    retrieval_query: str = ""
+    retrieval_refs: tuple[Mapping[str, Any], ...] = ()
 
 
-def understand(provider: LLMProvider, *, request: str, role: Mapping[str, Any],
-               history: Sequence[Mapping[str, Any]], now: str, timezone: str) -> tuple[dict[str, Any], ...]:
-    data = encode({"request": request, "role_context": dict(role), "history": list(history),
-                   "now": now, "timezone": timezone})
-    if len(data.encode("utf-8")) > 65536:
-        raise ValueError("context_understanding_input_limit")
-    response = provider.chat((ChatMessage("system", INSTRUCTION), ChatMessage("user", data)), tools=())
-    if not isinstance(response, LLMResponse) or response.tool_calls or len(response.content.encode("utf-8")) > 16384:
-        raise ValueError("context_understanding_response_invalid")
-    body = decode(response.content)
+def parse_understanding(body: Mapping[str, Any], *, sources: Mapping[str, Mapping[str, Any]],
+                        aliases: Mapping[str, str] | None = None) -> Understanding:
+    """校验统一规划的上下文决定；编号仅能映射本轮已提供对象。"""
     entries = body.get("entries")
-    if set(body) != {"entries"} or not isinstance(entries, list) or len(entries) > 8 or any(not isinstance(row, dict) for row in entries):
+    if (not {"entries"} <= set(body) or set(body) - {"entries", "retrieval"}
+            or not isinstance(entries, list) or len(entries) > 8 or any(not isinstance(row, dict) for row in entries)):
         raise ValueError("context_understanding_response_invalid")
-    return tuple(entries)
+    retrieval = body.get("retrieval")
+    for row in entries:
+        replaces = row.get('replaces', [])
+        if not isinstance(replaces, list) or any(not isinstance(key, str) for key in replaces):
+            raise ValueError('context_understanding_response_invalid')
+    entries = [dict(row, expires_at=row.get('expires_at'), replaces=[(aliases or {}).get(key, key)
+        for key in row.get('replaces', [])]) for row in entries]
+    if retrieval is None:
+        return Understanding(tuple(entries))
+    if (not isinstance(retrieval, dict) or set(retrieval) != {"query", "sources"}
+            or not isinstance(retrieval["query"], str) or not retrieval["query"].strip()
+            or len(retrieval["query"].encode("utf-8")) > 1024 or "\x00" in retrieval["query"]
+            or not isinstance(retrieval["sources"], list) or not 1 <= len(retrieval["sources"]) <= 8
+            or any(not isinstance(key, str) or key not in sources for key in retrieval["sources"])):
+        raise ValueError("context_retrieval_hint_invalid")
+    refs: list[Mapping[str, Any]] = []
+    for key in retrieval["sources"]:
+        item = sources[key]
+        refs.extend(item.get("refs", ()))
+        if item.get("source_ref"):
+            refs.append(item["source_ref"])
+    return Understanding(tuple(entries), retrieval["query"].strip(), tuple(refs))

@@ -106,7 +106,9 @@ class ApplicationService:
             self.tools.register(tool)
         self.task_control = TaskControl(store)
         core._task_control = self.task_control
-        self.notification_policy = NotificationPolicy(store)
+        self.notification_policy = NotificationPolicy(store, quiet_start=config.proactive.quiet_start,
+            quiet_end=config.proactive.quiet_end, zone=config.proactive.timezone)
+        self.rules.quiet_check = self.notification_policy.is_quiet
         self.proactive = ProactiveCoordinator(self, self.notification_policy)
         core._proactive_publication = self.proactive.can_publish
         core._publication_control = lambda: self.notification_policy.publication
@@ -247,14 +249,6 @@ class ApplicationService:
                        limit: int = 50, status: str = "all") -> dict[str, Any]:
         self._ready()
         result = self.scheduling.page_items(source=source, offset=offset, limit=limit, status=status)
-        with self.store.read_connection() as connection:
-            self.store.check_privacy(connection)
-            for item in result["items"]:
-                row = connection.execute("SELECT t.scrubbed FROM desktop_resource_link r JOIN task t ON t.id=r.task_id WHERE r.source=? AND r.source_id=? AND r.store_id=? AND r.generation=?",
-                    (item["source"], item["source_id"], result["store_id"], result["generation"])).fetchone()
-                if row is not None and row[0]:
-                    item.update(title="已清理来源的日程" if item["source"] == "calendar" else "已清理来源的计时器",
-                        label="", redacted=True)
         return {"schema_version": 1, **result}
 
     def command_status(self, command_id: str) -> dict[str, Any]:
@@ -514,6 +508,22 @@ class ApplicationService:
         result["privacy_epoch"] = int(self._humanization.privacy()["epoch"])
         return result
 
+    def forget_during_task(self, memory_id: str, expected_revision: int, task_id: str) -> dict[str, Any]:
+        """唯一执行线程内的已授权遗忘；本轮移除旧依赖后继续组织回复。"""
+        turn = self._interaction.current_turn(task_id)
+        with self._privacy.publication(turn.privacy_epoch):
+            receipt = self._memory_runtime.forget(memory_id, expected_revision)
+            self._interaction.settle_learning(task_id, {memory_id}, drop_summary=True)
+            self.core._task_dependencies[task_id] = tuple(ref for ref in
+                self.core._task_dependencies.get(task_id, ()) if ref[0] != memory_id)
+            affected = self.journal.scrub_memory(memory_id, keep_task=task_id)
+            self._conversation_repository.invalidate_memory_summaries(memory_id)
+        self.core.revoke_pending(affected)
+        self._dispatcher.clear_cached(affected)
+        return dict(memory_id=memory_id, revision=receipt.revision, status='Completed',
+            cleared=['指定记忆及其旧版本、检索索引'],
+            retained=['聊天记录', '其他记忆与人格', '执行记录与日程提醒'])
+
     def request_forget(self, memory_id: str, expected_revision: int,
                        command_id: str) -> dict[str, Any]:
         """Accept durable use blocking even while a provider/tool is waiting."""
@@ -632,6 +642,8 @@ class ApplicationService:
             snapshot = self.journal.get_plan(task_id)
             if snapshot is None:
                 raise WorkflowBlocked("No intact persisted plan")
+            if len(snapshot.plan.steps) > self.core.max_tool_steps:
+                raise WorkflowBlocked("任务计划超过步骤上限；请仅提出尚未完成的要求。")
             self._verify_snapshot(snapshot)
             if expected != snapshot.hash:
                 raise WorkflowBlocked("Review the exact persisted plan and provide its plan hash")
@@ -798,47 +810,14 @@ class ApplicationService:
             try:
                 result = self.core.memory_command("forget", memory_id=job.memory_id,
                                                   expected_revision=job.expected_revision)
+                # 只撤销仍依赖已遗忘记忆的工作上下文，不擦除对话、执行记录或同轮学习。
                 affected = set(self.journal.scrub_memory(job.memory_id))
-                # A shared source may erase several IDs. Only actual deletion
-                # tombstones authorize erasing history; expiry or correction
-                # invalidates execution without erasing unrelated task copies.
-                deleted_ids = {item.id for item in self._memory_runtime.list_items(
-                    status=MemoryStatus.DELETED, include_history=True)}
-                scrubbed_ids = {job.memory_id}
-                for task in self.tasks.list_tasks():
-                    for ref in self.journal.get_dependencies(task.id):
-                        if ref.kind == "memory" and ref.object_id in deleted_ids and ref.object_id not in scrubbed_ids:
-                            affected.update(self.journal.scrub_memory(ref.object_id))
-                            scrubbed_ids.add(ref.object_id)
+                self._conversation_repository.invalidate_memory_summaries(job.memory_id)
                 if isinstance(result, DeletionReceipt):
-                    affected.update(result.affected_task_ids)
-                    # Optional candidates/episodes produced by a now-tainted
-                    # request are derived copies too, even if they have a new
-                    # MemorySource identity. Cleanup runs only after the worker
-                    # leaves, so a late evaluator cannot recreate them afterward.
-                    while True:
-                        derived_items = tuple(item for item in self._memory_runtime.list_items()
-                            if item.source.task_id in affected and item.status != MemoryStatus.DELETED)
-                        if not derived_items:
-                            break
-                        for item in derived_items:
-                            # Another item sharing this source may already have
-                            # erased it; re-read only its current revision.
-                            current_item = self._memory_current(item.id)
-                            if current_item is None or current_item.status == MemoryStatus.DELETED:
-                                continue
-                            derived = self._memory_runtime.forget(current_item.id, current_item.revision)
-                            affected.update(derived.affected_task_ids)
-                            affected.update(self.journal.scrub_memory(current_item.id))
-                    forget_preferences = getattr(self.core.companion_runtime, "forget_sources", None)
-                    if callable(forget_preferences):
-                        forget_preferences(affected)
-                    for task_id in result.affected_task_ids:
-                        if self.tasks.get(task_id) is not None:
-                            self.tasks.scrub(task_id)
                     result = replace(result, affected_task_ids=tuple(sorted(affected)),
-                        cleared=result.cleared + ("workflow requests, plans, results and pending audit copies",),
-                        retained=result.retained + ("independently created goals and calendar",))
+                        cleared=("selected memory, its revisions and retrieval index",),
+                        retained=("chat history, execution records, other memories and personality",
+                                  "goals, calendar, historical logs and backups"))
                     if target == job.memory_id:
                         receipt = result
                 self.core.revoke_pending(affected)
@@ -928,6 +907,7 @@ class ApplicationService:
                 "pending_deletions": len(self.journal.pending_deletions()),
                 "pending_audit_page": len(self.store.pending_audit()), "proposal_error": self._rule_error,
                 "reminders": self._reminders.diagnostics(),
+                "model_calls": self._humanization.call_diagnostics(),
                 "dispatcher": self._dispatcher.diagnostics()}
 
     def begin_shutdown(self) -> None:

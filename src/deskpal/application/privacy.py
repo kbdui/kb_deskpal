@@ -66,5 +66,6 @@ class PrivacyCoordinator:
                          (command_id, self._digest(memory_id, revision), job_id, memory_id, revision, epoch))
             return {"accepted": True, "status": "AcceptedPending", "job_id": job_id,
                     "memory_id": memory_id, "privacy_epoch": epoch, "blocked": True,
-                    "retained": ["already admitted external requests and started tool effects",
+                    "retained": ["chat history, other memories, personality, execution records and schedules",
+                                 "already admitted external requests and started tool effects",
                                  "historical logs, backups, exports and external copies"]}

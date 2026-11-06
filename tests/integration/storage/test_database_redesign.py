@@ -80,7 +80,7 @@ def test_workflow_upgrade_preserves_bytes_links_and_pending_work(tmp_path):
     store = WorkflowStore(path)
     try:
         with store.read_connection() as db:
-            assert db.execute('SELECT version FROM schema_version').fetchone()[0] == 5
+            assert db.execute('SELECT version FROM schema_version').fetchone()[0] == 7
             for name, rows in before.items():
                 assert [tuple(row) for row in db.execute(f'SELECT * FROM {name}')] == rows
             assert tuple(db.execute('SELECT hash,canonical_json FROM immutableplan').fetchone()) == ('a' * 64, '{ "steps" : [] }')
@@ -252,7 +252,7 @@ def test_old_archive_inspection_is_readonly_and_restored_stores_upgrade(tmp_path
     old_role(source / 'companion.sqlite3', expected_role)
     SQLiteMemoryRepository(source / 'memory.sqlite3').close()
     with sqlite3.connect(source / 'memory.sqlite3') as db:
-        for table in ('learning_role_outbox', 'learning_record', 'learning_link', 'learning_job'):
+        for table in ('learning_summary_outbox', 'learning_role_outbox', 'learning_record', 'learning_link', 'learning_job'):
             db.execute(f'DROP TABLE {table}')
         db.execute('PRAGMA user_version=2')
     SchedulingService(source / 'scheduling.sqlite3').close()
@@ -284,3 +284,49 @@ def test_old_archive_inspection_is_readonly_and_restored_stores_upgrade(tmp_path
     with sqlite3.connect(source / 'companion.sqlite3') as db:
         assert db.execute('PRAGMA user_version').fetchone()[0] == 3
     assert archive.read_bytes() == original
+
+
+def test_schema_six_migrates_existing_summary_sources_and_keeps_summary(tmp_path):
+    import json
+    from deskpal.workflow.schema_v4 import migrate_schema_3
+    from deskpal.workflow.schema_v5 import migrate_schema_4
+    from deskpal.workflow.schema_v6 import migrate_schema_5
+
+    path = tmp_path / 'workflow.sqlite3'
+    old_workflow(path, populated=False)
+    summary = json.dumps(dict(progress=['existing summary'], decisions=[], open_questions=[]))
+    refs = json.dumps([dict(kind='dialogue_turn', id='older:user', revision=1, use_policy='local_only')])
+    with sqlite3.connect(path) as db:
+        db.row_factory = sqlite3.Row
+        migrate_schema_3(db)
+        migrate_schema_4(db)
+        migrate_schema_5(db)
+        conversation = db.execute('SELECT id FROM conversation').fetchone()[0]
+        db.execute('INSERT INTO conversation_context_summary VALUES(?,0,4,?,?,?)',
+                   (conversation, summary, refs, 'local_only'))
+
+    store = WorkflowStore(path)
+    try:
+        with store.read_connection() as db:
+            assert db.execute('SELECT version FROM schema_version').fetchone()[0] == 7
+            saved = db.execute('SELECT revision,content,refs,use_policy FROM conversation_context_summary').fetchone()
+            assert tuple(saved) == (4, summary, '[]', 'local_only')
+            source = db.execute('SELECT * FROM conversation_summary_source').fetchone()
+            assert tuple(source) == (conversation, 0, 'dialogue_turn', 'older:user', 1, 'local_only')
+    finally:
+        store.close()
+
+
+def test_schema_three_memory_upgrade_preserves_existing_items(tmp_path):
+    from deskpal.memory.contracts import MemoryDraft, MemorySource
+    path = tmp_path / 'memory.sqlite3'
+    with SQLiteMemoryRepository(path) as repo:
+        entry = repo.ingest(MemorySource('原有记忆'), MemoryDraft('原有记忆', '原有记忆'), accepted=True)
+    with sqlite3.connect(path) as db:
+        db.execute('DROP TABLE learning_summary_outbox')
+        db.execute('PRAGMA user_version=3')
+    with SQLiteMemoryRepository(path) as repo:
+        assert repo.get(entry.id) == entry
+    with sqlite3.connect(path) as db:
+        assert db.execute('PRAGMA user_version').fetchone()[0] == 4
+        assert db.execute('SELECT COUNT(*) FROM learning_summary_outbox').fetchone()[0] == 0

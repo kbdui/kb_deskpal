@@ -426,10 +426,8 @@ class ExecutionJournal:
             raise ValueError("Deletion requires memory ID and positive revision")
         with self.store.transaction() as conn:
             conn.execute("INSERT OR IGNORE INTO memory_block VALUES(?)", (memory_id,))
-            conn.execute("UPDATE attention SET goal='',basis='',refs='[]',status='cancelled' WHERE id IN (SELECT a.id FROM attention a,json_each(a.refs) r WHERE json_extract(r.value,'$.kind')='memory' AND json_extract(r.value,'$.id')=?)", (memory_id,))
             affected = conn.execute("SELECT id,status FROM task WHERE id IN (SELECT task_id FROM dependency WHERE kind='memory' AND object_id=? UNION SELECT task_id FROM context_dependency WHERE kind='memory' AND object_id=?)", (memory_id, memory_id)).fetchall()
             for task in affected:
-                conn.execute("UPDATE audit_outbox SET data='{}' WHERE task_id=?", (task["id"],))
                 if task["status"] in {TaskStatus.CREATED.value, TaskStatus.WAITING.value, TaskStatus.NEEDS_REVIEW.value}:
                     conn.execute("UPDATE task SET status=?,revision=revision+1 WHERE id=?", (TaskStatus.NEEDS_REVIEW.value, task["id"]))
                 conn.execute("UPDATE submission SET status='Blocked' WHERE task_id=? AND status IN ('Queued','Claimed')", (task["id"],))
@@ -445,25 +443,20 @@ class ExecutionJournal:
         with self.store.transaction() as conn:
             return tuple(DeletionJob(*row) for row in conn.execute("SELECT id,memory_id,expected_revision,status FROM deletionjob WHERE status!='Completed' ORDER BY rowid"))
 
-    def scrub_memory(self, memory_id: str) -> tuple[str, ...]:
+    def scrub_memory(self, memory_id: str, *, keep_task: str | None = None) -> tuple[str, ...]:
+        """失效运行上下文；历史消息和实际执行结果不属于记忆删除范围。"""
         with self.store.transaction() as conn:
             conn.execute("INSERT OR IGNORE INTO memory_block VALUES(?)", (memory_id,))
-            conn.execute("UPDATE attention SET goal='',basis='',refs='[]',status='cancelled' WHERE id IN (SELECT a.id FROM attention a,json_each(a.refs) r WHERE json_extract(r.value,'$.kind')='memory' AND json_extract(r.value,'$.id')=?)", (memory_id,))
-            # Derived replies keep conservative refs; follow dialogue-turn links
-            # too, so missing an inherited direct memory ref cannot revive text.
-            ids = tuple(row[0] for row in conn.execute("""WITH RECURSIVE affected(task_id) AS (
-                SELECT task_id FROM dependency WHERE kind='memory' AND object_id=?
-                UNION SELECT task_id FROM context_dependency WHERE kind='memory' AND object_id=?
-                UNION SELECT task_id FROM context_archive_source WHERE kind='memory' AND object_id=?
-                UNION SELECT i.task_id FROM conversation_item_source s JOIN conversation_item i ON i.id=s.item_id WHERE s.source_kind='memory' AND s.source_id=? AND i.task_id IS NOT NULL
-                UNION SELECT d.task_id FROM context_dependency d JOIN affected a
-                    ON d.kind='dialogue_turn' AND d.object_id IN (a.task_id,a.task_id||':user',a.task_id||':assistant')
-                UNION SELECT d.task_id FROM dependency d JOIN affected a
-                    ON d.kind='dialogue_turn' AND d.object_id IN (a.task_id,a.task_id||':user',a.task_id||':assistant')
-                UNION SELECT i.task_id FROM conversation_item_source s JOIN conversation_item i ON i.id=s.item_id JOIN affected a ON s.source_kind='dialogue_turn' AND s.source_id IN (a.task_id,a.task_id||':user',a.task_id||':assistant') WHERE i.task_id IS NOT NULL
-                ) SELECT task_id FROM affected ORDER BY task_id""", (memory_id, memory_id, memory_id, memory_id)))
+            ids = tuple(row[0] for row in conn.execute("""SELECT id FROM task
+                WHERE status NOT IN ('Completed','Failed','Cancelled') AND (? IS NULL OR id!=?) AND id IN (
+                    SELECT task_id FROM dependency WHERE kind='memory' AND object_id=?
+                    UNION SELECT task_id FROM context_dependency WHERE kind='memory' AND object_id=?)""",
+                (keep_task, keep_task, memory_id, memory_id)))
             for task_id in ids:
-                self.tasks.scrub(task_id)
+                self.tasks.request_cancel(task_id)
+                conn.execute("DELETE FROM context_snapshot WHERE task_id=?", (task_id,))
+                conn.execute("DELETE FROM context_history WHERE task_id=?", (task_id,))
+                conn.execute("UPDATE submission SET status='Blocked' WHERE task_id=? AND status IN ('Queued','Claimed')", (task_id,))
             return ids
 
     def complete_deletion(self, job_id: str) -> None:

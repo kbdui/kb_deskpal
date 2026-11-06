@@ -2,11 +2,12 @@
 from dataclasses import dataclass
 from collections import OrderedDict
 from collections.abc import Callable
+from pathlib import Path
 from time import monotonic
 from typing import Any
 from uuid import uuid4
-from PySide6.QtCore import QObject, QTimer, Qt, Signal
-from PySide6.QtGui import QFont, QHideEvent, QShowEvent
+from PySide6.QtCore import QEvent, QObject, QTimer, Qt, Signal
+from PySide6.QtGui import QColor, QFont, QHideEvent, QPainter, QPen, QPixmap, QShowEvent
 from PySide6.QtWidgets import (QFrame, QHBoxLayout, QLabel, QSizePolicy, QVBoxLayout, QWidget)
 from .components import (ChoiceBox as QComboBox, PushButton as QPushButton)
 from .channel import Channel
@@ -24,6 +25,33 @@ class Draft:
     text: str = ""
     revision: int = 0
 
+
+class ScrollToBottomButton(QPushButton):
+    """Translucent circular overlay with a crisp, theme-independent arrow."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setStyleSheet("background:transparent; border:none; padding:0;")
+
+    def paintEvent(self, event: Any) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        bounds = self.rect().adjusted(2, 2, -2, -2)
+        painter.setPen(QPen(QColor(224, 226, 230, 230), 1.5))
+        painter.setBrush(QColor(255, 255, 255, 224))
+        painter.drawEllipse(bounds)
+        center_x = self.width() / 2
+        center_y = self.height() / 2
+        scale = min(self.width(), self.height())
+        painter.setPen(QPen(QColor(25, 27, 30), max(1.6, scale / 24), Qt.PenStyle.SolidLine,
+                            Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+        painter.drawLine(round(center_x), round(center_y - scale * .20), round(center_x), round(center_y + scale * .17))
+        painter.drawLine(round(center_x - scale * .15), round(center_y + scale * .04), round(center_x), round(center_y + scale * .19))
+        painter.drawLine(round(center_x + scale * .15), round(center_y + scale * .04), round(center_x), round(center_y + scale * .19))
+
 class ChatCoordinator(QObject):
     conversations_changed = Signal()
     timeline_changed = Signal(str)
@@ -36,9 +64,10 @@ class ChatCoordinator(QObject):
     expand_requested = Signal(str, str)
     appearance_changed = Signal()
 
-    def __init__(self, bridge: Any, parent: QObject | None = None) -> None:
+    def __init__(self, bridge: Any, parent: QObject | None = None, *, preferences: Any = None) -> None:
         super().__init__(parent)
         self.bridge = bridge
+        self.preferences = preferences
         self.channel = Channel(bridge, self)
         self.channel.notice.connect(self.notice)
         self.appearance = AppearanceController(bridge, self)
@@ -280,6 +309,7 @@ class ChatCoordinator(QObject):
             if draft.revision == item["draft_revision"] and draft.text == item["request"]:
                 self.edit_draft(identity, "")
             self.submissions.pop(command, None); self.load(identity)
+            self.notice.emit("")
             if data.get("task_id"):
                 self.review(str(data["task_id"]))
         self.timeline_changed.emit(identity)
@@ -342,6 +372,11 @@ class ChatCoordinator(QObject):
             return
         if not self._reserve_review(task_id): return
         accepted = self.accepted.get(task_id)
+        if (accepted and value.get("confirmation_state") != "accepted"
+                and int(value.get("confirmation_revision", 0)) > int(before.get("confirmation_revision", 0))):
+            # A newer dispatcher snapshot can finish or reject an accepted
+            # confirmation even without changing the plan itself.
+            self.accepted.pop(task_id, None); accepted = None
         if accepted and value.get("task_revision") == accepted[0] and value.get("plan_hash") == accepted[1] and value.get("confirmation_state") != "accepted":
             value = dict(value); value["confirmation_state"] = "accepted"; value["available_actions"] = [action for action in value.get("available_actions", []) if action != "confirm"]
         if value.get("confirmation_state") == "accepted":
@@ -349,6 +384,11 @@ class ChatCoordinator(QObject):
         if before.get("task_revision") != value.get("task_revision") or before.get("plan_hash") != value.get("plan_hash"):
             self.grants.pop(task_id, None)
         self.reviews[task_id] = value; self.task_changed.emit(task_id); self._drain_reviews()
+        if before.get("confirmation_state") == "accepted" and value.get("confirmation_state") != "accepted":
+            self.notice.emit(str(value.get("blocked_reason") or {
+                "Completed": "操作已完成。", "Failed": "操作未完成，请查看执行记录。",
+                "NeedsReview": "操作未能继续，请查看当前任务说明。",
+                "Running": "正在执行已确认的操作。"}.get(str(value.get("status")), "任务状态已更新。")))
 
     def set_grant(self, task_id: str, tool: str, enabled: bool) -> None:
         if task_id not in self.reviews: return
@@ -386,8 +426,9 @@ class ChatCoordinator(QObject):
         record = self.task_commands.get(task_id)
         if not record: return
         if "_error" in data:
-            record["at"] = 0; self.notice.emit("操作受理结果未确认，正在按原命令核查。"); return
-        if data.get("accepted") or data.get("task_id") or "_error" not in data:
+            record["error"] = data["_error"]
+            record["at"] = 0; self.notice.emit("操作返回错误，正在核查是否已受理。"); return
+        if data.get("accepted") or data.get("task_id") == task_id:
             self.task_pending.discard(task_id)
             if record["action"] == "confirm":
                 review = self.reviews.get(task_id, {})
@@ -396,15 +437,25 @@ class ChatCoordinator(QObject):
                 review["available_actions"] = [item for item in review.get("available_actions", []) if item != "confirm"]
             self.task_commands.pop(task_id, None); self.review(task_id); self.task_changed.emit(task_id)
             self.notice.emit("操作已受理，正在更新状态。")
+        else:
+            record["at"] = 0
+            self.notice.emit("尚未取得明确受理回执，正在核查操作状态。")
 
     def reconcile_task(self, task_id: str) -> None:
         record = self.task_commands.get(task_id)
         if not record: return
         record["at"] = monotonic()
         def done(data: dict[str, Any]) -> None:
+            if self.task_commands.get(task_id) is not record:
+                return
             if data.get("accepted"):
                 self._task_receipt(task_id, data)
             elif data.get("known") is False:
+                if record.get("error"):
+                    self.task_commands.pop(task_id, None); self.task_pending.discard(task_id)
+                    self.accepted.pop(task_id, None); self.review(task_id); self.task_changed.emit(task_id)
+                    self.notice.emit(str(record["error"].get("message") or "操作未受理，请查看任务说明。"))
+                    return
                 record["retryable"] = True; self.task_pending.discard(task_id); self.task_changed.emit(task_id)
                 self.notice.emit("后台尚无此命令回执，可点击原操作使用相同命令重试。")
         self._read("task-receipt:" + task_id, "command_status", {"command_id": record["command_id"]}, done)
@@ -460,6 +511,7 @@ class ChatView(QWidget):
     conversation_selected = Signal(str)
     directory_requested = Signal()
     execution_requested = Signal()
+    _avatar_pixmaps: dict[str, QPixmap] = {}
     def __init__(self, coordinator: ChatCoordinator, compact: bool = False, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.coordinator, self.compact = coordinator, compact
@@ -468,6 +520,7 @@ class ChatView(QWidget):
         self._history_items: list[dict[str, Any]] | None = None; self._history_cursor: Any = None; self._history_more = False
         self._page_generation = 0; self._page_reading = False
         self._render_generation = 0
+        self._follow_next_render = False
         self._tail_signature = ""
         self._tail_ids: set[str] = set()
         self._rendered_ids: set[str] = set()
@@ -478,18 +531,14 @@ class ChatView(QWidget):
         self.avatar.setObjectName('chat_avatar')
         from qfluentwidgets import TransparentPushButton, FluentIcon
         self.title: QLabel | TransparentPushButton
-        if compact:
-            self.title = text_label('日常聊天', heading=True)
-        else:
-            session_button = TransparentPushButton('日常聊天', self)
-            font = session_button.font(); font.setPointSize(17); font.setWeight(QFont.Weight.DemiBold); session_button.setFont(font)
-            session_button.setIcon(FluentIcon.CHEVRON_DOWN_MED)
-            session_button.setToolTip('选择或管理当前角色的会话')
-            session_button.clicked.connect(self.directory_requested.emit)
-            self.title = session_button
+        session_button = TransparentPushButton('日常聊天', self)
+        font = session_button.font(); font.setPointSize(17); font.setWeight(QFont.Weight.DemiBold); session_button.setFont(font)
+        session_button.setIcon(FluentIcon.CHEVRON_DOWN_MED)
+        session_button.setToolTip('选择或管理当前角色的会话')
+        session_button.clicked.connect(self.directory_requested.emit)
+        self.title = session_button
         self.title.setMinimumWidth(0); self.title.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
         top.addWidget(self.title); top.addStretch(1)
-        reload = QPushButton("刷新"); reload.clicked.connect(self._latest); top.addWidget(reload)
         if not compact:
             records = QPushButton("执行记录"); records.clicked.connect(self.execution_requested.emit); top.addWidget(records)
         if compact:
@@ -504,15 +553,21 @@ class ChatView(QWidget):
         self.selector.setPlaceholderText("正在读取会话…"); self.selector.setAccessibleName("切换会话")
         self.selector_label.setBuddy(self.selector); switcher.addWidget(self.selector, 1)
         layout.addWidget(self.conversation_row)
-        self.status = text_label("欢迎回来，跟我说点什么。")
+        self.conversation_row.setVisible(not compact)
+        self.status = text_label()
         layout.addWidget(self.status)
         self.body = QWidget(); self.messages = QVBoxLayout(self.body); self.messages.setAlignment(Qt.AlignmentFlag.AlignTop)
         self.messages.setSpacing(18)
         self.body.setMaximumWidth(780)
         self.area = scroll(self.body); self.area.setAlignment(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop); layout.addWidget(self.area, 1)
-        self.older = QPushButton("加载更早记录"); self.older.clicked.connect(self._load_older); layout.addWidget(self.older)
+        self.older = QPushButton("加载更早记录"); self.older.clicked.connect(self._load_older); self.older.hide()
         self.latest_button = QPushButton("返回最新消息"); self.latest_button.hide(); self.latest_button.clicked.connect(self._latest); layout.addWidget(self.latest_button)
-        self.new_message = QPushButton("有新消息 · 回到底部"); self.new_message.hide(); self.new_message.clicked.connect(self._new_messages); layout.addWidget(self.new_message)
+        self.new_message = ScrollToBottomButton(); self.new_message.setObjectName("chat_scroll_latest"); self.new_message.setAccessibleName("有新消息，回到底部")
+        self.new_message.setFixedSize(36 if compact else 52, 36 if compact else 52)
+        self.new_message.hide()
+        self.new_message.clicked.connect(self._new_messages); self.new_message.setParent(self.area.viewport())
+        self.area.viewport().installEventFilter(self)
+        self.area.verticalScrollBar().valueChanged.connect(self._scroll_changed)
         self.input = MessageInput(); self.input.setObjectName("chat_input"); layout.addWidget(self.input)
         row = QHBoxLayout(); self.feedback = text_label(); row.addWidget(self.feedback, 1)
         self.send = QPushButton("发送"); self.send.setObjectName("primary"); row.addWidget(self.send); layout.addLayout(row)
@@ -527,11 +582,13 @@ class ChatView(QWidget):
         if hasattr(coordinator, "appearance"):
             coordinator.appearance.image_changed.connect(self._avatar)
             self._avatar("character_avatar", coordinator.appearance.images.get("character_avatar"))
+        if coordinator.preferences is not None and hasattr(coordinator.preferences, "changed"):
+            coordinator.preferences.changed.connect(self._display_names_changed)
         self._directory(); self._ready()
 
     def set_selector_visible(self, visible: bool) -> None:
-        """Main-window sidebar replaces this row; compact chat always keeps it."""
-        self.conversation_row.setVisible(visible or self.compact)
+        """The main window controls its selector row; compact chat uses the title menu."""
+        self.conversation_row.setVisible(visible and not self.compact)
 
     def _avatar(self, slot: str, pixmap: Any) -> None:
         if slot not in {"user_avatar", "character_avatar"}: return
@@ -543,13 +600,43 @@ class ChatView(QWidget):
             label = frame.findChild(QLabel, "message_" + slot) if frame is not None else None
             if label is not None: self._set_avatar(label, slot, pixmap, 24)
 
+    def _display_names_changed(self, key: str, value: Any) -> None:
+        if key in {"user_display_name", "character_display_name"}:
+            self._signature = None
+            self._timeline(self.conversation_id)
+
+    def _display_name(self, slot: str) -> str:
+        preferences = self.coordinator.preferences
+        if preferences is None: return "你" if slot == "user_avatar" else "Deskpal"
+        return (preferences.user_display_name if slot == "user_avatar"
+                else preferences.character_display_name)
+
     @staticmethod
     def _set_avatar(label: QLabel, slot: str, pixmap: Any, edge: int) -> None:
         label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        if pixmap is not None and not pixmap.isNull():
-            label.setPixmap(pixmap.scaled(edge, edge, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
+        icon = ChatView._avatar_pixmaps.get(slot)
+        if icon is None:
+            filename = "user-dog.png" if slot == "user_avatar" else "deskpal-cat.png"
+            # Generated files have transparent margins; crop once so the icon
+            # remains legible at the small size used beside chat messages.
+            crop = (225, 63, 946, 848) if slot == "user_avatar" else (195, 20, 1269, 972)
+            source = QPixmap(str(Path(__file__).parent / "assets" / "avatars" / filename))
+            icon = source.copy(*crop) if not source.isNull() else QPixmap()
+            ChatView._avatar_pixmaps[slot] = icon
+        if icon.isNull():
+            label.clear(); label.setText("◈")
+            return
+        scaled = icon.scaled(edge, edge, Qt.AspectRatioMode.KeepAspectRatio,
+                             Qt.TransformationMode.SmoothTransformation)
+        if slot == "character_avatar":
+            shifted = QPixmap(edge, edge); shifted.fill(Qt.GlobalColor.transparent)
+            painter = QPainter(shifted)
+            offset = round(edge * .08)
+            painter.drawPixmap((edge - scaled.width()) // 2 + offset,
+                               (edge - scaled.height()) // 2, scaled)
+            painter.end(); label.setPixmap(shifted)
         else:
-            label.clear(); label.setText('你' if slot == 'user_avatar' else 'D')
+            label.setPixmap(scaled)
 
     def _expand(self, conversation_id: str, task_id: str) -> None:
         if self.isVisible() and (conversation_id == self.conversation_id or not conversation_id):
@@ -586,6 +673,7 @@ class ChatView(QWidget):
         if self.conversation_id != conversation_id:
             if self.conversation_id: self.positions[self.conversation_id] = self.area.verticalScrollBar().value()
             self._restore_position = self.positions.get(conversation_id)
+            if self._restore_position is None: self._follow_next_render = True
         self.conversation_id, self.task_id = conversation_id, task_id or ""
         self._drop_history()
         self._signature = None
@@ -676,17 +764,26 @@ class ChatView(QWidget):
     def _send(self) -> None:
         if self._draft_rejected:
             self.feedback.setText("超出草稿容量的新输入未保存；当前显示原草稿。请先编辑或释放容量后再发送。"); return
+        previous_submissions = len(self.coordinator.submissions)
+        self._follow_next_render = True
         self.coordinator.submit(self.conversation_id)
+        if len(self.coordinator.submissions) == previous_submissions:
+            self._follow_next_render = False
 
     def _ready(self) -> None:
         if not self.coordinator.available: self._drop_history()
         conversation = self.coordinator.conversations.get(self.conversation_id, {})
+        working = any(item.get("conversation_id") == self.conversation_id for item in self.coordinator.submissions.values())
+        self.input.set_context_placeholder("可以继续补充要求…  Enter 发送，Shift + Enter 换行" if working
+                                           else "写点什么…  Enter 发送，Shift + Enter 换行")
         archived = bool(conversation.get("archived_at") or conversation.get("archived"))
         self.input.setReadOnly(archived or not self.coordinator.available)
         ready = self.coordinator.available and self.coordinator.model_ready and not archived and not self._draft_rejected
         self.send.setEnabled(ready)
-        invitation = "可以聊聊日常，也可以让我帮你安排事情。" if self.conversation_id == self.coordinator.default_id else "可以围绕这个主题继续聊天，也可以让我帮你安排事情。"
-        self.status.setText("新增输入超过草稿容量；当前显示原草稿，请先编辑或释放容量。" if self._draft_rejected else "这段会话已归档，恢复后可继续聊天；草稿会保留。" if archived else invitation if ready else "本地记录可以浏览；模型连接尚未就绪，请从设置完成配置。")
+        message = ("新增输入超过草稿容量；当前显示原草稿，请先编辑或释放容量。" if self._draft_rejected
+                   else "这段会话已归档，恢复后可继续聊天；草稿会保留。" if archived
+                   else "" if ready else "本地记录可以浏览；模型连接尚未就绪，请从设置完成配置。")
+        self.status.setText(message); self.status.setVisible(bool(message))
 
     @staticmethod
     def _message_ids(items: list[dict[str, Any]]) -> set[str]:
@@ -706,8 +803,6 @@ class ChatView(QWidget):
         if self._history_items is not None:
             tail = repr(self.coordinator.timelines.get(self.conversation_id, []))
             tail_ids = self._message_ids(self.coordinator.timelines.get(self.conversation_id, []))
-            if tail_ids - self._tail_ids:
-                self.new_message.setText("有新消息 · 返回最新"); self.new_message.show()
             self._tail_signature = tail; self._tail_ids = tail_ids
         items = self._history_items if self._history_items is not None else self.coordinator.timelines.get(self.conversation_id, [])
         pending = [value for value in self.coordinator.submissions.values() if value["conversation_id"] == self.conversation_id]
@@ -726,19 +821,31 @@ class ChatView(QWidget):
         if self._signature == signature:
             return
         rendered_ids = self._message_ids(items)
-        has_new = self._signature is not None and bool(rendered_ids - self._rendered_ids)
         self._rendered_ids = rendered_ids
         self._signature = signature
         self._render_generation += 1
-        bar = self.area.verticalScrollBar(); follow = bar.maximum() - bar.value() < 50; position = bar.value()
+        bar = self.area.verticalScrollBar()
+        follow = self._follow_next_render or (bar.maximum() > 0 and bar.maximum() - bar.value() < 50)
+        self._follow_next_render = False
+        position = bar.value()
         while self.messages.count():
             layout_item = self.messages.takeAt(0)
             retired_widget = layout_item.widget() if layout_item is not None else None
+            if retired_widget is self.older:
+                continue
             if retired_widget is not None:
                 if isinstance(retired_widget, TaskCard): retired_widget.retire()
                 retired_widget.hide(); retired_widget.deleteLater()
+        self.messages.addWidget(self.older)
+        redaction_shown = False
         for item in items:
-            if item.get("redacted_at") or item.get("visible") is False:
+            if item.get("redacted_at"):
+                if not redaction_shown:
+                    removed = text_label("部分聊天记录已因遗忘操作清理；这些消息和相关任务正文不再显示。")
+                    removed.setObjectName("chat_redaction_notice"); self.messages.addWidget(removed)
+                    redaction_shown = True
+                continue
+            if item.get("visible") is False:
                 continue
             kind = str(item.get("kind", ""))
             if kind == "task_card":
@@ -758,7 +865,11 @@ class ChatView(QWidget):
             avatar = text_label(); avatar.setObjectName("message_" + slot); avatar.setFixedSize(24, 24)
             avatar.setAlignment(Qt.AlignmentFlag.AlignCenter); avatar.setAccessibleName("用户头像" if slot == "user_avatar" else "角色头像")
             self._set_avatar(avatar, slot, self.coordinator.appearance.images.get(slot), 24)
-            author.addWidget(avatar); author.addWidget(text_label("你" if slot == "user_avatar" else "Deskpal")); author.addStretch()
+            nickname = text_label(self._display_name(slot)); nickname.setObjectName("message_author")
+            if slot == "user_avatar":
+                author.addStretch(1); author.addWidget(nickname); author.addWidget(avatar)
+            else:
+                author.addWidget(avatar); author.addWidget(nickname); author.addStretch(1)
             layout.addLayout(author); layout.addWidget(text_label(body))
             if item.get("body_truncated"):
                 more = QPushButton("读取消息下一段")
@@ -785,8 +896,6 @@ class ChatView(QWidget):
             self._queue_scroll(self._bottom)
         else:
             self._queue_scroll(lambda: bar.setValue(position))
-            if has_new and self._history_items is None:
-                self.new_message.setText("有新消息 · 回到底部"); self.new_message.show()
 
     def _queue_scroll(self, callback: Callable[[], None], context: QObject | None = None) -> None:
         identity = self.conversation_id
@@ -795,9 +904,28 @@ class ChatView(QWidget):
             if (identity == self.conversation_id and page_generation == self._page_generation
                     and render_generation == self._render_generation):
                 callback()
+                self._scroll_changed(self.area.verticalScrollBar().value())
         # Qt drops the queued functor when its widget is destroyed. A redraw also
         # retires the old layout's scroll intents while this view remains alive.
-        QTimer.singleShot(0, context if context is not None else self, apply)
+        def after_layout() -> None:
+            QTimer.singleShot(0, context if context is not None else self, apply)
+        QTimer.singleShot(0, context if context is not None else self, after_layout)
+
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:
+        if watched is self.area.viewport() and event.type() == QEvent.Type.Resize:
+            self._position_new_message()
+        return super().eventFilter(watched, event)
+
+    def _position_new_message(self) -> None:
+        viewport = self.area.viewport()
+        self.new_message.move(max(8, (viewport.width() - self.new_message.width()) // 2),
+                              max(8, viewport.height() - self.new_message.height() - 16))
+        self.new_message.raise_()
+
+    def _scroll_changed(self, value: int) -> None:
+        bar = self.area.verticalScrollBar()
+        self.new_message.setVisible(bar.maximum() - value >= 120)
+        self._position_new_message()
 
     def _privacy(self, epoch: int = 0) -> None:
         self._drop_history()

@@ -241,9 +241,13 @@ def test_unstarted_recovery_without_plan_exposes_only_valid_resume(config):
         assert "resume" not in app.task_review(task.id)["available_actions"]
 
 
-def test_current_schedule_lists_future_resources_and_masks_scrubbed_labels(config):
-    with create_application(config, planner=WritePlanner()) as app:
-        task, _ = waiting(app)
+def test_current_schedule_lists_future_resources_after_conversation_clear(config):
+    with create_application(config) as app:
+        conversation = app.conversation_ensure_default()
+        task = app.submit("你好，聊一会儿。", conversation_id=conversation["id"],
+                          expected_context_epoch=conversation["context_epoch"])
+        assert app.wait(task.id, 5).status == TaskStatus.COMPLETED
+        saved_result = app.tasks.get(task.id).result
         timer = app.scheduling.create_timer(3600, label="未来计时器")
         app._reminders.register_result(task.id, timer_result(timer))
         future = datetime.now(timezone.utc) + timedelta(days=1)
@@ -255,9 +259,14 @@ def test_current_schedule_lists_future_resources_and_masks_scrubbed_labels(confi
         assert {item["source_id"] for item in page["items"] + rest["items"]} == {timer.id, event.id}
         assert facade.execute("schedule_items", {"source": "timer", "status": "pending"})["items"][0]["title"] == "未来计时器"
         assert facade.execute("reminder_feed", {})["items"] == []
-        app.tasks.scrub(task.id)
-        masked = facade.execute("schedule_items", {"source": "timer"})["items"][0]
-        assert masked["redacted"] and masked["label"] == "" and "未来计时器" not in json.dumps(masked, ensure_ascii=False)
+        conversation = app.conversation_ensure_default()
+        app.conversation_clear(conversation["id"], conversation["revision"], "clear-schedule-source")
+        remaining = facade.execute("schedule_items", {"source": "timer"})["items"][0]
+        assert remaining["title"] == "未来计时器"
+        assert app.tasks.get(task.id).result == saved_result
+        updated = app.scheduling.update_calendar(event.id, title="修改后日程")
+        assert updated.title == "修改后日程"
+        assert facade.execute("schedule_items", {"source": "calendar"})["items"][0]["title"] == "修改后日程"
         for bad in ({"limit": 101}, {"offset": -1}, {"source": []}, {"status": "unknown"}):
             with pytest.raises(ValueError):
                 facade.execute("schedule_items", bad)
@@ -379,21 +388,68 @@ def test_reminder_short_timer_association_race_is_repaired_and_two_events_share_
     assert reminders.feed(unread=True)["unread_count"] == 1
 
 
-def test_late_tool_callback_after_scrub_redacts_unassociated_reminder(inbox):
+def test_clearing_conversation_keeps_timer_and_detaches_late_tool_callback(inbox):
     reminders, scheduling, clock, store, tasks, task, repository, conversation = inbox
-    timer = scheduling.create_timer(1, label="不能重新出现的内容")
+    timers = [scheduling.create_timer(1, label=label) for label in ("早关联", "晚关联")]
+    reminders.register_result(task.id, timer_result(timers[0]))
+    repository.cleanup(conversation["id"], conversation["revision"], "clear-reminders",
+                       delete=False, scrub=tasks.clear_working_context)
+    reminders.register_result(task.id, timer_result(timers[1]))
     clock.advance(1)
     scheduling.poll_due()
+    assert reminders.poll() == 2
+    items = reminders.feed()["items"]
+    assert {item["label"] for item in items} == {"早关联", "晚关联"}
+    assert all(item["conversation_id"] is None for item in items)
+    assert all(reminders.notification(item["id"]) for item in items)
+
+
+@pytest.mark.parametrize("bypass,paused,expected", [
+    (False, False, "quiet"),
+    (True, False, "due"),
+    (True, True, "missed"),
+])
+def test_backend_quiet_defers_timer_and_recovers_after_restart(inbox, bypass, paused, expected):
+    from deskpal.proactive.policy import NotificationPolicy
+    reminders, scheduling, clock, store, *_ = inbox
+    policy = NotificationPolicy(store, clock=clock.now, zone="UTC")
+    policy.set_quiet(22 * 60, 8 * 60, bypass, "quiet-settings")
+    if paused:
+        policy.set("reminder", True, None, "pause")
+    reminders.policy = policy
+    scheduling.create_timer(1, label="免打扰时的提醒")
+    clock.advance(1)
+    scheduling.poll_due()
+    assert reminders.poll() == 1
+    item = reminders.feed()["items"][0]
+    assert item["status"] == expected
+    assert (reminders.notification(item["id"]) is not None) == (expected == "due")
+    if expected == "quiet":
+        clock.advance(7 * 3600)
+        restarted = ReminderInbox(store, scheduling, now=clock.now,
+            policy=NotificationPolicy(store, clock=clock.now, zone="UTC"))
+        restarted.poll()
+        assert restarted.notification(item["id"]) is not None
+        restarted.poll()
+        with store.read_connection() as db:
+            assert db.execute("SELECT COUNT(*) FROM audit_outbox WHERE event='desktop_reminder_due'").fetchone()[0] == 1
+
+
+def test_deleted_calendar_reminder_is_not_released_at_quiet_end(inbox):
+    from deskpal.proactive.policy import NotificationPolicy
+    reminders, scheduling, clock, store, *_ = inbox
+    reminders.policy = NotificationPolicy(store, clock=clock.now, zone="UTC")
+    entry = scheduling.create_calendar("会删除的日程", (clock.wall + timedelta(days=1)).isoformat(),
+                                       "UTC", reminder_at=clock.wall.isoformat())
+    scheduling.poll_due()
     reminders.poll()
-    identity = reminders.feed()["items"][0]["id"]
-    tasks.scrub(task.id)
-    reminders.register_result(task.id, timer_result(timer))
+    item = reminders.feed()["items"][0]
+    assert item["status"] == "quiet"
+    assert scheduling.delete_calendar(entry.id)
+    clock.advance(7 * 3600)
+    reminders.poll()
     assert reminders.feed()["items"] == []
-    assert reminders.feed()["unread_count"] == 0
-    assert reminders.detail(identity)["unavailable"]
-    with store.read_connection() as connection:
-        row = connection.execute("SELECT * FROM desktop_reminder_inbox WHERE id=?", (identity,)).fetchone()
-        assert row["task_id"] == task.id and row["label"] == "" and row["delivery_state"] == "redacted"
+    assert reminders.notification(item["id"]) is None
 
 
 def test_reminder_cursor_and_inbox_rollback_together_then_retry_same_event(inbox, monkeypatch):

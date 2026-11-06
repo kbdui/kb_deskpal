@@ -62,6 +62,89 @@ def app_model(tmp_path, monkeypatch):
         assert app.close(timeout=10)
 
 
+def test_budget_overflow_does_not_persist_unexecutable_plan_or_stop_worker(app_model):
+    app, model, probe = app_model
+    app.core.max_tool_steps = 3
+    original = model.chat
+    inputs = []
+    def chat(messages, *, tools=()):
+        if 'bounded request planner' in messages[0].content:
+            inputs.append('\n'.join(item.content for item in messages))
+            model.rounds += 1
+            if model.rounds <= 2:
+                return LLMResponse('', tuple(ToolCall('probe', {'value': f'{model.rounds}-{i}'}, str(i)) for i in range(2)))
+            return LLMResponse('后续请求正常完成。')
+        return original(messages, tools=tools)
+    model.chat = chat
+    task = app.submit('执行超过剩余预算的两组观察')
+    result = app.wait(task.id, timeout=10)
+    assert result.status == TaskStatus.FAILED
+    assert len(probe.calls) == 2
+    assert len(app.journal.get_plan(task.id).plan.steps) == 2
+    assert 'execution_budget' in inputs[-1]
+    following = app.submit('继续普通聊天')
+    assert app.wait(following.id, timeout=10).status == TaskStatus.COMPLETED
+
+
+def test_forget_requires_confirmation_before_any_chat_is_erased(app_model):
+    app, model, probe = app_model
+    original = model.chat
+    def chat(messages, *, tools=()):
+        if 'bounded request planner' in messages[0].content:
+            return LLMResponse('', (ToolCall('memory_forget', {'memory_id': 'synthetic-memory', 'expected_revision': 1}, 'erase'),))
+        return original(messages, tools=tools)
+    model.chat = chat
+    task = app.submit('一件事情已经完成了')
+    result = app.wait(task.id, timeout=10)
+    assert result.status == TaskStatus.WAITING
+    assert result.required_authorizations == ('memory_forget',)
+    assert not app.journal.attempts(task.id)
+    assert app.tasks.get(task.id).request == '一件事情已经完成了'
+    app.cancel_task(task.id)
+
+
+def test_forget_is_not_offered_during_proactive_work(app_model):
+    app, model, probe = app_model
+    original = model.chat
+    observed = []
+    def chat(messages, *, tools=()):
+        if 'bounded request planner' in messages[0].content:
+            observed.extend(spec.name for spec in tools)
+            return LLMResponse('{"action":"quiet","reply":""}')
+        return original(messages, tools=tools)
+    model.chat = chat
+    task = app.submit_proactive('检查是否需要问候', '合成事件', 'synthetic-proactive')
+    assert app.wait(task.id, timeout=10).status == TaskStatus.COMPLETED
+    assert observed and 'memory_forget' not in observed
+
+
+def test_legacy_overflow_plan_cannot_be_confirmed_or_stop_worker(app_model):
+    from deskpal.planner.models import Plan
+    from deskpal.workflow.models import WorkflowBlocked
+    app, model, probe = app_model
+    original = model.chat
+    def chat(messages, *, tools=()):
+        if 'bounded request planner' in messages[0].content:
+            model.rounds += 1
+            if model.rounds == 1:
+                return LLMResponse('', (ToolCall('memory_forget', {'memory_id': 'synthetic', 'expected_revision': 1}, 'erase'),))
+            return LLMResponse('其他请求继续运行。')
+        return original(messages, tools=tools)
+    model.chat = chat
+    task = app.submit('构造旧版超限待确认任务')
+    assert app.wait(task.id, timeout=10).status == TaskStatus.WAITING
+    prior = app.journal.get_plan(task.id)
+    app.journal.save_round(task.id, Plan('', tuple(ToolCall('probe', {'value': str(i)}, str(i)) for i in range(8))),
+                          tuple(app.tools.list_tools()), str(app.core.workspace_dir), prior.memory_refs)
+    review = app.task_review(task.id)
+    assert 'confirm' not in review['available_actions']
+    assert '上限' in review['blocked_reason']
+    with pytest.raises(WorkflowBlocked):
+        app.confirm_task(task.id, plan_hash=review['plan_hash'], authorized_tools=('memory_forget',))
+    following = app.submit('新的普通请求')
+    assert app.wait(following.id, timeout=10).status == TaskStatus.COMPLETED
+
+
 def test_three_model_rounds_observe_actual_results_without_replay(app_model):
     app, model, probe = app_model
     task = app.submit("观察两次后回答")
@@ -315,7 +398,10 @@ def test_failed_tool_is_an_observation_and_can_use_alternative(app_model):
     result = app.wait(task.id, timeout=10)
     assert result.status == TaskStatus.COMPLETED, result
     assert [item.status for item in app.journal.attempts(task.id)] == ["Failed", "Succeeded"]
-    assert '"success": false' in model.observations[1]
+    # 紧凑 JSON 的空格不是协议；真实失败状态和工具调用关联必须保留。
+    data, _ = json.JSONDecoder().raw_decode(model.observations[1].split('[UNTRUSTED HISTORICAL REFERENCES]\n')[1])
+    assert any(result['success'] is False for row in data if row['kind'] == 'execution_observations'
+               for result in row['results'])
 
 
 def test_step_budget_stops_without_executing_excess_operation(app_model):
@@ -329,7 +415,7 @@ def test_step_budget_stops_without_executing_excess_operation(app_model):
         return original(messages, tools=tools)
     model.chat = chat
     task = app.submit("无限继续是不允许的")
-    assert app.wait(task.id, timeout=10).status == TaskStatus.NEEDS_REVIEW
+    assert app.wait(task.id, timeout=10).status == TaskStatus.FAILED
     assert probe.calls == ["1", "2"]
 
 
@@ -504,29 +590,47 @@ def test_amendment_does_not_interrupt_already_decided_independent_group(app_mode
     assert app.wait(task.id, timeout=10).status == TaskStatus.COMPLETED
 
 
-def test_forget_tool_enters_real_privacy_cleanup_without_claiming_pending_is_complete(app_model):
-    from time import monotonic, sleep
-    from deskpal.memory.contracts import MemoryStatus, RetrievalBundle
+def test_forget_tool_completes_and_preserves_source_conversation(app_model):
+    from deskpal.memory.contracts import MemoryStatus
     app, model, probe = app_model
-    old = app.memory_command("remember", content="需要遗忘的合成资料")
-    app._interaction.retrieve = lambda request: RetrievalBundle()
+    conversation = app.conversation_ensure_default()
     original = model.chat
+    def source_chat(messages, *, tools=()):
+        if "bounded request planner" in messages[0].content:
+            return LLMResponse("已经记录这次谈话。")
+        return original(messages, tools=tools)
+    model.chat = source_chat
+    source = app.submit("原始聊天应保留", conversation_id=conversation['id'],
+                        expected_context_epoch=conversation['context_epoch'])
+    assert app.wait(source.id, timeout=10).status == TaskStatus.COMPLETED
+    old = app.memory.remember("需要遗忘的合成资料", task_id=source.id)
+    unrelated = app.memory.remember("同一轮的另一条记忆", task_id=source.id)
+
     def chat(messages, *, tools=()):
         if "bounded request planner" in messages[0].content:
             model.rounds += 1
-            return LLMResponse("", (ToolCall("memory_forget", {"memory_id": old.id,
-                "expected_revision": old.revision}, "forget"),))
+            if model.rounds == 1:
+                return LLMResponse("", (ToolCall("memory_forget", {"memory_id": old.id,
+                    "expected_revision": old.revision}, "forget"),))
+            assert any("memory_forget" in message.content for message in messages)
+            return LLMResponse("已遗忘指定的记忆。")
+        if messages[0].content.startswith("[EXPRESSION]"):
+            return LLMResponse("已遗忘指定的记忆。")
         return original(messages, tools=tools)
+
     model.chat = chat
-    task = app.submit("请遗忘指定的旧资料")
-    from deskpal.workflow.models import WorkflowBlocked
-    with pytest.raises(WorkflowBlocked):
-        app.wait(task.id, timeout=10)
-    deadline = monotonic() + 5
-    while monotonic() < deadline:
-        if app.cleanup_status()["status"] == "Completed":
-            break
-        sleep(.01)
-    assert app.cleanup_status()["status"] == "Completed"
-    assert app.core.memory_runtime.repository.get(old.id).status == MemoryStatus.DELETED
-    assert model.rounds == 1
+    task = app.submit("请遗忘指定的旧资料", conversation_id=conversation['id'],
+                        expected_context_epoch=conversation['context_epoch'])
+    assert app.wait(task.id, timeout=10).status == TaskStatus.WAITING
+    assert app.memory.repository.get(old.id).status != MemoryStatus.DELETED
+    review = app.task_review(task.id)
+    app.enqueue_confirmation(task.id, authorized_tools=('memory_forget',),
+        plan_hash=review['plan_hash'], command_id='explicit-erase-confirmation')
+    result = app.wait(task.id, timeout=10)
+    assert result.status == TaskStatus.COMPLETED, result
+    assert result.response == "已遗忘指定的记忆。"
+    assert result.tool_results[0].output["status"] == "Completed"
+    assert app.memory.repository.get(old.id).status == MemoryStatus.DELETED
+    assert app.memory.repository.get(unrelated.id).status != MemoryStatus.DELETED
+    assert any(item.get('body') == "原始聊天应保留"
+        for item in app.conversation_timeline(conversation['id'])['items'])

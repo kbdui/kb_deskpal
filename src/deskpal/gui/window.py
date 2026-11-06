@@ -33,14 +33,14 @@ class MainWindow(FluentWindow):
         self._allow_close = False; self.defer_closed = False; self._ready_seen = False
         self._page_revision = 0
         self._geometry_fit_pending = False; self._screen_signals_connected = False
-        self.setWindowTitle("Deskpal · 聊天与安排"); self.resize(1180, 800); self.setMinimumSize(560, 420)
+        self.setWindowTitle("Deskpal"); self.resize(1180, 800); self.setMinimumSize(560, 420)
         install_wheel_guard()
         self.navigationInterface.setExpandWidth(184)
         self.navigationInterface.setMinimumExpandWidth(940)
         self._wide_navigation: bool | None = None
         self.navigationInterface.setReturnButtonVisible(False)
         self.channel = Channel(bridge, self)
-        self.chat_coordinator = ChatCoordinator(bridge, self)
+        self.chat_coordinator = ChatCoordinator(bridge, self, preferences=preferences)
         self.stack = self.stackedWidget
         # 页面状态与数据读取立即同步，避免切页动画尚未结束就刷新旧页。
         self.stack.setAnimationEnabled(False)
@@ -400,7 +400,7 @@ class MainWindow(FluentWindow):
         became_ready = state == "Ready" and self.lifecycle != "Ready"
         self.lifecycle = state
         self.state_label.setVisible(state != "Ready")
-        self.state_label.setText({"Initializing": "正在准备本地数据…", "Ready": "Deskpal · 聊天与安排", "CleanupBlocked": "隐私清理未完成：相关正文已遮蔽，请在设置重试清理。", "StartupFailed": "启动失败，请从设置进入配置与数据维护。", "Closing": "正在关闭，等待后台与图片资源释放…", "Closed": "已关闭"}.get(state, state))
+        self.state_label.setText({"Initializing": "正在准备本地数据…", "Ready": "Deskpal", "CleanupBlocked": "隐私清理未完成：相关正文已遮蔽，请在设置重试清理。", "StartupFailed": "启动失败，请从设置进入配置与数据维护。", "Closing": "正在关闭，等待后台与图片资源释放…", "Closed": "已关闭"}.get(state, state))
         self.settings_page.companion.set_available(state == "Ready")
         if state == "Ready":
             self._ready_seen = True; self.poll_timer.start(); self.chat_coordinator.appearance.refresh()
