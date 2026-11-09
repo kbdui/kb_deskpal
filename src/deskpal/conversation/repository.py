@@ -418,13 +418,6 @@ class ConversationRepository:
                    AND t.scrubbed=0 AND u.redacted_at IS NULL AND a.redacted_at IS NULL"""
                 + search_filter + " ORDER BY r.sequence DESC LIMIT ?",
                 (identity, epoch, before_sequence, *search_args, 32 if terms else MAX_TURNS))]
-        validated: list[dict[str, Any]] = []
-        for row in rows:
-            try:
-                self.store.validate_external_context(row["task_id"], "expression")
-            except WorkflowBlocked:
-                continue
-            validated.append(row)
         with self.store.read_connection() as conn:
             self.store.check_privacy(conn)
             self._row(conn, identity, epoch)
@@ -432,15 +425,19 @@ class ConversationRepository:
                 raise WorkflowBlocked("Privacy changed while historical sources were being checked")
             result: list[ConversationTurn] = []
             used = 0
-            for row in validated:
-                try:
-                    self.store.check_historical_context(conn, row["task_id"], "expression")
-                except WorkflowBlocked:
+            for row in rows:
+                # 读取的是当时实际说过的话，不重用当时的执行许可或过期记忆真相。
+                # 原任务的完整依赖仍存于工作流；新对话仅依赖这两条原消息。
+                direct = conn.execute("SELECT kind,object_id,revision,active,use_policy FROM dependency_version WHERE kind='dialogue_turn' AND object_id IN (?,?)",
+                    (row['task_id'] + ':user', row['task_id'] + ':assistant')).fetchall()
+                if (len(direct) != 2 or any(not ref['active'] or ref['revision'] != row['sequence']
+                        or (ref['use_policy'] == 'local_only' and row['use_policy'] != 'local_only') for ref in direct)):
                     continue
                 current = conn.execute("SELECT t.revision AS task_revision,COALESCE(u.revision,0) AS user_revision,a.revision AS assistant_revision FROM task t LEFT JOIN conversation_item u ON u.task_id=t.id AND u.kind='user_message' JOIN conversation_item a ON a.task_id=t.id AND a.kind='assistant_message' WHERE t.id=? AND t.scrubbed=0 AND u.redacted_at IS NULL AND a.redacted_at IS NULL", (row["task_id"],)).fetchone()
                 if current is None or any(current[key] != row[key] for key in ("task_revision", "user_revision", "assistant_revision")):
                     continue
-                refs = tuple(ConversationRef(**ref) for ref in json.loads(row["refs"]))
+                refs = tuple(ConversationRef('dialogue_turn', row['task_id'] + ':' + side,
+                    row['sequence'], row['use_policy']) for side in ('user', 'assistant'))
                 facts = tuple(str(fact) for fact in json.loads(row["facts"]))
                 turn = ConversationTurn(row["sequence"], row["task_id"], row["request"], row["response"], refs, row["use_policy"], facts)
                 size = turn.history_bytes + sum(len(fact.encode("utf-8")) for fact in facts)

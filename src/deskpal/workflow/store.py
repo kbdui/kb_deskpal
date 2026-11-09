@@ -20,6 +20,7 @@ from .schema_v4 import migrate_schema_3, validate as validate_schema_4
 from .schema_v5 import migrate_schema_4, validate as validate_schema_5
 from .schema_v6 import migrate_schema_5, validate as validate_schema_6
 from .schema_v7 import migrate_schema_6, validate as validate_schema_7
+from .schema_v8 import migrate_schema_7, validate as validate_schema_8
 
 
 def canonical(value: Any) -> str:
@@ -75,7 +76,7 @@ class WorkflowStore:
             exists = self._conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='schema_version'").fetchone()
             if exists:
                 versions = self._conn.execute("SELECT version FROM schema_version").fetchall()
-                if len(versions) != 1 or versions[0][0] not in {1, 2, 3, 4, 5, 6, SCHEMA_VERSION}:
+                if len(versions) != 1 or versions[0][0] not in {1, 2, 3, 4, 5, 6, 7, SCHEMA_VERSION}:
                     raise ValueError("Unsupported workflow schema version")
                 if versions[0][0] < SCHEMA_VERSION:
                     self.backup(self.path.with_name(self.path.name + ".schema-" + str(versions[0][0]) + "-" + uuid4().hex + ".backup"))
@@ -85,7 +86,7 @@ class WorkflowStore:
                 exists = conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='schema_version'").fetchone()
                 if exists:
                     rows = conn.execute("SELECT version FROM schema_version").fetchall()
-                    if len(rows) != 1 or rows[0][0] not in {1, 2, 3, 4, 5, 6, SCHEMA_VERSION}:
+                    if len(rows) != 1 or rows[0][0] not in {1, 2, 3, 4, 5, 6, 7, SCHEMA_VERSION}:
                         raise ValueError("Unsupported workflow schema version")
                     if rows[0][0] == 1:
                         migrate_schema_1(conn)
@@ -99,6 +100,8 @@ class WorkflowStore:
                         migrate_schema_5(conn)
                     if rows[0][0] <= 6:
                         migrate_schema_6(conn)
+                    if rows[0][0] <= 7:
+                        migrate_schema_7(conn)
                 else:
                     tables = conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").fetchall()
                     if tables:
@@ -111,12 +114,14 @@ class WorkflowStore:
                     migrate_schema_4(conn)
                     migrate_schema_5(conn)
                     migrate_schema_6(conn)
+                    migrate_schema_7(conn)
                 for statement in _PRESENTATION_INDEXES:
                     conn.execute(statement)
                 validate_schema_4(conn)
                 validate_schema_5(conn)
                 validate_schema_6(conn)
                 validate_schema_7(conn)
+                validate_schema_8(conn)
                 # A previous process cannot know whether a reserved request was
                 # sent. Its slot remains consumed and recovery never retries it.
                 conn.execute("UPDATE model_call_diagnostic SET finished_at=?,metadata=json_set(metadata,'$.error_code','interrupted') "

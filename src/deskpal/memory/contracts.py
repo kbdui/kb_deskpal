@@ -61,6 +61,11 @@ class MemorySource:
     task_id: str | None = None
     created_at: datetime = field(default_factory=utc_now)
     use_policy: UsePolicy = UsePolicy.CLOUD_ALLOWED
+    # 来源类别描述载体，发言者身份独立保存，兼容插件中的多人交流。
+    speaker_id: str = ""
+    speaker_name: str = ""
+    speaker_kind: str = ""
+    channel: str = ""
 
 
 @dataclass(frozen=True)
@@ -158,7 +163,7 @@ class MemoryRepository(Protocol):
     def epoch(self) -> int: ...
 
     def page_items(self, *, status: MemoryStatus | None = None, limit: int = 100,
-                   offset: int = 0, group: str = 'all') -> MemoryPage: ...
+                   offset: int = 0, group: str = 'all', query: str = '') -> MemoryPage: ...
 
     def ingest(self, source: MemorySource, draft: MemoryDraft, *,
                accepted: bool = False, idempotency_key: str = "") -> MemoryItem: ...
@@ -201,7 +206,7 @@ class MemoryRuntime(Protocol):
     def epoch(self) -> int: ...
 
     def page_items(self, *, status: MemoryStatus | None = None, limit: int = 100,
-                   offset: int = 0, group: str = 'all') -> MemoryPage: ...
+                   offset: int = 0, group: str = 'all', query: str = '') -> MemoryPage: ...
 
     def retrieve(self, query: str) -> RetrievalBundle: ...
 

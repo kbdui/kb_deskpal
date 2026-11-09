@@ -2,6 +2,7 @@
 
 from collections.abc import Callable, Iterable
 from dataclasses import asdict, replace
+from functools import partial
 from hashlib import sha256
 import math
 from pathlib import Path
@@ -21,12 +22,16 @@ from deskpal.conversation.repository import ConversationRepository
 from deskpal.execution_log import ExecutionLog
 from deskpal.goals import GoalManager
 from deskpal.memory.contracts import DeletionReceipt, MemoryItem, MemoryRuntime, MemoryStatus
+from deskpal.plugins.manifest import AGENT, SCHEDULE
+from deskpal.plugins.runtime import PluginRuntime
+from deskpal.plugins.schedule import record_schedule_occurrence, register_schedule_page
 from deskpal.proactive import LocalRuleEngine, ProposalManager
 from deskpal.proactive.policy import NotificationPolicy
 from deskpal.proactive.coordinator import ProactiveCoordinator
 from deskpal.workflow.control import TaskControl
 from deskpal.scheduling import SchedulingService
 from deskpal.tasks.models import Task, TaskStatus
+from deskpal.tools.manager import BuiltinToolManager
 from deskpal.workflow.journal import ExecutionJournal
 from deskpal.workflow.humanization import HumanizationStore
 from deskpal.workflow.models import DependencyRef, PlanSnapshot, WorkflowBlocked
@@ -102,8 +107,11 @@ class ApplicationService:
         self._task_review = TaskReviewService(self)
         self._tool_catalog = ToolCatalog(self.tools)
         from .management_tools import management_tools
+        if not isinstance(self.tools, BuiltinToolManager):
+            raise ValueError("Application requires the host tool registry")
         for tool in management_tools(self):
-            self.tools.register(tool)
+            self.tools.register_plugin_tool(AGENT, tool)
+        self.plugins = PluginRuntime(store, self.tools.plugin_manifests())
         self.task_control = TaskControl(store)
         core._task_control = self.task_control
         self.notification_policy = NotificationPolicy(store, quiet_start=config.proactive.quiet_start,
@@ -113,7 +121,11 @@ class ApplicationService:
         core._proactive_publication = self.proactive.can_publish
         core._publication_control = lambda: self.notification_policy.publication
         journal.add_validator(self.proactive.validate_task)
-        self._reminders = ReminderInbox(store, scheduling, policy=self.notification_policy)
+        self._reminders = ReminderInbox(
+            store, scheduling, policy=self.notification_policy,
+            on_occurrence=partial(record_schedule_occurrence, self.plugins.data(SCHEDULE.id)),
+        )
+        register_schedule_page(self.plugins, self._reminders.detail)
         self._reminder_pump = ReminderPump(self._reminders)
         observe = getattr(self.tools, "set_result_observer", None)
         if callable(observe):
@@ -232,6 +244,14 @@ class ApplicationService:
     def plugins_catalog(self) -> dict[str, Any]:
         self._ready()
         return self._tool_catalog.plugins()
+
+    def plugin_page(self, plugin_id: str) -> dict[str, Any]:
+        self._ready()
+        return self.plugins.page(plugin_id)
+
+    def plugin_set_option(self, plugin_id: str, key: str, value: bool, expected_revision: int) -> dict[str, Any]:
+        self._ready()
+        return self.plugins.set_option(plugin_id, key, value, expected_revision)
 
     def reminder_feed(self, *, cursor: str | None = None, limit: int = 50, unread: bool = False) -> dict[str, Any]:
         self._ready()

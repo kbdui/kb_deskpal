@@ -196,13 +196,13 @@ def test_two_chat_views_sync_message_avatar_apply_replace_reset_and_clear(qtbot:
                  {"id": "assistant", "kind": "assistant_message", "body": "角色消息"}]
         state._timeline("daily", {"items": items}, False)
         controller = state.appearance
-        index = 0 if slot == "user_avatar" else 1
-        marker = '你' if slot == 'user_avatar' else 'D'
+        def frame(view: ChatView):
+            return next(view.messages.itemAt(i).widget() for i in range(view.messages.count())
+                        if view.messages.itemAt(i).widget() is not None
+                        and view.messages.itemAt(i).widget().findChild(QLabel, 'message_' + slot) is not None)
 
         def avatar(view: ChatView) -> QLabel:
-            label = view.messages.itemAt(index).widget().findChild(QLabel, "message_" + slot)
-            assert label is not None
-            return label
+            return frame(view).findChild(QLabel, 'message_' + slot)
 
         def read_profile(asset_id: str | None, revision: int) -> Any:
             controller.refresh(); metadata = [call for call in bridge.calls if call[0] == "appearance_snapshot"][-1]
@@ -229,18 +229,19 @@ def test_two_chat_views_sync_message_avatar_apply_replace_reset_and_clear(qtbot:
             if slot == "character_avatar":
                 assert not first.avatar.pixmap().isNull() and not second.avatar.pixmap().isNull()
 
-        assert avatar(first).text() == avatar(second).text() == marker
+        original = avatar(first).pixmap().toImage()
+        assert not original.isNull() and avatar(second).pixmap().toImage() == original
         image(read_profile("first", 1), "red"); assert_color("red")
         stale = read_profile("stale", 2); replacement = read_profile("replacement", 3)
         image(replacement, "blue"); image(stale, "red"); assert_color("blue")
         # Rebuild both pages from shared images, then delete a retired frame before
         # another image notification to exercise the active-widget traversal.
-        retired = first.messages.itemAt(index).widget()
+        retired = frame(first)
         items[0]["body"] = "重绘后的消息"
         state._timeline("daily", {"items": items}, False); delete(retired)
         assert_color("blue")
         stale = read_profile("reset-pending", 4); read_profile(None, 5); image(stale, "red")
-        assert avatar(first).text() == avatar(second).text() == marker and slot not in controller.images
+        assert avatar(first).pixmap().toImage() == avatar(second).pixmap().toImage() == original and slot not in controller.images
         image(read_profile("restored", 6), "red"); assert_color("red")
         stale = read_profile("clear-pending", 7)
         controller.refresh(); stale_metadata = [call for call in bridge.calls if call[0] == "appearance_snapshot"][-1]
@@ -248,10 +249,10 @@ def test_two_chat_views_sync_message_avatar_apply_replace_reset_and_clear(qtbot:
         bridge.respond(stale_metadata, {"profiles": [{"slot": slot, "effective_asset_id": "revived", "revision": 8}]})
         QCoreApplication.processEvents()
         assert not controller.images and not controller.pending and not controller.profiles
-        assert avatar(first).text() == avatar(second).text() == marker
+        assert avatar(first).pixmap().toImage() == avatar(second).pixmap().toImage() == original
         delete(first); controller.clear()
-        assert avatar(second).text() == marker
-        if slot == "character_avatar": assert second.avatar.text() == 'D'
+        assert avatar(second).pixmap().toImage() == original
+        if slot == "character_avatar": assert not second.avatar.pixmap().isNull()
     finally:
         if isValid(first): delete(first)
 
@@ -321,7 +322,7 @@ def test_task_navigation_uses_indexed_history_page_without_showing_hidden_card(q
 
 def test_appearance_busy_refusal_recovers_without_losing_preview(qtbot: Any, monkeypatch: Any) -> None:
     from deskpal.gui.settings import AppearanceSettings
-    bridge, state = coordinator(); widget = AppearanceSettings(state, None); qtbot.addWidget(widget)
+    bridge, state = coordinator(); widget = AppearanceSettings(state, None, avatars=True); qtbot.addWidget(widget)
     state.appearance.profiles = {"user_avatar": {"slot": "user_avatar", "revision": 1, "crop": [0, 0, 1, 1]}}
     widget.token = "preview-token"
     with monkeypatch.context() as patch:
@@ -335,7 +336,7 @@ def test_appearance_busy_refusal_recovers_without_losing_preview(qtbot: Any, mon
 def test_appearance_reset_clears_old_preview_and_reload_restores_default_crop(qtbot: Any) -> None:
     from PySide6.QtGui import QPixmap
     from deskpal.gui.settings import AppearanceSettings
-    bridge, state = coordinator(); widget = AppearanceSettings(state, None); qtbot.addWidget(widget)
+    bridge, state = coordinator(); widget = AppearanceSettings(state, None, avatars=True); qtbot.addWidget(widget)
     state.appearance.profiles = {"user_avatar": {"slot": "user_avatar", "revision": 1, "crop": [0, 0, 1, 1]}}
     widget.preview.pixmap_value = QPixmap(8, 8); widget.token = "preview-token"
     widget.crop[2].setValue(80); widget._reset()
@@ -437,7 +438,7 @@ def test_same_conversation_two_windows_keep_independent_history_pages(qtbot: Any
     state._timeline("daily", {"items": [{"id": "new", "sequence": 201, "kind": "assistant_message", "body": "新尾页"}]}, False)
     assert first._history_items[0]["body"] == "早期页" and second._history_items is None
     assert any(label.text() == "新尾页" and not label.isHidden() for label in second.findChildren(QLabel))
-    assert first.new_message.isHidden() is False
+    assert not first.latest_button.isHidden()  # 历史分页有独立返回最新入口；圆钮仅按滚动距离显示。
     first._latest(); assert first._history_items is None
     assert state.timelines["daily"][0]["body"] == "新尾页"
 
@@ -511,7 +512,8 @@ def test_queued_scroll_never_restores_retired_page(qtbot: Any, monkeypatch: Any,
         else:
             state.timelines["daily"] = [{"id": "new", "kind": "assistant_message", "body": "新位置"}]
             view._restore_position = 200; view._timeline("daily")
-        QCoreApplication.processEvents()
+        # 恢复滚动位置要等待布局及其后的事件轮次，不能只排空一次队列。
+        qtbot.wait(10)
         assert positions == ([] if navigation == "history" else [200])
 
 

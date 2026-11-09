@@ -31,7 +31,7 @@ class _Command:
     privacy_epoch: int
 
 
-READ_OPERATIONS = frozenset({"attentions", "notification_policy", "conversation_task_location", "schedule_items", "task_review", "task_updates", "command_status", "conversation_list", "conversation_timeline", "conversation_item", "conversation_cleanup_status", "appearance_snapshot", "tools_catalog", "tool_detail", "plugins_catalog", "reminder_feed", "reminder_detail", "tasks", "task", "memories", "goals", "goal", "milestones",
+READ_OPERATIONS = frozenset({"attentions", "notification_policy", "conversation_task_location", "schedule_items", "task_review", "task_updates", "command_status", "conversation_list", "conversation_timeline", "conversation_item", "conversation_cleanup_status", "appearance_snapshot", "tools_catalog", "tool_detail", "plugins_catalog", "plugin_page", "reminder_feed", "reminder_detail", "tasks", "task", "memories", "goals", "goal", "milestones",
                              "bindings", "proposals", "proposal", "settings", "notification_feed",
                              "notification_validate", "presentation", "companion",
                              "conversation_snapshot", "interaction_snapshot", "cleanup_status", "learning_records"})

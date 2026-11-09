@@ -139,7 +139,9 @@ def test_catalog_reading_keeps_space_for_body_inside_complete_window(window, qtb
     page = shell.catalog_page
     item = {"id": "read_text", "display_name": "读取文本", "summary": "读取工作区中的文本文件\n" * 30,
             "permission_level": 0, "parameter_fields": [{"label": "文件路径", "required": True}]}
-    page.tools.set_page({"items": [item]}); page.tools.list.setCurrentRow(0); page.tools.show_detail(item)
+    page.tools.set_page({"items": [item]})
+    page.tools._select_memory_id(item["id"])
+    page.tools.show_detail(item)
     qtbot.waitUntil(lambda: not page.tools._orientation_pending)
     assert shell.width() == width and shell.height() == 760
     assert visible_rect(page.tools.summary_body, shell).height() >= 140

@@ -81,15 +81,15 @@ def test_memory_display_groups_request_backend_query_and_preserve_latest_choice(
     assert not page.page.items
 
 
-def test_memory_new_form_and_empty_selection_are_distinct(window):
-    widget, _ = window; page = widget.memory_page
-    assert page.form_stack.currentWidget() is page.form_placeholder
-    page._open_editor(0)
-    assert page.form_stack.currentWidget() is page.form_placeholder
-    page.create_memory.click()
-    assert page.forms.currentWidget() is page.remember
+def test_memory_selection_is_readonly_and_empty_selection_clears_details(window):
+    widget, bridge = window; page = widget.memory_page
+    page._selected({'id':'m1', 'draft':{'content':'可读记忆'}})
+    assert page.page.summary_body.toPlainText() == '可读记忆'
     page._selected({})
-    assert page.form_stack.currentWidget() is page.form_placeholder
+    assert page.page.summary_title.text() == '选择一条记录查看详情。'
+    assert not page.page.summary_body.toPlainText()
+    assert not hasattr(page, 'create_memory') and not hasattr(page, 'forms')
+    assert not bridge.requests_for('memory')
 
 
 def test_learning_records_readable_and_erased_on_privacy(window, qtbot):
@@ -109,7 +109,7 @@ def test_learning_records_readable_and_erased_on_privacy(window, qtbot):
 
 def test_arrangements_tabs_and_paused_filter(window):
     widget, bridge = window; page = widget.arrangements
-    assert [page.tabs.tabText(i) for i in range(3)] == ['日程', '任务', '后续关注']
+    assert [page.tabs.tabText(i) for i in range(3)] == ['日程与提醒', '任务进度', '后续关注']
     assert page.task_tabs.widget(1) is page.goals
     page.task_filter.setCurrentIndex(page.task_filter.findData('Paused'))
     assert bridge.requests_for('tasks')[-1]['parameters']['statuses'] == ['Paused']
@@ -141,10 +141,10 @@ def test_theme_changes_business_surface_with_controls(window, qtbot):
     try:
         select('dark')
         assert isDarkTheme()
-        assert '#181d1a' in widget.styleSheet()
+        assert '#191b24' in widget.styleSheet()
         select('light')
         assert not isDarkTheme()
-        assert '#f6f6f1' in widget.styleSheet()
+        assert '#f5f6fa' in widget.styleSheet()
     finally:
         select('auto')
 
@@ -180,21 +180,18 @@ def test_repeated_page_scroll_does_not_change_filters_or_crash(window, qtbot):
     assert page.page.memory_tree.topLevelItemCount() == 100
 
 
-def test_new_goal_has_explicit_form_and_does_not_repeat_submission(window, qtbot):
+def test_goal_browser_drops_old_children_when_switching_goal(window, qtbot):
     widget, bridge = window; goals = widget.arrangements.goals
-    assert goals.editor_hosts['goal'].currentIndex() == 0
-    assert 'use_policy' not in goals.forms['goal'].fields
-    goals.create_buttons['goal'].click()
-    assert goals.editor_hosts['goal'].currentIndex() == 1 and goals._creating['goal']
-    set_form(goals.forms['goal'], title='读完一本书', success_criteria='完成最后一章')
-    goals.forms['goal'].submit.click(); goals.forms['goal'].submit.click()
-    request = bridge.requests_for('create_goal')[-1]
-    assert len(bridge.requests_for('create_goal')) == 1
-    assert request['parameters']['use_policy'] == 'local_only'
-    deliver(qtbot, widget, bridge, request, dict(id='new-goal', revision=1, status='Active', title='读完一本书'))
-    assert not goals._creating['goal'] and goals.snapshots['goal']['id'] == 'new-goal'
-    goals.clear_sensitive()
-    assert goals.editor_hosts['goal'].currentIndex() == 0
+    goals._goals({'items':[{'id':'g1','title':'第一目标'}, {'id':'g2','title':'第二目标'}]})
+    first = bridge.requests_for('milestones')[-1]
+    goals.parent_goal.setCurrentIndex(1)
+    deliver(qtbot, widget, bridge, first, {'items':[{'id':'old','title':'旧目标步骤'}]})
+    assert not goals.pages['milestone'].items
+    current = bridge.requests_for('milestones')[-1]
+    assert current['parameters']['goal_id'] == 'g2'
+    deliver(qtbot, widget, bridge, current, {'items':[{'id':'new','title':'新目标步骤'}]})
+    assert goals.pages['milestone'].items[0]['id'] == 'new'
+    assert not bridge.requests_for('create_goal')
 
 
 def test_closed_learning_dialog_drops_late_reply(window, qtbot):
@@ -222,28 +219,23 @@ def test_fluent_choice_wheel_scrolls_parent_without_changing_option(window, qtbo
     assert choice.currentData() == 1
 
 
-def test_conflicting_memory_requires_explicit_adoption_and_preserves_draft(window):
+def test_memory_latest_revision_updates_readonly_details(window):
     widget, bridge = window; page = widget.memory_page
-    original = dict(id='m', revision=1, status='accepted', draft={'content': '原先理解'})
-    page._selected(original); page._open_editor(0)
-    set_form(page.correct, content='我正在修改的内容')
-    page._selected({**original, 'revision': 2, 'draft': {'content': '后台刚更正的内容'}})
-    assert page._snapshot['revision'] == 1
-    assert page.correct.fields['content'].toPlainText() == '我正在修改的内容'
-    page.adopt_revision.click()
-    assert page._snapshot['revision'] == 2
-    assert page.correct.fields['content'].toPlainText() == '我正在修改的内容'
+    original = dict(id='m', revision=1, status='accepted', draft={'content':'原先理解'})
+    page.page.set_page({'items':[original]}); page.page._select_memory_id('m')
+    page.page.set_page({'items':[{**original, 'revision':2, 'draft':{'content':'后台修订'}}]})
+    assert page.page.summary_body.toPlainText() == '后台修订'
+    assert not bridge.requests_for('memory')
 
 
-def test_conflicting_goal_can_adopt_viewed_revision_without_silently_overwriting_draft(window):
-    widget, _ = window; page = widget.arrangements.goals
+def test_goal_latest_revision_updates_readonly_details(window):
+    widget, bridge = window; page = widget.arrangements.goals.pages['goal']
     original = dict(id='g', revision=1, status='Active', title='阅读目标')
-    page._selected('goal', original); set_form(page.forms['goal'], title='新的草稿')
-    page._selected('goal', {**original, 'revision': 2, 'title': '后台修订'})
-    assert page.snapshots['goal']['revision'] == 1
-    page.adopt_buttons['goal'].click()
-    assert page.snapshots['goal']['revision'] == 2
-    assert page.forms['goal'].fields['title'].text() == '新的草稿'
+    page.set_page({'items':[original]}); page.list.setCurrentRow(0)
+    page.set_page({'items':[{**original, 'revision':2, 'title':'后台修订'}]})
+    assert page.selected_item()['revision'] == 2
+    assert page.summary_title.text() == '后台修订'
+    assert not bridge.requests_for('update_goal')
 
 
 def test_narrow_record_detail_can_return_to_list_and_reopen_same_record(window, qtbot):
@@ -261,12 +253,11 @@ def test_narrow_record_detail_can_return_to_list_and_reopen_same_record(window, 
     assert page.selected_item()['id'] == 'm1'
 
 
-def test_cached_goal_draft_counts_as_unsaved_for_settings_handoff(window):
+def test_readonly_goal_has_no_draft_but_avatar_preview_blocks_handoff(window):
     widget, _ = window; page = widget.arrangements.goals
-    page._selected('goal', dict(id='g1', revision=1, status='Active', title='原目标'))
-    set_form(page.forms['goal'], title='还没保存的修改')
-    page._selected('goal', dict(id='g2', revision=1, status='Active', title='另一目标'))
-    assert not page.forms['goal'].dirty
+    page.pages['goal'].set_page({'items':[{'id':'g1','title':'阅读目标'}]})
+    assert not page.has_unsaved_content()
+    widget.settings_page.avatars.token = 'prepared-avatar'
     assert widget.has_unsaved_content()
-    page.clear_sensitive()
+    widget.settings_page.avatars._clear()
     assert not page.has_unsaved_content()

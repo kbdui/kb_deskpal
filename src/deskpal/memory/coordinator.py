@@ -240,8 +240,8 @@ class MemoryCoordinator:
         return self.repository.list_items(status=status, include_history=include_history)
 
     def page_items(self, *, status: MemoryStatus | None = None, limit: int = 100,
-                   offset: int = 0, group: str = 'all') -> MemoryPage:
-        return self.repository.page_items(status=status, limit=limit, offset=offset, group=group)
+                   offset: int = 0, group: str = 'all', query: str = '') -> MemoryPage:
+        return self.repository.page_items(status=status, limit=limit, offset=offset, group=group, query=query)
 
     def accept(self, memory_id: str, expected_revision: int) -> MemoryItem:
         item = self.repository.get(memory_id)
@@ -260,14 +260,18 @@ class MemoryCoordinator:
         if item is None:
             raise MemoryNotFound("Memory record does not exist")
         key, value = self._profile_fields(content)
+        if item.draft.subject != 'user':
+            key, value = '', ''
         self._check_conflict(key, value, item.draft.scope, excluding=memory_id,
                              owner_id=item.source.owner_id)
         now = self._now()
         source = MemorySource(content, task_id=item.source.task_id, created_at=now,
                               owner_id=item.source.owner_id, session_id=item.source.session_id,
-                              use_policy=item.source.use_policy)
+                              use_policy=item.source.use_policy, speaker_id='local:user',
+                              speaker_name='用户', speaker_kind='person', channel='deskpal')
         draft = MemoryDraft(content, content, predicate=key or "statement", value=value,
                             profile_key=key, scope=item.draft.scope,
+                            subject=item.draft.subject, kind=item.draft.kind, destination=item.draft.destination,
                             valid_from=now if temporal else item.draft.valid_from)
         if item.status in (MemoryStatus.CANDIDATE, MemoryStatus.DISPUTED):
             draft = replace(draft, destination=item.draft.destination, reason='用户明确更正理解，后续可继续复核',

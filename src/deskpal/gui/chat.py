@@ -11,7 +11,7 @@ from PySide6.QtGui import QColor, QFont, QHideEvent, QPainter, QPen, QPixmap, QS
 from PySide6.QtWidgets import (QFrame, QHBoxLayout, QLabel, QSizePolicy, QVBoxLayout, QWidget)
 from .components import (ChoiceBox as QComboBox, PushButton as QPushButton)
 from .channel import Channel
-from .widgets import ArrowComboBox, MessageInput, scroll, text_label
+from .widgets import notice_label, ArrowComboBox, MessageInput, scroll, text_label
 from .task_card import TaskCard
 from .appearance import AppearanceController
 from deskpal.response.templates import legacy_chat_reply
@@ -514,6 +514,7 @@ class ChatView(QWidget):
     _avatar_pixmaps: dict[str, QPixmap] = {}
     def __init__(self, coordinator: ChatCoordinator, compact: bool = False, parent: QWidget | None = None) -> None:
         super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground)
         self.coordinator, self.compact = coordinator, compact
         self.conversation_id = ""; self.task_id = ""; self._populating = False; self._draft_rejected = False
         self._signature: Any = None
@@ -525,7 +526,7 @@ class ChatView(QWidget):
         self._tail_ids: set[str] = set()
         self._rendered_ids: set[str] = set()
         self.positions: dict[str, int] = {}; self._restore_position: int | None = None
-        layout = QVBoxLayout(self); layout.setContentsMargins(20 if not compact else 10, 16, 20 if not compact else 10, 12)
+        layout = QVBoxLayout(self); layout.setContentsMargins(28 if not compact else 12, 24 if not compact else 12, 28 if not compact else 12, 20 if not compact else 12)
         layout.setSpacing(14)
         top = QHBoxLayout(); self.avatar = text_label("◈"); self.avatar.setFixedSize(42, 42); top.addWidget(self.avatar)
         self.avatar.setObjectName('chat_avatar')
@@ -568,9 +569,23 @@ class ChatView(QWidget):
         self.new_message.clicked.connect(self._new_messages); self.new_message.setParent(self.area.viewport())
         self.area.viewport().installEventFilter(self)
         self.area.verticalScrollBar().valueChanged.connect(self._scroll_changed)
-        self.input = MessageInput(); self.input.setObjectName("chat_input"); layout.addWidget(self.input)
-        row = QHBoxLayout(); self.feedback = text_label(); row.addWidget(self.feedback, 1)
-        self.send = QPushButton("发送"); self.send.setObjectName("primary"); row.addWidget(self.send); layout.addLayout(row)
+        self.composer = QFrame(); self.composer.setObjectName("studio_composer")
+        self.composer.setMaximumWidth(780)
+        composer_layout = QVBoxLayout(self.composer)
+        composer_layout.setContentsMargins(14, 12, 14, 10)
+        self.input = MessageInput(); self.input.setObjectName("chat_input")
+        self.input.setFixedHeight(54 if compact else 76)
+        from qfluentwidgets import setCustomStyleSheet
+        setCustomStyleSheet(self.input,
+            'MessageInput {background:transparent; border:none; border-radius:0;}',
+            'MessageInput {background:transparent; border:none; border-radius:0;}')
+        composer_layout.addWidget(self.input)
+        row = QHBoxLayout(); self.feedback = notice_label(); row.addWidget(self.feedback, 1)
+        row.addStretch(1)
+        self.send = QPushButton("发送"); self.send.setFixedWidth(72); self.send.setObjectName("primary"); row.addWidget(self.send)
+        composer_layout.addLayout(row)
+        compose_row = QHBoxLayout(); compose_row.addStretch(1); compose_row.addWidget(self.composer, 20); compose_row.addStretch(1)
+        layout.addLayout(compose_row)
         self.input.textChanged.connect(self._edited); self.input.send_requested.connect(self._send); self.send.clicked.connect(self._send)
         self.selector.currentIndexChanged.connect(self._selected)
         coordinator.conversations_changed.connect(self._directory); coordinator.timeline_changed.connect(self._timeline)
@@ -614,6 +629,10 @@ class ChatView(QWidget):
     @staticmethod
     def _set_avatar(label: QLabel, slot: str, pixmap: Any, edge: int) -> None:
         label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        if isinstance(pixmap, QPixmap) and not pixmap.isNull():
+            label.setPixmap(pixmap.scaled(edge, edge, Qt.AspectRatioMode.KeepAspectRatio,
+                                         Qt.TransformationMode.SmoothTransformation))
+            return
         icon = ChatView._avatar_pixmaps.get(slot)
         if icon is None:
             filename = "user-dog.png" if slot == "user_avatar" else "deskpal-cat.png"
@@ -860,7 +879,8 @@ class ChatView(QWidget):
             if not body:
                 continue
             frame = QFrame(); frame.setObjectName("user_message" if kind in {"user_message", "user"} else "message")
-            layout = QVBoxLayout(frame); author = QHBoxLayout()
+            layout = QVBoxLayout(frame); layout.setContentsMargins(16, 12, 16, 12); layout.setSpacing(8)
+            author = QHBoxLayout()
             slot = "user_avatar" if kind in {"user_message", "user"} else "character_avatar"
             avatar = text_label(); avatar.setObjectName("message_" + slot); avatar.setFixedSize(24, 24)
             avatar.setAlignment(Qt.AlignmentFlag.AlignCenter); avatar.setAccessibleName("用户头像" if slot == "user_avatar" else "角色头像")
@@ -870,7 +890,9 @@ class ChatView(QWidget):
                 author.addStretch(1); author.addWidget(nickname); author.addWidget(avatar)
             else:
                 author.addWidget(avatar); author.addWidget(nickname); author.addStretch(1)
-            layout.addLayout(author); layout.addWidget(text_label(body))
+            layout.addLayout(author)
+            body_label = text_label(body); body_label.setObjectName("message_body")
+            layout.addWidget(body_label)
             if item.get("body_truncated"):
                 more = QPushButton("读取消息下一段")
                 offset = int(item.get("body_offset", len(body)))
@@ -880,7 +902,14 @@ class ChatView(QWidget):
                 previous = QPushButton("读取消息上一段")
                 previous.clicked.connect(lambda checked=False, item_id=str(item["id"]), offset=max(0, int(item.get("body_start", 0)) - 32768): self._load_body(item_id, offset))
                 layout.addWidget(previous)
-            self.messages.addWidget(frame)
+            if slot == "user_avatar":
+                frame.setMaximumWidth(620)
+                bubble_row = QWidget()
+                bubble_layout = QHBoxLayout(bubble_row); bubble_layout.setContentsMargins(0, 0, 0, 0)
+                bubble_layout.addStretch(1); bubble_layout.addWidget(frame, 4)
+                self.messages.addWidget(bubble_row)
+            else:
+                self.messages.addWidget(frame)
         for item in pending:
             self.messages.addWidget(text_label(item["request"] + "\n" + item["state"]))
             check = QPushButton("使用原命令重试" if item.get("retryable") else "核查受理结果"); check.clicked.connect(lambda checked=False, command=item["command_id"]: self.coordinator.retry_submission(command)); self.messages.addWidget(check)

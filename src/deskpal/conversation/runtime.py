@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 from .models import ConversationRef, ConversationTurn, ConversationWindow
+from deskpal.llm.context import history_view, references_view
 
 if TYPE_CHECKING:
     from .repository import ConversationRepository
@@ -170,11 +171,13 @@ class ConversationRuntime:
                               or any(ref.use_policy != "cloud_allowed" for ref in turn.refs)):
                     warnings.append("history_use_not_allowed")
                     continue
-                if len(references | set(turn.refs)) > MAX_CONTEXT_REFS:
+                direct = {ConversationRef('dialogue_turn', turn.task_id + ':' + side,
+                          turn.sequence, turn.use_policy) for side in ('user', 'assistant')}
+                if len(references | direct) > MAX_CONTEXT_REFS:
                     warnings.append("context_reference_limit")
                     continue
-                references.update(turn.refs)
-                refs = [ref.to_dict() for ref in turn.refs]
+                references.update(direct)
+                refs = [ref.to_dict() for ref in sorted(direct)]
                 planning_refs = refs
                 source = {"kind": "dialogue_turn", "id": turn.task_id + ":user",
                           "revision": turn.sequence, "use_policy": turn.use_policy}
@@ -204,7 +207,7 @@ class ConversationRuntime:
                 # the existing neutral planning selection below is independent.
                 candidate_history = [message for pair in history_rounds for message in pair]
                 candidate_history.extend(history_round)
-                history_encoded = json.dumps(candidate_history, ensure_ascii=False,
+                history_encoded = json.dumps(history_view(candidate_history), ensure_ascii=False,
                                              allow_nan=False, sort_keys=True)
                 if len(history_encoded.encode("utf-8")) <= MAX_HISTORY_BYTES:
                     history_rounds.append(history_round)
@@ -221,7 +224,7 @@ class ConversationRuntime:
                 round_items.extend({"kind": "tool_fact", "verified": True, "fact": json.loads(fact),
                                     "source_ref": source if turn.request else assistant_source, "refs": planning_refs} for fact in turn.facts)
                 candidate = planning + round_items
-                encoded = json.dumps(candidate, ensure_ascii=False, allow_nan=False, sort_keys=True)
+                encoded = json.dumps(references_view(candidate), ensure_ascii=False, allow_nan=False, sort_keys=True)
                 if len(candidate) > MAX_PLANNING_ITEMS or len(encoded.encode("utf-8")) > MAX_PLANNING_BYTES:
                     warnings.append("planning_context_limit")
                     continue

@@ -28,9 +28,11 @@ def _date(value: str) -> datetime:
 
 class ReminderInbox:
     def __init__(self, store: WorkflowStore, scheduling: SchedulingManager, *,
-                 now: Callable[[], datetime] = utc_now, policy: Any = None) -> None:
+                 now: Callable[[], datetime] = utc_now, policy: Any = None,
+                 on_occurrence: Callable[[str, str, str], None] | None = None) -> None:
         self.store, self.scheduling, self._now = store, scheduling, now
         self.policy = policy
+        self._on_occurrence = on_occurrence
         self._started_at = now()
         self._lock = RLock()
         self._error: str | None = None
@@ -148,6 +150,8 @@ class ReminderInbox:
                             connection.execute('INSERT OR IGNORE INTO notification_deferred VALUES(?,NULL)', (reminder_id,))
                         if inserted and state in {"due", "missed", "quiet"}:
                             self._append_timeline(connection, reminder_id, conversation_id, task_id, event)
+                            if self._on_occurrence is not None:
+                                self._on_occurrence(source, reminder_id, event.due_at)
                             if state == "due":
                                 self.store.record_event("desktop_reminder_due", data={"id": reminder_id})
                         connection.execute("UPDATE desktop_reminder_cursor SET after_id=?,anchor=? WHERE source=?", (event.id, event_anchor, source))

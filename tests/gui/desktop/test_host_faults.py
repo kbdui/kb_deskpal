@@ -13,6 +13,7 @@ from deskpal.application.instance import InstanceLock, InstanceLockError
 from deskpal.config import load_config
 from deskpal.gui.channel import Channel
 from deskpal.gui.host import DesktopHost
+from tests.support.studio import edit_draft, evaluate
 from deskpal.gui.preferences import GuiPreferences
 from deskpal.llm.errors import LLMError
 from deskpal.memory.contracts import EmbeddingManifest
@@ -53,7 +54,7 @@ def production_host(qtbot, tmp_path, monkeypatch, **injections):
                        and host.window.chat_coordinator.available
                        and host.window.chat_coordinator.model_ready
                        and bool(host.window.chat_coordinator.default_id)
-                       and host.window.chat_view.conversation_id == host.window.chat_coordinator.default_id
+                       and host.window.identity == host.window.chat_coordinator.default_id
                        and host.bridge.pending_count == 0
                        and not any(channel.pending for channel in host.window.findChildren(Channel)),
                        timeout=5000)
@@ -83,11 +84,10 @@ def execute(qtbot, host, replies, operation, parameters=None):
 
 def assert_responsive(qtbot, host, ticks):
     before = len(ticks)
-    host.window.chat_view.input.setFocus()
-    qtbot.keyClicks(host.window.chat_view.input, "responsive")
+    edit_draft(qtbot, host.window, "responsive")
     qtbot.waitUntil(lambda: len(ticks) >= before + 5, timeout=1500)
-    assert "responsive" in host.window.chat_view.input.toPlainText()
-    assert "responsive" in host.window.chat_coordinator.draft(host.window.chat_view.conversation_id).text
+    assert "responsive" in evaluate(qtbot, host.window, "document.querySelector('[data-form=message] textarea').value")
+    assert "responsive" in host.window.chat_coordinator.draft(host.window.identity).text
 
 
 class BlockingEmbedding:
@@ -238,12 +238,11 @@ def test_synthetic_provider_failure_is_visible_and_host_recovers(qtbot, tmp_path
             assert failed["attempts"] == []
             host.window.navigate("task", task["task_id"])
             # 用户看到可理解的失败说明；原始 provider 异常保留在内部执行记录。
-            qtbot.waitUntil(lambda: any(
-                '未能完成' in label.text()
-                for label in host.window.chat_view.body.findChildren(QLabel)),
-                            timeout=5000)
-            assert host.window.stack.currentWidget() is host.window.chat_view
-            assert host.window.chat_view.conversation_id == conversation_id
+            qtbot.waitUntil(lambda: evaluate(qtbot, host.window,
+                "document.querySelector('.ds-thread')?.innerText.includes('未能完成')") is True,
+                timeout=5000)
+            assert host.window.route == "chat"
+            assert host.window.identity == conversation_id
             assert coordinator.reviews[task["task_id"]]["status"] == "Failed"
             assert any(item["task_id"] == task["task_id"] and item["kind"] == "assistant_message"
                        and '未能完成' in item['body'] and 'Synthetic provider unavailable' not in item['body']

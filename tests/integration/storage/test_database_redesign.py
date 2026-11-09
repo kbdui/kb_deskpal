@@ -80,7 +80,7 @@ def test_workflow_upgrade_preserves_bytes_links_and_pending_work(tmp_path):
     store = WorkflowStore(path)
     try:
         with store.read_connection() as db:
-            assert db.execute('SELECT version FROM schema_version').fetchone()[0] == 7
+            assert db.execute('SELECT version FROM schema_version').fetchone()[0] == 8
             for name, rows in before.items():
                 assert [tuple(row) for row in db.execute(f'SELECT * FROM {name}')] == rows
             assert tuple(db.execute('SELECT hash,canonical_json FROM immutableplan').fetchone()) == ('a' * 64, '{ "steps" : [] }')
@@ -308,7 +308,7 @@ def test_schema_six_migrates_existing_summary_sources_and_keeps_summary(tmp_path
     store = WorkflowStore(path)
     try:
         with store.read_connection() as db:
-            assert db.execute('SELECT version FROM schema_version').fetchone()[0] == 7
+            assert db.execute('SELECT version FROM schema_version').fetchone()[0] == 8
             saved = db.execute('SELECT revision,content,refs,use_policy FROM conversation_context_summary').fetchone()
             assert tuple(saved) == (4, summary, '[]', 'local_only')
             source = db.execute('SELECT * FROM conversation_summary_source').fetchone()

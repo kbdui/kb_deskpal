@@ -9,7 +9,9 @@ import sys
 from PySide6.QtCore import QObject, QTimer, Signal, Qt
 
 from deskpal.gui.catalog import CatalogPage
+from deskpal.gui.components import CheckBox
 from deskpal.gui.management import MemoryPage
+from deskpal.gui.plugin_panel import PluginPanel
 from deskpal.gui.views import PagedView
 
 
@@ -41,6 +43,36 @@ def memory(content="喜欢清楚的中文说明"):
     return {"id": "memory", "revision": 3, "status": "candidate",
             "draft": {"content": content, "quote": "这是明确的原文依据"},
             "source": {"content": "完整来源原文", "origin": "user_message", "use_policy": "local_only"}}
+
+
+def test_plugin_catalog_opens_host_page_and_saves_declared_option(qtbot):
+    bridge = Bridge()
+    page = CatalogPage(bridge)
+    qtbot.addWidget(page)
+    page.show()
+    page.refresh_plugins()
+    bridge.answer(qtbot, page, bridge.requests("plugins_catalog")[-1], {"items": [
+        {"id": "schedule", "name": "日程与计时器", "page_title": "日程与计时器",
+         "tool_ids": ["timer_list"], "event_sources": ["timer_due"]},
+    ]})
+    page.tabs.setCurrentIndex(1)
+    page.plugins.list.setCurrentRow(0)
+    assert page.open_plugin.isVisible()
+    page.open_plugin.click()
+    panel = page.findChild(PluginPanel)
+    assert panel is not None
+    data = {"plugin_id": "schedule", "switches": [
+        {"key": "timer_only", "label": "仅显示计时器到期记录", "value": False, "revision": 0},
+    ], "rows": [{"title": "计时样例"}]}
+    bridge.answer(qtbot, panel, bridge.requests("plugin_page")[-1], data)
+    panel.findChild(CheckBox).click()
+    command = bridge.requests("plugin_set_option")[-1]
+    assert command["parameters"] == {"plugin_id": "schedule", "key": "timer_only",
+                                      "value": True, "expected_revision": 0}
+    bridge.answer(qtbot, panel, command, {"revision": 1})
+    assert len(bridge.requests("plugin_page")) == 2
+    page.clear_sensitive()
+    assert not panel.isVisible()
 
 
 def test_wheel_events_use_native_scrollbar_route_in_isolated_process():
@@ -93,9 +125,9 @@ def test_catalog_discards_detail_for_old_selection_and_reads_latest_search(qtbot
     bridge = Bridge(); page = CatalogPage(bridge); qtbot.addWidget(page)
     page._catalog({"items": [{"id": "one", "display_name": "能力一"},
                             {"id": "two", "display_name": "能力二"}], "catalog_revision": "r"})
-    page.tools.list.setCurrentRow(0)
+    page.tools._select_memory_id("one")
     old = bridge.requests("tool_detail")[-1]
-    page.tools.list.setCurrentRow(1)
+    page.tools._select_memory_id("two")
     bridge.answer(qtbot, page, old, {"item": {"id": "one", "summary": "过期说明"}})
     assert "过期说明" not in page.tools.summary_body.toPlainText()
     new = bridge.requests("tool_detail")[-1]

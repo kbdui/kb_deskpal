@@ -81,4 +81,5 @@ def memory_view(content: str) -> Any:
     if not isinstance(value, dict) or value.get('type') != 'memory_evidence':
         return content
     return {key: value[key] for key in ('type', 'memory_id', 'revision', 'claim_type', 'source_origin',
-        'source_time', 'valid_from', 'valid_to', 'expires_at', 'content', 'status', 'uncertainty', 'destination') if key in value}
+        'source_time', 'valid_from', 'valid_to', 'expires_at', 'content', 'status', 'uncertainty', 'destination',
+        'subject', 'speaker_id', 'speaker_name', 'speaker_kind', 'channel') if key in value}

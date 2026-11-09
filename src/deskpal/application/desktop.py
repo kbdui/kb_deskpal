@@ -117,6 +117,8 @@ class DesktopFacade:
             "schedule_items": app.schedule_items,
             "tools_catalog": app.tools_catalog, "tool_detail": app.tool_detail,
             "plugins_catalog": app.plugins_catalog,
+            "plugin_page": app.plugin_page,
+            "plugin_set_option": app.plugin_set_option,
             "appearance_snapshot": app.appearance_snapshot, "asset_import_prepare": app.asset_import_prepare,
             "appearance_apply": app.appearance_apply, "appearance_reset": app.appearance_reset,
             "asset_import_discard": app.asset_import_discard, "asset_collect": app.asset_collect,

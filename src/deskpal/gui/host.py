@@ -6,18 +6,16 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from PySide6.QtCore import QObject, QSettings, QTimer, Signal, Slot
-from PySide6.QtWidgets import QApplication
-from .components import Menu as QMenu
+from PySide6.QtWidgets import QApplication, QMenu
 
 from deskpal.application.service import ApplicationService
 
 from .bridge import ApplicationBridge
 from .notifications import NotificationController
 from .pet_controller import PetController
-from .pet_chat import PetChatWindow
 from .preferences import GuiPreferences
 from .tray import TrayController
-from .window import MainWindow
+from .studio_window import StudioPetChat, StudioWindow
 
 
 class DesktopHost(QObject):
@@ -32,12 +30,12 @@ class DesktopHost(QObject):
         super().__init__(parent)
         self.preferences = preferences if preferences is not None else GuiPreferences()
         self.bridge = ApplicationBridge(factory, parent=self)
-        self.window = MainWindow(self.bridge, self.preferences)
+        self.window = StudioWindow(self.bridge, self.preferences)
         self.window.defer_closed = True
         self.tray = TrayController(self.window, self.preferences, parent=self)
         self.pet = PetController(self.bridge, self.preferences, parent=self)
-        self.pet_chat: PetChatWindow | None = None
-        self._retired_chats: dict[int, PetChatWindow] = {}
+        self.pet_chat: StudioPetChat | None = None
+        self._retired_chats: dict[int, StudioPetChat] = {}
         self._pet_menu = QMenu(self.window)
         self._pet_menu.addAction("聊一聊", self._open_pet_chat)
         self._pet_menu.addAction("打开主窗口", self.restore)
@@ -76,6 +74,7 @@ class DesktopHost(QObject):
         self.bridge.reply.connect(self._reply)
         self.bridge.privacy_changed.connect(self._privacy)
         self.window.close_requested.connect(self._window_close)
+        self.window.pet_requested.connect(self._open_pet_chat)
         self.window.privacy_cleared.connect(self.notifications.clear_pending)
         self.tray.restore_requested.connect(self.restore)
         self.tray.chat_requested.connect(self._open_pet_chat)
@@ -103,32 +102,19 @@ class DesktopHost(QObject):
         if self.bridge.state != "Ready":
             return
         if self.pet_chat is None:
-            self.pet_chat = PetChatWindow(self.window.chat_coordinator)
+            self.pet_chat = StudioPetChat(self.window.chat_coordinator)
             self.pet_chat.expand_requested.connect(self._expand_pet_chat)
-            self.pet_chat.chat_view.directory_requested.connect(self.window.open_conversations)
         self.pet_chat.open_for(self.pet.window if self.pet.window is not None else self.window)
 
     @Slot()
     def _notification_settings(self) -> None:
-        self.restore(); self.window.set_page(4); self.window.settings_page.tabs.setCurrentIndex(2)
+        self.restore()
+        self.window.show_settings(2)
 
     @Slot()
     def _resize_pet(self) -> None:
-        from PySide6.QtCore import Qt
-        from PySide6.QtWidgets import QDialog, QVBoxLayout
-        from .components import Slider, PushButton
-        from .widgets import text_label
-        dialog = QDialog(self.window); dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
-        dialog.setWindowTitle('桌宠大小'); layout = QVBoxLayout(dialog)
-        value = text_label(f'{round(self.preferences.pet_scale * 100)}%'); layout.addWidget(value)
-        slider = Slider(Qt.Orientation.Horizontal); slider.setRange(60, 160)
-        slider.setValue(round(self.preferences.pet_scale * 100))
-        slider.valueChanged.connect(lambda percent: value.setText(f'{percent}%'))
-        layout.addWidget(slider)
-        def apply_size() -> None:
-            if self.preferences.set_pet_scale(slider.value() / 100): dialog.accept()
-        save = PushButton('应用'); save.clicked.connect(apply_size)
-        layout.addWidget(save); dialog.resize(320, 160); dialog.open()
+        self.restore()
+        self.window.show_settings(1)
 
     @Slot()
     def _hide_pet_chat(self) -> None:
@@ -236,7 +222,7 @@ class DesktopHost(QObject):
             return
         if not self.pet.settled or self.pet_chat is not None or self._retired_chats:
             self.restore()
-            self.window.state_label.setText("正在关闭：后台已释放，等待桌宠图片和聊天窗口资源释放。")
+            self.window.status_message("正在关闭：后台已释放，等待桌宠图片和聊天窗口资源释放。")
             return
         self._finalized = True
         self.tray.dispose()

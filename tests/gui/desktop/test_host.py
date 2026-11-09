@@ -11,6 +11,7 @@ from deskpal.config import load_config
 from deskpal.gui.bridge import ApplicationBridge
 from deskpal.gui.channel import Channel
 from deskpal.gui.host import DesktopHost
+from tests.support.studio import edit_draft, evaluate
 from deskpal.gui.preferences import GuiPreferences
 from deskpal.planner.models import Plan
 from deskpal.tools.models import ToolCall
@@ -23,7 +24,7 @@ def gui_ready(host):
     return (host.window.lifecycle == "Ready" and host.feed_timer.isActive()
             and coordinator.available and coordinator.model_ready
             and bool(coordinator.default_id)
-            and host.window.chat_view.conversation_id == coordinator.default_id
+            and host.window.identity == coordinator.default_id
             and host.bridge.pending_count == 0
             and not any(channel.pending for channel in host.window.findChildren(Channel)))
 
@@ -90,7 +91,7 @@ def test_host_factory_waits_for_queued_ready_and_initial_settings(qtbot, tmp_pat
         assert host.feed_timer.isActive()
         assert host.bridge.pending_count == 0
         assert not any(channel.pending for channel in host.window.findChildren(Channel))
-        assert host.window.chat_view.conversation_id == host.window.chat_coordinator.default_id
+        assert host.window.identity == host.window.chat_coordinator.default_id
         assert any(reply["operation"] == "settings" and reply["ok"] for reply in replies)
         assert any(reply["operation"] == "conversation_ensure_default" and reply["ok"] for reply in replies)
         assert any(reply["operation"] == "appearance_snapshot" and reply["ok"] for reply in replies)
@@ -159,7 +160,7 @@ def test_slow_planner_cancel_remains_responsive_and_does_not_claim_forced_stop(q
 def test_window_close_with_no_tray_never_hides_the_only_window(qtbot, tmp_path, monkeypatch):
     host, _, _ = make_host(qtbot, tmp_path, monkeypatch)
     host.preferences.set_close_to_tray(True)
-    host.window.chat_view.input.setPlainText("synthetic unsent draft")
+    edit_draft(qtbot, host.window, "synthetic unsent draft")
     confirmations = []
 
     def confirm_exit(*args):
@@ -182,7 +183,7 @@ def test_declined_exit_keeps_draft_and_reentrant_confirmation_is_guarded(qtbot, 
     host, _, _ = make_host(qtbot, tmp_path, monkeypatch)
     host.window.show()
     draft = "synthetic unsent draft"
-    host.window.chat_view.input.setPlainText(draft)
+    edit_draft(qtbot, host.window, draft)
     answers = iter((QMessageBox.StandardButton.No, QMessageBox.StandardButton.Yes))
     confirmations = []
 
@@ -199,8 +200,8 @@ def test_declined_exit_keeps_draft_and_reentrant_confirmation_is_guarded(qtbot, 
         host.window.request_exit()
         assert len(confirmations) == 1
         assert host.bridge.state == "Ready" and host.window.isVisible()
-        assert host.window.chat_view.input.toPlainText() == draft
-        assert host.window.chat_coordinator.draft(host.window.chat_view.conversation_id).text == draft
+        assert evaluate(qtbot, host.window, "document.querySelector('[data-form=message] textarea').value") == draft
+        assert host.window.chat_coordinator.draft(host.window.identity).text == draft
         host.window.request_exit()
         qtbot.waitUntil(lambda: host.bridge.state in {"Closing", "Closed"})
         assert len(confirmations) == 2

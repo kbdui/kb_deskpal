@@ -98,9 +98,13 @@ def _object(value: str) -> dict[str, object]:
 
 
 def _source_data(source: MemorySource) -> dict[str, object]:
-    return {"content": source.content, "origin": source.origin, "id": source.id,
+    data: dict[str, object] = {"content": source.content, "origin": source.origin, "id": source.id,
             "owner_id": source.owner_id, "session_id": source.session_id, "task_id": source.task_id,
             "created_at": _stamp(source.created_at), "use_policy": source.use_policy.value}
+    # 空字段不改变旧来源的不可变正文与幂等指纹。
+    data.update({key: getattr(source, key) for key in ('speaker_id', 'speaker_name', 'speaker_kind', 'channel')
+                 if getattr(source, key)})
+    return data
 
 
 def _draft_data(draft: MemoryDraft) -> dict[str, object]:
@@ -120,6 +124,8 @@ def _source_from(data: dict[str, object]) -> MemorySource:
         owner_id=str(data["owner_id"]), session_id=str(data["session_id"]),
         task_id=None if data["task_id"] is None else str(data["task_id"]),
         created_at=_required_time(data["created_at"]), use_policy=UsePolicy(str(data["use_policy"])),
+        speaker_id=str(data.get('speaker_id', '')), speaker_name=str(data.get('speaker_name', '')),
+        speaker_kind=str(data.get('speaker_kind', '')), channel=str(data.get('channel', '')),
     )
 
 
@@ -146,6 +152,8 @@ def _normalize_source(source: MemorySource) -> MemorySource:
     _text(source.id, "Source id", 256, empty=True)
     _text(source.owner_id, "Owner id", 128)
     _text(source.session_id, "Session id", 128)
+    for name in ('speaker_id', 'speaker_name', 'speaker_kind', 'channel'):
+        _text(getattr(source, name), name, 128, empty=True)
     if source.task_id is not None:
         _text(source.task_id, "Task id", 256)
     if not isinstance(source.origin, str) or source.origin not in _ORIGINS:
@@ -183,10 +191,14 @@ def _normalize_draft(source: MemorySource, draft: MemoryDraft, now: datetime,
     if source.origin not in permitted[draft.claim_type]:
         raise MemoryError("Memory claim type is incompatible with source origin")
     if draft.profile_key and (draft.claim_type != ClaimType.USER_REPORT or draft.subject != "user"
+                              or source.speaker_id not in ('', 'local:user')
                               or not draft.value.strip()):
         raise MemoryError("Profile fields require a user self-report and explicit value")
+    # 角色自己的设想可被采用为有归属的主观设定，不将一般模型猜测升级为事实。
+    character_idea = (source.speaker_kind == 'character' and bool(source.speaker_id)
+                      and draft.subject == source.speaker_id and draft.claim_type == ClaimType.HYPOTHESIS)
     if accepted and (draft.claim_type == ClaimType.LEGACY
-                     or source.origin == "assistant_output"):
+                     or (source.origin == "assistant_output" and not character_idea)):
         raise MemoryError("This source cannot be automatically accepted")
     begin = _optional_utc(draft.valid_from, "valid_from")
     end = _optional_utc(draft.valid_to, "valid_to")
@@ -479,7 +491,7 @@ class SQLiteMemoryRepository:
             return tuple(item for item in items if status is None or item.status == status)
 
     def page_items(self, *, status: MemoryStatus | None = None, limit: int = 100,
-                   offset: int = 0, group: str = 'all') -> MemoryPage:
+                   offset: int = 0, group: str = 'all', query: str = '') -> MemoryPage:
         """Page current heads and erased tombstones in SQL under one epoch."""
         if type(limit) is not int or not 1 <= limit <= 100 or type(offset) is not int or offset < 0:
             raise MemoryError("limit must be 1..100 and offset non-negative")
@@ -487,6 +499,9 @@ class SQLiteMemoryRepository:
             raise MemoryError("status must be a MemoryStatus")
         if group not in {'all', 'facts', 'episode', 'buffer'}:
             raise MemoryError('Unknown memory display group')
+        if not isinstance(query, str) or len(query) > 200:
+            raise MemoryError('Memory search is limited to 200 characters')
+        search = query.strip()
         with self._lock:
             self._open()
             self._expire_candidates(self._now())
@@ -503,9 +518,12 @@ class SQLiteMemoryRepository:
                 clauses.append("r.status='accepted' AND json_extract(r.draft,'$.kind')='semantic' AND COALESCE(json_extract(r.draft,'$.destination'),'facts')='facts'")
             elif group == 'episode':
                 clauses.append("r.status='accepted' AND json_extract(r.draft,'$.kind')='episodic' AND json_extract(r.draft,'$.destination')='episode'")
+            if search:
+                clauses.append("instr(lower(COALESCE(json_extract(r.draft,'$.content'),'')), lower(?)) > 0")
+                parameters += (search,)
             if clauses:
                 query += ' WHERE ' + ' AND '.join(clauses)
-            if group == 'all' and status in (None, MemoryStatus.DELETED):
+            if not search and group == 'all' and status in (None, MemoryStatus.DELETED):
                 query += " UNION ALL SELECT id,revision,deleted_at AS ordering,1 AS erased FROM memory_tombstones"
             rows = self._db.execute("SELECT * FROM (" + query +
                 ") ORDER BY ordering DESC,id ASC,revision DESC LIMIT ? OFFSET ?",

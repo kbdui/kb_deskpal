@@ -34,6 +34,7 @@ class PagedView(QWidget):
     def __init__(self, name: str, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.name = name
+        self.provider_names: dict[str, str] = {}
         self.offset = 0
         self.has_more = False
         self.items: list[dict[str, Any]] = []
@@ -44,6 +45,7 @@ class PagedView(QWidget):
         self._memory_date_groups: dict[str, QTreeWidgetItem] = {}
         self._tool_category_groups: dict[str, QTreeWidgetItem] = {}
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0); layout.setSpacing(12)
         self.toolbar_host = QWidget()
         self.toolbar_host.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.toolbar = QHBoxLayout(self.toolbar_host)
@@ -70,6 +72,8 @@ class PagedView(QWidget):
         self.splitter = QSplitter(Qt.Orientation.Horizontal)
         self.list = QListWidget()
         self.list.setObjectName(name + "_list")
+        self.list.setProperty("studioList", True)
+        self.list.setWordWrap(True)
         self.list.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.detail = QTreeWidget()
         self.detail.setHeaderLabels(["项目", "内容"])
@@ -79,27 +83,40 @@ class PagedView(QWidget):
         self.detail_panel.setWidgetResizable(True)
         self.detail_panel.setMinimumWidth(0)
         self.detail_content = QWidget()
+        self.detail_content.setObjectName("studio_detail")
+        self.detail_content.setAttribute(Qt.WidgetAttribute.WA_StyledBackground)
         self.detail_panel.setWidget(self.detail_content)
         details = QVBoxLayout(self.detail_content)
         self.details_layout = details
-        details.setContentsMargins(0, 0, 0, 0)
+        details.setContentsMargins(22, 20, 22, 20)
+        details.setSpacing(14)
         # 纯标题和操作按钮按内容顶端排列，避免无正文时均摊整页高度。
         details.setAlignment(Qt.AlignmentFlag.AlignTop)
         self.summary_title = text_label("选择一条记录查看详情。", heading=True)
+        self.summary_title.setObjectName("section_caption")
         self.summary_meta = text_label()
+        self.summary_meta.setObjectName("subtle")
         for summary_label in (self.summary_title, self.summary_meta):
             summary_label.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
         self.summary_body = QPlainTextEdit()
         self.summary_body.setReadOnly(True)
+        self.summary_body.setProperty("studioReading", True)
         self.summary_body.setObjectName(name + "_body")
         self.summary_body.setMinimumSize(0, 140)
         self.summary_body.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.summary_context = QPlainTextEdit()
         self.summary_context.setReadOnly(True)
+        self.summary_context.setProperty("studioReading", True)
         self.summary_context.setObjectName(name + "_context")
         self.summary_context.setMinimumSize(0, 80)
         self.summary_context.setMaximumHeight(180)
-        self.technical = QPushButton("查看完整记录字段")
+        from qfluentwidgets import setCustomStyleSheet
+        for reading in (self.summary_body, self.summary_context):
+            setCustomStyleSheet(reading, 'PlainTextEdit {background:transparent; border:none;}',
+                                'PlainTextEdit {background:transparent; border:none;}')
+            reading.setMinimumHeight(90)
+            reading.setMaximumHeight(220)
+        self.technical = QPushButton("技术详情")
         self.technical.setCheckable(True)
         self.technical.toggled.connect(self.detail.setVisible)
         for detail_widget in (self.summary_title, self.summary_meta, self.summary_body,
@@ -114,6 +131,8 @@ class PagedView(QWidget):
             # selectable beneath their category or date heading.
             self.memory_tree = QTreeWidget()
             self.memory_tree.setObjectName("memories_grouped_list" if name == "memories" else "tools_grouped_list")
+            self.memory_tree.setProperty("studioList", True)
+            self.memory_tree.setWordWrap(True)
             self.memory_tree.setHeaderHidden(True)
             self.memory_tree.setMinimumWidth(0)
             self.splitter.replaceWidget(0, self.memory_tree)
@@ -122,7 +141,9 @@ class PagedView(QWidget):
             self.memory_tree.itemClicked.connect(self._reopen_detail)
         self.splitter.addWidget(self.detail_panel)
         self.splitter.setStretchFactor(0, 1)
-        self.splitter.setStretchFactor(1, 2)
+        self.splitter.setStretchFactor(1, 1)
+        self.splitter.setHandleWidth(20)
+        self.splitter.setSizes([480, 420])
         layout.addWidget(self.splitter, 1)
         actions = QWidget(); self.action_bar = QHBoxLayout(actions); self.action_bar.setContentsMargins(0, 0, 0, 0)
         self.action_scroll = QScrollArea(); self.action_scroll.setWidgetResizable(True); self.action_scroll.setWidget(actions); self.action_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff); self.action_scroll.setMaximumHeight(64); self.action_scroll.setMinimumHeight(54)
@@ -346,19 +367,10 @@ class PagedView(QWidget):
 
     def _add_tool_tree_item(self, item: dict[str, Any], title: str, state: str) -> None:
         assert self.memory_tree is not None
-        identity = " ".join(str(item.get(key) or "") for key in ("id", "name", "tool_name", "summary")).casefold()
-        if any(word in identity for word in ("calendar", "timer", "schedule", "reminder")):
-            category = "日程管理"
-        elif "memory" in identity:
-            category = "记忆管理"
-        elif any(word in identity for word in ("character", "persona", "interaction", "attention", "goal")):
-            category = "角色与互动管理"
-        elif any(word in identity for word in ("file", "text", "document", "workspace")):
-            category = "文件与资料管理"
-        elif "screen" in identity or "screenshot" in identity:
-            category = "屏幕工具"
-        else:
-            category = "通用能力"
+        provider = str(item.get('plugin_id') or '')
+        category = self.provider_names.get(provider) or {
+            'agent':'助手管理', 'files':'工作区文件', 'schedule':'日程与计时器',
+            'screen':'屏幕截图', 'general':'基础工具'}.get(str(item.get('category')), '其他能力')
         group = self._tool_category_groups.get(category)
         if group is None:
             group = QTreeWidgetItem([category])
@@ -370,13 +382,16 @@ class PagedView(QWidget):
         row.setData(0, Qt.ItemDataRole.UserRole, item)
         row.setToolTip(0, str(item.get("summary") or title))
         group.addChild(row)
+        group.setExpanded(group is self.memory_tree.topLevelItem(0))
 
     def _select_tool_id(self, identity: Any) -> None:
         if self.memory_tree is None: return
         for group_index in range(self.memory_tree.topLevelItemCount()):
             group = self.memory_tree.topLevelItem(group_index)
+            if group is None: continue
             for row_index in range(group.childCount()):
                 row = group.child(row_index)
+                if row is None: continue
                 item = row.data(0, Qt.ItemDataRole.UserRole)
                 if isinstance(item, dict) and item.get("id", item.get("name")) == identity:
                     self.memory_tree.blockSignals(True)
@@ -529,6 +544,8 @@ class PagedView(QWidget):
             fields.append(('检查方式', {'event':'事件触发','review':'模型安排复查','opportunity':'交流机会','fallback':'低频整理'}.get(str(item.get('method')), '内部检查')))
             fields.append(('有效期至', friendly_time(item.get('expires_at'), timezone=self.display_timezone)))
             context.append('关注由系统结合最新交流自动复查，无需逐条接受；实际操作仍按工具权限确认。')
+        elif self.name == 'arrangements':
+            if item.get('response'): context.append('当前结果\n' + str(item['response']))
         elif self.name == "tools":
             body = str(item.get("summary") or "查看输入参数和执行权限；完整工具契约可在记录字段中查看。")
             risk = {0: "自动执行", 1: "需要普通授权", 2: "需要高风险授权"}
@@ -542,11 +559,16 @@ class PagedView(QWidget):
                     str(field.get("label") or field.get("name")) + ("（必填）" if field.get("required") else "（可选）")
                     for field in parameters if isinstance(field, dict)))
         elif self.name == "plugins":
-            body = f"当前提供方注册 {len(item.get('tool_ids', []))} 项工具，可在能力目录查看说明和权限。"
+            body = str(item.get("description") or "查看该提供方的工具及权限。")
+            fields.append(("工具", f"{len(item.get('tool_ids', []))} 项"))
+            if item.get("event_sources"):
+                fields.append(("事件源", f"{len(item['event_sources'])} 项"))
+            if item.get("page_title"):
+                fields.append(("操作页", str(item["page_title"])))
         for key, title in [("progress_note", "进度备注"), ("evidence", "人工证据"),
                            ("blocked_reason", "当前限制"), ("change_reason", "变更原因")]:
             if item.get(key): context.append(title + "\n" + str(item[key]))
-        metadata = " · ".join(title + "：" + str(value) for title, value in fields if value is not None and value != "")
+        metadata = "\n".join(title + "：" + str(value) for title, value in fields if value is not None and value != "")
         return body, metadata, "\n\n".join(context)
 
 

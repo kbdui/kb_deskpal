@@ -98,7 +98,6 @@ def window(qtbot: Any) -> tuple[MainWindow, FakeBridge]:
     state.conversations["daily"] = daily
     state.model_ready = True
     widget.chat_view.set_conversation("daily")
-    widget.arrangements.goals._settings({'request_use_default': False})
     return widget, bridge
 
 
@@ -124,10 +123,12 @@ def memory_item() -> dict[str, Any]:
 def show_task(qtbot: Any, widget: MainWindow, bridge: FakeBridge,
               review: dict[str, Any] | None = None) -> TaskCard:
     value = review or task_review()
-    widget.set_page(1)
-    widget.arrangements._task({"id": value["task_id"], "status": value["status"]})
-    deliver(qtbot, widget, bridge, bridge.requests_for("task_review")[-1], value)
-    return widget.arrangements.card_host.findChildren(TaskCard)[-1]
+    widget.set_page(0)
+    state = widget.chat_coordinator
+    state.set_review(value['task_id'], value)
+    state._timeline('daily', {'items': [{'id':'review-card', 'sequence':1, 'kind':'task_card',
+        'task_id':value['task_id'], 'visible':True}]}, False)
+    return widget.chat_view.findChildren(TaskCard)[-1]
 
 
 def text_in_tree(tree: QTreeWidget) -> str:

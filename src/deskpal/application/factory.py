@@ -22,6 +22,7 @@ from deskpal.memory.embedding import FastEmbedProvider
 from deskpal.memory.evaluation import LLMMemoryEvaluator
 from deskpal.planner.llm_planner import LLMPlanner
 from deskpal.planner.ports import Planner
+from deskpal.plugins.manifest import FILES, SCHEDULE, SCREEN
 from deskpal.scheduling import SchedulingService
 from deskpal.sandbox.workspace import WorkspaceSandbox
 from deskpal.tasks.manager import InMemoryTaskManager
@@ -116,13 +117,14 @@ def _create_core(config: AppConfig | None = None, *, planner: Planner | None = N
             scheduling_ready(scheduling)
         tools = BuiltinToolManager(sandbox, execution_log=execution_log)
         tools.register_builtin()
-        new_tools: tuple[Tool, ...] = (*calendar_tools(scheduling), *timer_tools(scheduling),
-                     DocumentSearchTool(sandbox), DocumentClassifyTool(sandbox), DocumentCopyTool(sandbox),
-                     DocumentMoveTool(sandbox), DocumentDeleteTool(sandbox),
-                     ScreenshotCaptureTool(sandbox, backend=screenshot_backend,
-                                           max_pixels=settings.screenshot.max_pixels))
-        for tool in new_tools:
-            tools.register(tool)
+        for tool in (*calendar_tools(scheduling), *timer_tools(scheduling)):
+            tools.register_plugin_tool(SCHEDULE, tool)
+        file_tools: tuple[Tool, ...] = (DocumentSearchTool(sandbox), DocumentClassifyTool(sandbox),
+            DocumentCopyTool(sandbox), DocumentMoveTool(sandbox), DocumentDeleteTool(sandbox))
+        for tool in file_tools:
+            tools.register_plugin_tool(FILES, tool)
+        tools.register_plugin_tool(SCREEN, ScreenshotCaptureTool(
+            sandbox, backend=screenshot_backend, max_pixels=settings.screenshot.max_pixels))
         scheduling.start()
         owned = resources
         agent = AgentCore(llm=llm, planner=selected_planner,

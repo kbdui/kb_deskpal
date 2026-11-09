@@ -14,9 +14,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                         help="启动独立配置、模型缓存和备份恢复维护界面")
     args = parser.parse_args(argv)
     try:
-        from PySide6.QtCore import QCoreApplication, Qt
+        from PySide6.QtCore import QCoreApplication, QEvent, Qt
         from PySide6.QtWidgets import QApplication
-        from qfluentwidgets import FluentWindow
+        from PySide6.QtWebEngineWidgets import QWebEngineView
+        from shiboken6 import delete
     except ImportError:
         print("GUI 依赖未安装：请在项目环境运行 python -m pip install -r requirements-gui.txt", file=sys.stderr)
         return 2
@@ -35,4 +36,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         provider_override="offline" if args.offline else None, allow_missing=True)), maintenance=args.maintenance,
         maintenance_provider_override="offline" if args.offline else None)
     launcher.start()
-    return app.exec()
+    result = app.exec()
+    launcher.deleteLater()
+    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+    delete(app)
+    return result

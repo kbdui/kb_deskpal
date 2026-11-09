@@ -42,6 +42,30 @@ class LearningStore:
                 'INSERT OR IGNORE INTO memory_learning_receipts VALUES (?, ?)',
                 ((self._organized_token(task_id), stamp) for task_id in task_ids))
 
+    @staticmethod
+    def _message_token(source_id: str, content: str) -> str:
+        return sha256(('organized-message:' + source_id + ':' +
+            sha256(content.encode('utf-8')).hexdigest()).encode('utf-8')).hexdigest()
+
+    def organized_messages(self, messages: dict[str, str]) -> set[str]:
+        """按实际正文标记双方消息；旧整轮回执只证明用户消息曾被整理。"""
+        if not messages:
+            return set()
+        tokens = {self._message_token(key, content): key for key, content in messages.items()}
+        with self.memory._lock:
+            slots = ','.join('?' for _ in tokens)
+            covered = {tokens[row[0]] for row in self.memory._db.execute(
+                f'SELECT token FROM memory_learning_receipts WHERE token IN ({slots})', tuple(tokens))}
+        legacy = self.organized_turns({key.rsplit(':', 1)[0] for key in messages if key.endswith(':user')})
+        covered.update(key for key in messages if key.endswith(':user') and key.rsplit(':', 1)[0] in legacy)
+        return covered
+
+    def mark_messages(self, messages: dict[str, str]) -> None:
+        with self.memory.batch():
+            stamp = _stamp(self.memory._now())
+            self.memory._db.executemany('INSERT OR IGNORE INTO memory_learning_receipts VALUES (?, ?)',
+                ((self._message_token(key, content), stamp) for key, content in messages.items()))
+
     def register(self, identity: str, *, kind: str, task_id: str, conversation_id: str,
                  conversation_epoch: int, privacy_epoch: int, role_revision: int,
                  refs: list[dict[str, Any]]) -> dict[str, Any]:

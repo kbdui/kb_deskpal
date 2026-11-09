@@ -133,25 +133,27 @@ class FeedbackLearning:
         created_at = source_task.created_at.isoformat() if source_task else now.isoformat()
         current_ref = dict(kind='dialogue_turn', id=task_id + ':user', revision=max(1, context.sequence),
                            conversation_id=context.conversation_id, available=True, use_policy=context.use_policy)
-        catalog['user'] = dict(content=request, role='user', origin='user_message', refs=[current_ref], use_policy=context.use_policy, created_at=created_at)
+        user_speaker = dict(speaker_id='local:user', speaker_name='用户', speaker_kind='person', channel='deskpal')
+        character_speaker = dict(speaker_id='character:' + context.role_id, speaker_name='当前角色', speaker_kind='character', channel='deskpal')
+        catalog['user'] = dict(content=request, role='user', origin='user_message', refs=[current_ref], use_policy=context.use_policy, created_at=created_at, **user_speaker)
         refs.append(current_ref)
         if context.origin == 'proactive':
             catalog.pop('user', None)
             refs.remove(current_ref)
         # 助手草稿可供理解，不可作为独立事实或习惯的授权依据。
-        catalog['assistant'] = dict(content=response, role='assistant', origin='assistant_output', refs=[])
-        organized = self.store.organized_turns({
-            entry['source_ref']['id'].rsplit(':', 1)[0] for entry in context.history if entry.get('source_ref')
-        })
+        catalog['assistant'] = dict(content=response, role='assistant', origin='assistant_output', refs=[], published=False, **character_speaker)
+        organized = self.store.organized_messages({entry['source_ref']['id']: str(entry.get('content', ''))
+            for entry in context.history if entry.get('source_ref')})
         for index, entry in enumerate(context.history):
             source = entry.get('source_ref')
-            if not source or source['id'].rsplit(':', 1)[0] in organized:
+            if not source or source['id'] in organized:
                 continue
             ref = dict(kind='dialogue_turn', id=source['id'], revision=source['revision'],
                 conversation_id=context.conversation_id, available=True, use_policy=source.get('use_policy', context.use_policy))
             historical_task = self.app.tasks.get(source['id'].rsplit(':', 1)[0])
             catalog[f'history{index}'] = dict(content=str(entry.get('content', '')), role=entry.get('role', 'assistant'),
                 origin='user_message' if entry.get('role') == 'user' else 'assistant_output', refs=[ref],
+                published=True, **(user_speaker if entry.get('role') == 'user' else character_speaker),
                 use_policy=source.get('use_policy', context.use_policy), created_at=historical_task.created_at.isoformat() if historical_task else created_at)
             refs.append(ref)
         for index, observation in enumerate(observations):
@@ -204,8 +206,11 @@ class FeedbackLearning:
             catalog[f'memory{index}'] = dict(content=evidence if available else '', role='evidence',
                 origin=item.source.origin, refs=[ref], available=available, use_policy=item.source.use_policy.value)
             catalog[f'memory{index}']['created_at'] = item.source.created_at.isoformat()
+            catalog[f'memory{index}'].update({key: getattr(item.source, key) for key in
+                ('speaker_id', 'speaker_name', 'speaker_kind', 'channel')})
             understandings.append(dict(id=item.id, revision=item.revision, status=item.status.value,
                 content=item.draft.content, destination=item.draft.destination, claim_type=item.draft.claim_type.value,
+                subject=item.draft.subject,
                 reason=item.draft.reason, uncertainty=item.draft.uncertainty,
                 quote=item.draft.quote,
                 review_after=item.draft.review_after.isoformat() if item.draft.review_after else None,
@@ -249,6 +254,7 @@ class FeedbackLearning:
                 continue
             value = dict(content=content, role='user' if is_user else 'assistant',
                 origin='user_message' if is_user else 'assistant_output', refs=[ref],
+                published=True, **(user_speaker if is_user else character_speaker),
                 available=True, use_policy=policy, created_at=source_task.created_at.isoformat())
             if len(json.dumps(payload, ensure_ascii=False).encode('utf-8')) + len(json.dumps(value, ensure_ascii=False).encode('utf-8')) > 85000:
                 continue
@@ -268,10 +274,10 @@ class FeedbackLearning:
         terms = tuple(dict.fromkeys((query, *sorted(_terms(query), key=lambda term: (-len(term), term)))))
         turns = self.app._conversation_repository.load(context.conversation_id, context.conversation_epoch,
             context.sequence, search_terms=terms)
-        organized = self.store.organized_turns({turn.task_id for turn in turns})
+        organized = self.store.organized_messages({turn.task_id + ':' + side: body
+            for turn in turns for side, body in (('user', turn.request), ('assistant', turn.response))})
         ranked = sorted(
-            (turn for turn in turns if turn.task_id in organized
-             and (self.app._interaction.allow_restricted or turn.use_policy != 'local_only')),
+            (turn for turn in turns if self.app._interaction.allow_restricted or turn.use_policy != 'local_only'),
             key=lambda turn: (-_lexical(query, turn.request + '\n' + turn.response), -turn.sequence))
         catalog = payload['catalog']
         size = 0
@@ -292,7 +298,10 @@ class FeedbackLearning:
                     conversation_id=context.conversation_id, available=True, use_policy=turn.use_policy)
                 entries[f'history_lookup{count}_{side}'] = dict(content=body, role=side, refs=[ref],
                     origin='user_message' if side == 'user' else 'assistant_output',
-                    use_policy=turn.use_policy, created_at=task.created_at.isoformat(), previously_organized=True)
+                    speaker_id='local:user' if side == 'user' else 'character:' + context.role_id,
+                    speaker_name='用户' if side == 'user' else '当前角色',
+                    speaker_kind='person' if side == 'user' else 'character', channel='deskpal', published=True,
+                    use_policy=turn.use_policy, created_at=task.created_at.isoformat(), previously_organized=ref['id'] in organized)
             if not entries:
                 continue
             lookup_refs = [entry['refs'][0] for entry in entries.values()]
@@ -347,9 +356,10 @@ class FeedbackLearning:
                *, fresh: bool = False) -> tuple[MemorySource, MemoryDraft]:
         permitted = {'observed_event': {'tool_result'}, 'user_report': {'user_message', 'user_confirmation'},
             'external_claim': {'user_message', 'user_confirmation', 'imported_document'},
-            'hypothesis': {'user_message', 'user_confirmation', 'tool_result', 'imported_document'}}
+            'hypothesis': {'user_message', 'user_confirmation', 'tool_result', 'imported_document', 'assistant_output'}}
         evidence = next((catalog[key] for key in row['sources'] if catalog[key].get('origin') in permitted[row['claim_type']]
             and catalog[key].get('available', True) and row['quote'] in catalog[key]['content']
+            and (catalog[key]['origin'] != 'assistant_output' or bool(catalog[key].get('refs')))
             and (not fresh or not catalog[key].get('previously_organized'))), None)
         if evidence is None:
             raise FeedbackValidationError('quote_invalid', 'quote')
@@ -359,9 +369,11 @@ class FeedbackLearning:
         policy = ('local_only' if context.use_policy == 'local_only' or any(catalog[key].get('use_policy') == 'local_only'
                   for key in row['sources']) else 'cloud_allowed')
         source = MemorySource(row['quote'], id=uuid4().hex, origin=evidence['origin'], task_id=context.task_id,
-            session_id=context.conversation_id, use_policy=UsePolicy(policy), created_at=datetime.fromisoformat(evidence['created_at']))
+            session_id=context.conversation_id, use_policy=UsePolicy(policy), created_at=datetime.fromisoformat(evidence['created_at']),
+            **{key: evidence.get(key, '') for key in ('speaker_id', 'speaker_name', 'speaker_kind', 'channel')})
         draft = MemoryDraft(row['content'], row['quote'], claim_type=ClaimType(row['claim_type']),
             kind=MemoryKind.EPISODIC if row['destination'] == 'episode' else MemoryKind.SEMANTIC,
+            subject=row.get('subject') or (source.speaker_id if source.speaker_id not in ('', 'local:user') else 'user'),
             destination=row['destination'], reason=row['reason'], uncertainty=row['uncertainty'],
             review_after=moment(row['review_after']), valid_from=moment(row['valid_from']), valid_to=moment(row['valid_to']))
         return source, draft
@@ -602,6 +614,7 @@ class FeedbackLearning:
             if not habit['explicit'] and buffer is not None and not any(row['id'] == buffer.id and row['decision'] == 'adopt' for row in result['reviews']):
                 raise ValueError('Inferred habit must review and consume its buffer')
             if habit['explicit'] and not any(catalog[key]['origin'] in ('user_message', 'user_confirmation')
+                    and catalog[key].get('speaker_id', '') in ('', 'local:user')
                     and catalog[key].get('available', True)
                     and (not identity.startswith('turn:') or (catalog[key]['role'] == 'user'
                          and not catalog[key].get('previously_organized'))) for key in habit['sources']):
@@ -616,7 +629,9 @@ class FeedbackLearning:
             for row in result['memories']:
                 source, draft = self._draft(row, catalog, context, fresh=identity.startswith('turn:'))
                 # 精确相同文本只作为确定性去重；语义合并由 reviews 决定。
-                duplicate = next((item for item in items.values() if item.draft.content == draft.content and item.draft.destination == draft.destination), None)
+                duplicate = next((item for item in items.values() if item.draft.content == draft.content
+                    and item.draft.destination == draft.destination and item.draft.subject == draft.subject
+                    and item.source.speaker_id == source.speaker_id), None)
                 if duplicate:
                     self.store.link(duplicate.id, self._references(row, catalog))
                     self.store.record(identity, duplicate.id, 'duplicate_retained', draft.content, draft.reason, draft.uncertainty)
@@ -718,11 +733,11 @@ class FeedbackLearning:
                         reset_sources=not payload['previous_summary'] or bool(payload['previous_summary'].get('unavailable'))))
             self.store.finish(identity, 'completed')
             if identity == 'turn:' + context.task_id:
-                organized = {context.task_id}
-                organized.update(ref['id'].rsplit(':', 1)[0]
-                    for key, entry in catalog.items() if key.startswith('history') and not entry.get('previously_organized')
-                    for ref in entry['refs'] if ref['kind'] == 'dialogue_turn')
-                self.store.mark_organized(organized)
+                messages = {ref['id']: entry['content'] for key, entry in catalog.items()
+                    if key == 'user' or (key.startswith('history') and not entry.get('previously_organized'))
+                    for ref in entry['refs'] if ref['kind'] == 'dialogue_turn'}
+                # 本轮只标用户原话；角色尚未发布的草稿没有最终正文回执。
+                self.store.mark_messages(messages)
         # SQLite 事务已提交；跨库靠幂等回执恢复，不把网络或另一个库放进本库事务。
         delivery_failed = False
         try:

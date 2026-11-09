@@ -114,7 +114,8 @@ def test_compact_chat_keeps_readable_switching_and_independent_draft(qtbot: Any)
     view.set_selector_visible(False)
     view.selector.setCurrentIndex(view.selector.findData("project"))
     assert view.conversation_id == "project"
-    assert view.conversation_row.isVisible()
+    assert view.conversation_row.isHidden()
+    assert view.title.isVisible()
     assert view.selector.width() >= 120
     view.selector.setCurrentIndex(view.selector.findData("daily"))
     assert view.input.toPlainText() == "保留日常草稿"

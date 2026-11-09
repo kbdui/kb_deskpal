@@ -37,7 +37,7 @@ SCOPE = "four_sqlite_stores_only"
 ASSET_SCOPE = "four_sqlite_stores_and_managed_assets"
 EXCLUSIONS = ["workspace_files", "configuration", ".env", "credentials", "model_cache", "logs"]
 # Frozen, recognized on-disk versions. Reading these never performs a migration.
-VERSIONS = {DATABASES[0]: {1, 2, 3, 4, 5, 6, 7}, DATABASES[1]: {1, 2, 3, 4}, DATABASES[2]: {1}, DATABASES[3]: {1, 2, 3, 4}}
+VERSIONS = {DATABASES[0]: {1, 2, 3, 4, 5, 6, 7, 8}, DATABASES[1]: {1, 2, 3, 4}, DATABASES[2]: {1}, DATABASES[3]: {1, 2, 3, 4}}
 _TABLES = {
     DATABASES[0]: {"schema_version", "task", "submission", "immutableplan", "attempt", "audit_outbox", "deletionjob", "memory_block"},
     DATABASES[1]: {"memory_meta", "memory_sources", "memory_revisions", "memory_heads", "memory_tombstones"},
@@ -196,6 +196,9 @@ def _schema(connection: sqlite3.Connection, name: str) -> int:
             if version >= 7:
                 from deskpal.workflow.schema_v7 import validate as validate_v7
                 validate_v7(connection)
+            if version >= 8:
+                from deskpal.workflow.schema_v8 import validate as validate_v8
+                validate_v8(connection)
         if name == DATABASES[3] and version == 4:
             from deskpal.companion.schema import validate as validate_character
             validate_character(connection)

@@ -146,6 +146,9 @@ def _record(item: MemoryItem, reasons: tuple[str, ...]) -> MemoryRecord:
     evidence = {
         "type": "memory_evidence", "memory_id": item.id, "revision": item.revision,
         "claim_type": draft.claim_type.value, "source_origin": item.source.origin,
+        "subject": draft.subject, "speaker_id": item.source.speaker_id,
+        "speaker_name": item.source.speaker_name, "speaker_kind": item.source.speaker_kind,
+        "channel": item.source.channel,
         "source_id": item.source.id, "source_time": item.source.created_at.isoformat(),
         "recorded_at": item.recorded_at.isoformat(), "scope": draft.scope,
         "valid_from": draft.valid_from.isoformat() if draft.valid_from else None,

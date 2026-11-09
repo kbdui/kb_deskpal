@@ -107,16 +107,19 @@ class ToolCatalog:
         return list(json.loads(canonical(items)))
 
     def catalog(self, *, q: str = "", category: str | None = None, origin: str | None = None,
+                plugin_id: str | None = None,
                 cursor: str | None = None, limit: int = 50, known_catalog_revision: str | None = None) -> dict[str, Any]:
         if not isinstance(q, str) or len(q) > 200 or type(limit) is not int or not 1 <= limit <= 100:
             raise ValueError("Invalid catalogue query or page limit")
-        if any(value is not None and (not isinstance(value, str) or len(value) > 200) for value in (category, origin)):
+        if any(value is not None and (not isinstance(value, str) or len(value) > 200)
+               for value in (category, origin, plugin_id)):
             raise ValueError("Invalid catalogue filter")
         items = self._items()
         revision = sha256(canonical(items).encode()).hexdigest()
         filtered = [item for item in items if (not category or item["category"] == category) and (not origin or item["origin"] == origin)
+                    and (not plugin_id or item["plugin_id"] == plugin_id)
                     and (not q or q.casefold() in (item["name"] + item["display_name"] + item["summary"]).casefold())]
-        query = sha256(canonical([q, category, origin]).encode()).hexdigest()[:16]
+        query = sha256(canonical([q, category, origin, plugin_id]).encode()).hexdigest()[:16]
         prefix = revision + ":" + query + ":"
         offset = 0
         if cursor is not None:
@@ -146,10 +149,22 @@ class ToolCatalog:
 
     def plugins(self) -> dict[str, Any]:
         items = self._items()
-        groups: dict[str, dict[str, Any]] = {}
+        manifests = getattr(self._tools, "plugin_manifests", None)
+        groups: dict[str, dict[str, Any]] = {
+            manifest.id: {
+                "id": manifest.id, "name": manifest.name, "description": manifest.description,
+                "origin": "builtin", "tool_ids": [], "api_version": manifest.api_version,
+                "event_sources": list(manifest.event_sources), "page_title": manifest.page_title,
+                "capabilities": {"read_only": True, "installation": False, "enable_disable": False,
+                                 "storage": manifest.storage, "page": manifest.page_title is not None},
+            }
+            for manifest in (manifests() if callable(manifests) else ())
+        }
         for item in items:
             identity = item["plugin_id"]
             group = groups.setdefault(identity, {"id": identity, "name": "内置工具" if identity == "builtin" else "主机注册的可信工具",
                 "origin": item["origin"], "tool_ids": [], "capabilities": {"read_only": True, "installation": False, "enable_disable": False}})
             group["tool_ids"].append(item["id"])
-        return {"schema_version": 1, "items": list(groups.values()), "catalog_revision": sha256(canonical(items).encode()).hexdigest()}
+        result = list(groups.values())
+        return {"schema_version": 1, "items": result,
+                "catalog_revision": sha256(canonical(result).encode()).hexdigest()}

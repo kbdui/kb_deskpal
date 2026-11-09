@@ -5,6 +5,7 @@ from collections.abc import Callable
 from typing import Any, Mapping
 
 from deskpal.execution_log import ExecutionLog, NullExecutionLog
+from deskpal.plugins.manifest import FILES, GENERAL, PluginManifest
 from deskpal.sandbox.errors import PathViolation, PermissionDenied, ToolNotFound
 from deskpal.sandbox.workspace import WorkspaceSandbox
 
@@ -18,6 +19,7 @@ from .ports import Tool
 class _Registered:
     tool: Tool
     spec: ToolSpec
+    plugin_id: str | None = None
 
 
 def _copy_spec(spec: ToolSpec) -> ToolSpec:
@@ -51,6 +53,7 @@ class BuiltinToolManager:
         self._sandbox = sandbox
         self._log = execution_log if execution_log is not None else NullExecutionLog()
         self._tools: dict[str, _Registered] = {}
+        self._plugins: dict[str, PluginManifest] = {}
         self._result_observer: Callable[[str, ToolResult], None] | None = None
 
     def set_result_observer(self, observer: Callable[[str, ToolResult], None]) -> None:
@@ -60,6 +63,26 @@ class BuiltinToolManager:
         self._result_observer = observer
 
     def register(self, tool: Tool) -> None:
+        self._register(tool)
+
+    def declare_plugin(self, manifest: PluginManifest) -> None:
+        self._check_manifest(manifest)
+        self._plugins[manifest.id] = manifest
+
+    def _check_manifest(self, manifest: PluginManifest) -> None:
+        current = self._plugins.get(manifest.id)
+        if current is not None and current != manifest:
+            raise ValueError(f"Conflicting plugin manifest: {manifest.id}")
+
+    def register_plugin_tool(self, manifest: PluginManifest, tool: Tool) -> None:
+        self._check_manifest(manifest)
+        self._register(tool, manifest.id)
+        self._plugins[manifest.id] = manifest
+
+    def plugin_manifests(self) -> tuple[PluginManifest, ...]:
+        return tuple(self._plugins.values())
+
+    def _register(self, tool: Tool, plugin_id: str | None = None) -> None:
         source = tool.spec
         if not isinstance(source.name, str) or not source.name.strip():
             raise ValueError("Tool name must be a non-empty string")
@@ -82,16 +105,17 @@ class BuiltinToolManager:
         spec = ToolSpec(source.name, source.description, freeze_json(parameters), permission,
                         source.contract_version)
         self._log.record("tool_registered", data={"tool_name": spec.name, "permission_level": int(permission)})
-        self._tools[spec.name] = _Registered(tool, spec)
+        self._tools[spec.name] = _Registered(tool, spec, plugin_id)
 
     def register_builtin(self) -> None:
         """Register echo, time, read_text and write_text on this sandbox."""
         # Check all names before mutation so a second call cannot partly register.
         if any(name in self._tools for name in ("echo", "time", "read_text", "write_text")):
             raise ValueError("One or more builtin tools are already registered")
-        tools: tuple[Tool, ...] = (EchoTool(), TimeTool(), ReadTextTool(self._sandbox), WriteTextTool(self._sandbox))
-        for tool in tools:
-            self.register(tool)
+        self.register_plugin_tool(GENERAL, EchoTool())
+        self.register_plugin_tool(GENERAL, TimeTool())
+        self.register_plugin_tool(FILES, ReadTextTool(self._sandbox))
+        self.register_plugin_tool(FILES, WriteTextTool(self._sandbox))
 
     def list_tools(self) -> tuple[ToolSpec, ...]:
         return tuple(_copy_spec(entry.spec) for entry in self._tools.values())
@@ -101,8 +125,10 @@ class BuiltinToolManager:
         entry = self._tools.get(name)
         if entry is None:
             raise ToolNotFound("Tool is not registered")
-        origin = "builtin" if type(entry.tool).__module__.startswith("deskpal.tools.") else "host_registered"
-        result = {"origin": origin, "plugin_id": origin, "availability": "check_at_execution", "reason": "执行时检查参数、工作区权限与资源状态"}
+        origin = ("builtin" if entry.plugin_id or type(entry.tool).__module__.startswith("deskpal.tools.")
+                  else "host_registered")
+        result = {"origin": origin, "plugin_id": entry.plugin_id or origin,
+                  "availability": "check_at_execution", "reason": "执行时检查参数、工作区权限与资源状态"}
         if type(entry.tool).__module__ == "deskpal.tools.screenshot":
             inspect = getattr(entry.tool, "catalog_availability", None)
             if callable(inspect):

@@ -87,15 +87,15 @@ def test_scale_validates_full_canvas_mask_and_readable_label(qtbot, tmp_path):
     window.set_stable_mask(main)
     assert prefs.set_pet_scale(1.6)
     window.set_scale(prefs.pet_scale)
-    assert (window.width(), window.height()) == (384, 428)
+    assert (window.width(), window.height()) == (384, 384)
     assert window.mask().contains(QPoint(192, 192))
     assert not window.mask().contains(QPoint(8, 8))
-    assert window.mask().contains(QPoint(24, 400))
+    assert not window.mask().contains(QPoint(24, 400))
     region = window.mask()
     window.present(QPixmap.fromImage(image("#ff0000")), "等待确认")
     assert window.mask() == region
     window.set_scale(.6)
-    assert window.height() == 188 and window._label.height() == 36
+    assert window.height() == 144 and not hasattr(window, "_label")
 
 
 def test_temp_hide_preserves_preferences_and_stops_pet_reads(qtbot, tmp_path):
@@ -254,10 +254,10 @@ def test_pet_chat_reopens_default_with_shared_drafts_and_no_new_submission(qtbot
 def test_reminder_notification_requires_same_occurrence_revalidation(qtbot, tmp_path):
     prefs = preferences(tmp_path)
     prefs.set_notifications_enabled(True)
-    prefs.set_quiet_hours(0, 0)
     shown, requests, navigated = [], [], []
     controller = NotificationController(prefs, QSettings(str(tmp_path / "notifications.ini"), QSettings.Format.IniFormat),
         shown.append, lambda: datetime(2026, 10, 25, 12, tzinfo=timezone.utc))
+    controller.update_policy({'quiet':{'quiet_start':0, 'quiet_end':0, 'reminder_bypass':False, 'timezone':'UTC'}})
     controller.revalidation_requested.connect(requests.append)
     controller.navigation_requested.connect(lambda kind, identity: navigated.append((kind, identity)))
     controller.ingest([], baseline=True, next_sequence=10)

@@ -2,15 +2,52 @@
 
 from typing import Any
 
-from PySide6.QtCore import QPoint, Qt, Signal
+from PySide6.QtCore import QPoint, Qt, Signal, QTimer
 from PySide6.QtGui import QAction
-from PySide6.QtWidgets import QSizePolicy, QStackedWidget, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QSizePolicy, QStackedWidget, QVBoxLayout, QWidget, QLayoutItem
 from qfluentwidgets import (
-    BodyLabel as BodyLabel, CheckBox as CheckBox, ComboBox, DoubleSpinBox as DoubleSpinBox, LineEdit as FluentLineEdit,
+    FlowLayout as FluentFlowLayout, BodyLabel as BodyLabel, CheckBox as CheckBox, ComboBox, DoubleSpinBox as FluentDoubleSpinBox, LineEdit as FluentLineEdit,
     ListWidget as ListWidget, Pivot, PlainTextEdit as PlainTextEdit, PushButton as PushButton, ScrollArea as FluentScrollArea,
-    Slider as Slider, SpinBox as SpinBox, ToolButton as ToolButton, TreeWidget as TreeWidget, FluentWindow, FluentIcon,
+    Slider as Slider, SpinBox as FluentSpinBox, ToolButton as ToolButton, TreeWidget as TreeWidget, FluentWindow, FluentIcon,
     NavigationItemPosition, RoundMenu,
 )
+
+
+class ActionFlowLayout(FluentFlowLayout):
+    """仅用于按钮换行；修正 1.11.3 takeAt 的 QWidget 返回值，遵守 Qt 布局析构契约。"""
+    def takeAt(self, index: int) -> QLayoutItem | None:
+        item = self.itemAt(index)
+        if item is not None:
+            super().takeAt(index)
+        return item
+
+
+def _fit_numeric_editor(spin: Any) -> None:
+    """Qt 6.12 可能把 Fluent 自绘按钮旁的原生编辑区压到 1px，按按钮实际位置排布。"""
+    field = spin.lineEdit()
+    if field is not None:
+        right = spin.upButton.x() if spin.upButton.isVisible() else spin.width() - 8
+        field.setGeometry(12, 4, max(1, right - 18), max(1, spin.height() - 8))
+
+
+class SpinBox(FluentSpinBox):
+    def resizeEvent(self, event: Any) -> None:
+        super().resizeEvent(event)
+        QTimer.singleShot(0, self, lambda: _fit_numeric_editor(self))
+
+    def showEvent(self, event: Any) -> None:
+        super().showEvent(event)
+        QTimer.singleShot(0, self, lambda: _fit_numeric_editor(self))
+
+
+class DoubleSpinBox(FluentDoubleSpinBox):
+    def resizeEvent(self, event: Any) -> None:
+        super().resizeEvent(event)
+        QTimer.singleShot(0, self, lambda: _fit_numeric_editor(self))
+
+    def showEvent(self, event: Any) -> None:
+        super().showEvent(event)
+        QTimer.singleShot(0, self, lambda: _fit_numeric_editor(self))
 
 
 class LineEdit(FluentLineEdit):
@@ -134,8 +171,8 @@ def primary(button: PushButton) -> None:
     from qfluentwidgets import setCustomStyleSheet
     button.setProperty('deskpalPrimary', True)
     setCustomStyleSheet(button,
-        'PushButton {background:#52735d;color:white;border:1px solid #52735d;} PushButton:hover {background:#44654f;} PushButton:disabled {background:#e6e9e3;color:#869082;}',
-        'PushButton {background:#a6c4aa;color:#19281e;} PushButton:disabled {background:#344137;color:#88978c;}')
+        'PushButton {background:#6261d8;color:white;border:1px solid #6261d8;} PushButton:hover {background:#5554c5;} PushButton:disabled {background:#eeeef5;color:#999bad;}',
+        'PushButton {background:#b5b0ff;color:#24213b;} PushButton:disabled {background:#39364f;color:#9c98b3;}')
 
 
 class SettingsWindow(FluentWindow):

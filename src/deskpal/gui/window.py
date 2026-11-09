@@ -1,4 +1,4 @@
-"""Warm five-entry shell; domain state belongs to shared coordinators."""
+"""Studio five-entry shell; domain state belongs to shared coordinators."""
 from typing import Any, overload
 from PySide6.QtCore import QByteArray, QEvent, QSize, QTimer, Qt, Signal, Slot
 from PySide6.QtGui import QCloseEvent, QResizeEvent, QShowEvent
@@ -47,6 +47,7 @@ class MainWindow(FluentWindow):
         self.chat_view = ChatView(self.chat_coordinator)
         self.arrangements = ArrangementsPage(self.chat_coordinator)
         self.memory_page = MemoryPage(bridge)
+        self.memory_page.open_conversation.connect(lambda identity, task_id: self.open_conversation(identity, task_id=task_id or None))
         self.catalog_page = CatalogPage(bridge)
         self.settings_page = SettingsPage(self.chat_coordinator, preferences, self.request_maintenance,
                                           profiles=self.request_profiles)
@@ -56,14 +57,14 @@ class MainWindow(FluentWindow):
             (self.chat_view, "聊天", "chat", FluentIcon.CHAT, NavigationItemPosition.TOP),
             (self.arrangements, "安排", "arrangements", FluentIcon.CALENDAR, NavigationItemPosition.TOP),
             (self.memory_page, "记忆", "memory", FluentIcon.BOOK_SHELF, NavigationItemPosition.TOP),
-            (self.catalog_page, "工具插件", "tools", FluentIcon.APPLICATION, NavigationItemPosition.TOP),
+            (self.catalog_page, "工具与插件", "tools", FluentIcon.APPLICATION, NavigationItemPosition.TOP),
             (self.settings_page, "设置", "settings", FluentIcon.SETTING, NavigationItemPosition.BOTTOM)):
             page.setObjectName(route)
             self.nav_buttons.append(self.addSubInterface(page, icon, title, position=position))
         # 内部详情与页面共享工作区，不再使用 QMainWindow 的停靠窗或第二列常驻目录。
         self.widgetLayout.removeWidget(self.stack)
-        self.workspace = QWidget(self); self.workspace.setObjectName("deskpalWorkspace")
-        outer = QVBoxLayout(self.workspace); outer.setContentsMargins(12, 8, 12, 12)
+        self.workspace = QWidget(self); self.workspace.setObjectName("deskpalWorkspace"); self.workspace.setAttribute(Qt.WidgetAttribute.WA_StyledBackground)
+        outer = QVBoxLayout(self.workspace); outer.setContentsMargins(16, 12, 16, 16)
         self.state_label = text_label("正在准备本地数据…"); self.state_label.setObjectName("subtle")
         outer.addWidget(self.state_label)
         self.content_splitter = QSplitter(Qt.Orientation.Horizontal)
@@ -261,7 +262,7 @@ class MainWindow(FluentWindow):
         if identity and QMessageBox.question(self, "删除专项会话", "删除这段会话及其相关任务正文？此操作无法撤销。", QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No) == QMessageBox.StandardButton.Yes: self.chat_coordinator.remove_conversation(identity, True)
 
     def open_conversation(self, id: str, task_id: str | None = None) -> None:
-        self.set_page(0); self.chat_view.set_conversation(id or self.chat_coordinator.default_id, task_id); self._directory(); self.chat_view.focus_input()
+        self.set_page(0); self.chat_view.set_conversation(self.chat_coordinator.default_id if id in {"", "default"} else id, task_id); self._directory(); self.chat_view.focus_input()
 
     def navigate(self, kind: str, entity_id: str) -> None:
         self.showNormal(); self.raise_(); self.activateWindow()
@@ -413,7 +414,7 @@ class MainWindow(FluentWindow):
         if state != "CleanupBlocked": self.cleanup_timer.stop()
         if state in {"CleanupBlocked", "Closing", "Closed", "StartupFailed"}: self.clear_sensitive()
         if state == "CleanupBlocked":
-            self.set_page(4); self.settings_page.tabs.setCurrentIndex(6); self._cleanup_request = None
+            self.set_page(4); self.settings_page.tabs.setCurrentIndex(5); self._cleanup_request = None
             self.cleanup_timer.start(); self._poll_cleanup()
         if state == "Closed": self._allow_close = True; self.close()
 
@@ -457,7 +458,8 @@ class MainWindow(FluentWindow):
                 or self.arrangements.goals.has_unsaved_content()
                 or self.settings_page.interaction.dirty
                 or self.settings_page.companion._config_dirty
-                or bool(self.settings_page.appearance.token))
+                or bool(self.settings_page.appearance.token)
+                or bool(self.settings_page.avatars.token))
 
     def confirm_exit(self) -> bool:
         if self.lifecycle in {"Closing", "Closed", "StartupFailed"} or not self.has_unsaved_content(): return True

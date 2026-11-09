@@ -8,8 +8,9 @@ from PySide6.QtCore import QObject, Slot
 from PySide6.QtWidgets import QApplication
 
 from .host import DesktopHost
-from .maintenance import MaintenanceBridge, MaintenanceWindow
-from .profiles import ProfileWindow, profile_bridge
+from .maintenance import MaintenanceBridge
+from .profiles import profile_bridge
+from .studio_service import StudioMaintenanceWindow, StudioProfileWindow
 
 
 class DesktopLauncher(QObject):
@@ -17,9 +18,9 @@ class DesktopLauncher(QObject):
                  maintenance: bool = False, host_factory: Callable[..., Any] = DesktopHost,
                  maintenance_provider_override: str | None = None,
                  bridge_factory: Callable[..., Any] = MaintenanceBridge,
-                 window_factory: Callable[..., Any] = MaintenanceWindow,
+                 window_factory: Callable[..., Any] = StudioMaintenanceWindow,
                  profile_bridge_factory: Callable[..., Any] = profile_bridge,
-                 profile_window_factory: Callable[..., Any] = ProfileWindow,
+                 profile_window_factory: Callable[..., Any] = StudioProfileWindow,
                  parent: QObject | None = None) -> None:
         super().__init__(parent)
         self.config_path = config_path
@@ -36,6 +37,7 @@ class DesktopLauncher(QObject):
         self.profile_window: Any = None
         self._maintenance_pending = False
         self._profiles_pending = False
+        self._profile_action = ""
         self._startup_failed = False
         self._startup_reason = ""
         self._settings_geometry: Any = None
@@ -76,15 +78,20 @@ class DesktopLauncher(QObject):
             window = self.host.window
             if self._settings_geometry is not None:
                 window.restoreGeometry(self._settings_geometry)
-            window.set_page(4)
-            window.settings_page.tabs.setCurrentIndex(self._return_settings_tab)
+            if hasattr(window, 'show_settings'):
+                window.show_settings(self._return_settings_tab)
+            else:
+                window.set_page(4)
+                window.settings_page.tabs.setCurrentIndex(self._return_settings_tab)
             self._return_settings_tab = None
 
     def _remember_settings(self) -> None:
         window = self.host.window
         if hasattr(window, 'saveGeometry'):
             self._settings_geometry = window.saveGeometry()
-        if hasattr(window, 'settings_page'):
+        if hasattr(window, 'setting_index'):
+            self._return_settings_tab = window.setting_index
+        elif hasattr(window, 'settings_page'):
             self._return_settings_tab = window.settings_page.tabs.currentIndex()
 
     @Slot()
@@ -92,6 +99,7 @@ class DesktopLauncher(QObject):
         if self.host is None or self._maintenance_pending or self._profiles_pending:
             return
         self._profiles_pending = True
+        self._profile_action = getattr(self.host.window, "profile_action", "")
         self._remember_settings()
         self.host.bridge.shutdown()
 
@@ -159,6 +167,9 @@ class DesktopLauncher(QObject):
         if self._settings_geometry is not None:
             self.profile_window.restoreGeometry(self._settings_geometry)
         self.profile_window.finished.connect(self._profiles_finished)
+        if hasattr(self.profile_window, "initial_action"):
+            self.profile_window.initial_action = self._profile_action
+        self._profile_action = ""
         self.profile_window.open()
         if self._startup_failed:
             self._startup_failed = False
@@ -166,7 +177,10 @@ class DesktopLauncher(QObject):
             if self._startup_reason:
                 self.profile_window.startup_notice += "\n" + self._startup_reason
             self._startup_reason = ""
-            self.profile_window.status.setText(self.profile_window.startup_notice)
+            if hasattr(self.profile_window, "status_message"):
+                self.profile_window.status_message(self.profile_window.startup_notice)
+            else:
+                self.profile_window.status.setText(self.profile_window.startup_notice)
 
     @Slot(str)
     def _profiles_finished(self, action: str) -> None:

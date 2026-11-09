@@ -4,10 +4,13 @@ from typing import Any, Callable
 from PySide6.QtCore import QPoint, SignalInstance
 from PySide6.QtGui import QColor, QIcon
 from PySide6.QtWidgets import (
-    QCheckBox, QDoubleSpinBox, QFrame, QHBoxLayout, QLabel, QLineEdit,
+    QCheckBox, QDoubleSpinBox, QFrame, QHBoxLayout, QLabel, QLineEdit, QLayout,
     QListWidget, QMenu, QPlainTextEdit, QPushButton, QScrollArea, QSlider,
     QSpinBox, QStackedWidget, QToolButton, QTreeWidget, QWidget,
 )
+
+class FlowLayout(QLayout):
+    def __init__(self, parent: QWidget | None = ..., needAni: bool = ..., isTight: bool = ...) -> None: ...
 
 class BodyLabel(QLabel): ...
 class CheckBox(QCheckBox): ...
