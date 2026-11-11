@@ -28,7 +28,7 @@ class Model:
             return LLMResponse(json.dumps({"reply_text": "甲方案先读书；乙方案先实践。"}, ensure_ascii=False))
         self.planning.append(messages)
         return LLMResponse(json.dumps({'action': 'answer', 'reply': '甲方案先读书；乙方案先实践。',
-            'context': {'entries': self.entries}} if 'In this FIRST decision' in system else
+            'context': {'entries': self.entries}} if '[FIRST_DECISION]' in system else
             {'action': 'answer', 'reply': '甲方案先读书；乙方案先实践。'}, ensure_ascii=False))
 
     def generate(self, prompt):

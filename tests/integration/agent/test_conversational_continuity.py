@@ -32,7 +32,7 @@ def install(model, *, understanding=None, planner=None):
         else:
             seen['planning'].append(messages)
             response = planner(messages) if planner else original(messages, tools=tools)
-            if 'In this FIRST decision' in system:
+            if '[FIRST_DECISION]' in system:
                 items = references(messages)
                 data = dict(history=[item for item in items if item['kind'] in {'user_reference', 'assistant_reference'}],
                     conversation_summary=next((item for item in items if item['kind'] == 'conversation_summary'), None))

@@ -11,7 +11,7 @@ from .models import PermissionLevel, ToolContext, ToolResult, ToolSpec
 class EchoTool:
     @property
     def spec(self) -> ToolSpec:
-        return ToolSpec("echo", "Return the supplied text.", {
+        return ToolSpec("echo", "原样返回文本。", {
             "type": "object", "properties": {"text": {"type": "string"}},
             "required": ["text"], "additionalProperties": False,
         })
@@ -23,7 +23,7 @@ class EchoTool:
 class TimeTool:
     @property
     def spec(self) -> ToolSpec:
-        return ToolSpec("time", "Return the current UTC time as ISO 8601.", {
+        return ToolSpec("time", "返回当前 UTC 时间（ISO 8601）。", {
             "type": "object", "properties": {}, "additionalProperties": False,
         })
 
@@ -37,7 +37,7 @@ class ReadTextTool:
 
     @property
     def spec(self) -> ToolSpec:
-        return ToolSpec("read_text", "Read a UTF-8 file relative to the workspace.", {
+        return ToolSpec("read_text", "读取工作区内的 UTF-8 文件。", {
             "type": "object", "properties": {"path": {"type": "string"}},
             "required": ["path"], "additionalProperties": False,
         })
@@ -52,7 +52,7 @@ class WriteTextTool:
 
     @property
     def spec(self) -> ToolSpec:
-        return ToolSpec("write_text", "Write a UTF-8 workspace file; overwrite defaults to false.", {
+        return ToolSpec("write_text", "写入工作区 UTF-8 文件；默认不覆盖，覆盖需显式设置 overwrite。", {
             "type": "object", "properties": {
                 "path": {"type": "string"}, "text": {"type": "string"},
                 "overwrite": {"type": "boolean", "default": False},

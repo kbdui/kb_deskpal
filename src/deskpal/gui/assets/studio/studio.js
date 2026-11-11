@@ -28,7 +28,7 @@ const paths = {
 const icon = name => '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' + (paths[name] || paths.blocks) + '</svg>';
 const esc = value => String(value ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const attr = esc;
-const settings = {role:"角色与称呼",model:"模型连接",appearance:"桌宠与外观",notifications:"通知",data:"数据与隐私"};
+const settings = {role:"角色与称呼",model:"模型连接",appearance:"桌宠与外观",notifications:"通知",mobile:"手机访问",data:"数据与隐私"};
 const statusNames = {
     Created:"排队中", Planning:"正在规划", Running:"进行中", Waiting:"待确认",
     NeedsReview:"待复核", AwaitingInput:"待补充", Paused:"已暂停", Completed:"已完成",
@@ -316,9 +316,9 @@ function pluginPage() {
         if (!grouped.has(id)) grouped.set(id,[]);
         grouped.get(id).push(tool);
     }
-    const groups = [...grouped.entries()].map(([id,tools],index) => {
+    const groups = [...grouped.entries()].map(([id,tools]) => {
         const name = providers.find(row=>row.id===id)?.name || "其他能力";
-        return '<details data-group="'+attr(id)+'" '+(state.openGroups.has(id)||!state.openGroups.size&&index===0?"open":"")+
+        return '<details data-group="'+attr(id)+'" '+(state.openGroups.has(id)?"open":"")+
             '><summary>'+esc(name)+' <span class="ds-muted">'+tools.length+' 项</span></summary>'+
             tools.map(tool=>'<button type="button" class="ds-tool-line" data-tool="'+attr(tool.id)+'"><span>'+esc(tool.display_name || tool.name)+'</span>'+icon("chevron-right")+'</button>').join("")+'</details>';
     }).join("");
@@ -331,6 +331,33 @@ function pluginPage() {
 const row = (title,desc,control) => '<div class="ds-setting-row"><div class="ds-setting-label">'+esc(title)+
     (desc?'<small>'+esc(desc)+'</small>':"")+'</div>'+control+'</div>';
 const group = content => '<div class="ds-settings-group">'+content+'</div>';
+function mobileAddresses(access) {
+    // 保留上次 FRP 配置，但局域网模式不把它展示为当前手机入口。
+    const addresses=[...new Set(access.addresses || [])].filter(address=>
+        access.configuration?.bind!=="0.0.0.0" || address!==access.configuration?.public_origin);
+    const local=addresses.find(address=>address.startsWith("http://127.0.0.1:"));
+    const publicAddress=addresses.find(address=>address===access.configuration?.public_origin);
+    const networks=addresses.filter(address=>address!==local && address!==publicAddress);
+    const url=address=>'<code class="ds-access-url">'+esc(address)+'</code>';
+    let primary="", content="";
+    if(publicAddress) {
+        primary=publicAddress;
+        content=row("手机访问地址","公网 HTTPS · 需保持 FRP 转发运行",url(primary));
+    } else if(networks.length===1) {
+        primary=networks[0];
+        content=row("局域网候选地址","手机与电脑需连接同一网络；VPN 或虚拟网卡地址可能无法直连",url(primary));
+    } else if(networks.length>1) {
+        content=row("局域网连接","展开地址列表，选择电脑 Wi-Fi 或网线网卡对应的 IPv4 地址",tag(networks.length+" 个候选地址"));
+    } else {
+        primary=local;
+        content=row("仅本机访问","手机无法通过此地址连接电脑；请开启局域网访问，或配置 FRP 公网 HTTPS 地址",local?url(local):"");
+    }
+    const others=addresses.filter(address=>address!==primary);
+    if(others.length) content+='<details class="ds-access-addresses"><summary>查看'+(primary?"其他":"可选")+'地址（'+others.length+'）</summary>'+
+        '<p>电脑可能有 VPN、代理或虚拟机网卡，这些地址不一定能被手机访问。可运行 ipconfig 查看 Wi-Fi 或以太网的 IPv4 地址。</p>'+
+        others.map(address=>row(address===local?"仅本机访问":"局域网候选地址",address===local?"仅这台电脑可用，手机请勿使用":"需与手机处于相通的网络",url(address))).join("")+'</details>';
+    return content;
+}
 const note = (title,text,marker="") => '<div class="ds-observation"><div class="ds-row ds-between"><h3>'+esc(title)+'</h3>'+
     (marker?tag(marker):"")+'</div><p>'+esc(text)+'</p></div>';
 const toggle = (key,label,checked) => '<input type="checkbox" class="ds-switch" data-preference="'+key+'" aria-label="'+esc(label)+'" '+(checked?"checked":"")+'>';
@@ -353,6 +380,33 @@ function settingsContent() {
     const card = role.character_card;
     const roleName = sender("assistant");
     switch (state.setting) {
+    case "mobile": {
+        const access=state.data.mobile || {}, config=state.mobileDraft || access.configuration || {};
+        return '<h2>手机访问</h2>'+group(
+            row("访问状态","手机与桌面共用当前角色和后台",tag(access.enabled?"已开启":"已关闭"))+
+            '<form data-form="mobile-config">'+
+            row("连接范围","FRP 转发选仅本机；同一 Wi-Fi 直连选局域网",'<select name="bind" aria-label="手机连接范围">'+
+                option("127.0.0.1","仅本机 / FRP",config.bind!=="0.0.0.0")+option("0.0.0.0","局域网",config.bind==="0.0.0.0")+'</select>')+
+            row("监听端口",config.bind==="0.0.0.0"?"手机访问局域网地址时使用此端口":"保持与 FRP 的本地端口一致",'<input class="ds-input" aria-label="手机访问端口" name="port" inputmode="numeric" pattern="[0-9]{4,5}" required value="'+attr(config.port || 8765)+'">')+
+            (config.bind==="0.0.0.0"?'<input type="hidden" name="public_origin" value="'+attr(config.public_origin || "")+'">':
+                row("公网 HTTPS 地址","填写 FRP 实际提供的完整域名及外部端口",'<input class="ds-input" aria-label="公网 HTTPS 地址" name="public_origin" type="url" placeholder="https://你的地址" value="'+attr(config.public_origin || "")+'">'))+
+            '<div class="ds-editor-foot"><button class="ds-btn ds-primary" type="submit">开启 / 应用配置</button>'+btn("关闭访问","mobile-disable")+'</div></form>')+
+            (access.error?note("访问状态",access.error):"")+
+            (access.enabled?group(mobileAddresses(access)+row("连接新设备","配对码五分钟内有效，只能使用一次",btn("生成配对码","mobile-pair")))+
+                (access.pairing?note("一次性配对码",access.pairing.code+"\n请在五分钟内输入到手机页面。", "仅向自己的设备提供"):""):"")+
+            '<h3>已授权设备</h3>'+group((access.devices || []).map(device=>row(device.name,"授权有效至 "+friendly(new Date(device.expires*1000).toISOString()),
+                '<button class="ds-btn" data-revoke-device="'+attr(device.id)+'">撤销访问</button>')).join("") || empty("还没有配对设备。"))+
+            '<div class="ds-observation ds-access-guide"><h3>使用说明</h3>'+
+            '<p>电脑上的 Deskpal 需要保持运行。公网访问请配置 HTTPS；局域网 HTTP 仅用于可信网络。手机具有你的聊天与任务操作权限，工具仍按原规则请求确认。</p>'+
+            '<details><summary>Sakura FRP 配置步骤</summary><ol>'+
+            '<li>本页连接范围选“仅本机 / FRP”，监听端口例如 <code>8765</code>。</li>'+
+            '<li>Sakura 创建 TCP 隧道，本地地址填 <code>127.0.0.1</code>，本地端口填 <code>8765</code>（与本页一致）。</li>'+
+            '<li>开启 Sakura 的“自动 HTTPS”，然后重启隧道。需要有效证书；只在网址前加 https:// 不会自动启用 HTTPS。</li>'+
+            '<li>将 Sakura 提供的完整域名和外部端口填到本页“公网 HTTPS 地址”，格式为 <code>https://完整域名:40333</code>，点击“开启 / 应用配置”。地址需使用你实际获得的域名和端口，不能带路径。</li>'+
+            '<li>手机浏览器打开同一个 HTTPS 地址，在电脑点击“生成配对码”，输入手机页面完成连接。</li></ol>'+
+            '<p>本地端口（如 8765）与外部端口（如 40333）可以不同。“公网 HTTPS 地址”用于允许实际访问地址，不会申请域名或开启 HTTPS。代理需保留原始 Host，Deskpal 与 FRP 均需持续运行。</p>'+
+            '<p>若出现 Sakura 的“501 Not Implemented #83”，表示 HTTP 访问被拦截。请检查自动 HTTPS 是否开启并已重启隧道，再使用 https:// 地址访问。</p></details></div>';
+    }
     case "role":
         return '<h2>角色与称呼</h2>'+group(
             row("当前角色","每个角色拥有独立的聊天与数据",btn(roleName,"profiles",false,"chevron-down"))+
@@ -471,6 +525,7 @@ function readPage() {
         send("load",{key:"settings"});
         if(state.setting==="role") send("load",{key:"role"});
         if(state.setting==="notifications") send("load",{key:"policy"});
+        if(state.setting==="mobile") send("load",{key:"mobile"});
         break;
     }
 }
@@ -522,6 +577,8 @@ function pluginModal(data) {
 
 function dispatchAction(action) {
     switch(action) {
+    case "mobile-pair": send("mobile",{operation:"mobile_pair"}); return;
+    case "mobile-disable": send("mobile",{operation:"mobile_disable"}); return;
     case "close-modal": closeModal(); return;
     case "session-menu":
         state.menu=!state.menu;
@@ -611,6 +668,7 @@ root.addEventListener("click",event=>{
         return;
     }
     const d=el.dataset;
+    if(d.revokeDevice) return send("mobile",{operation:"mobile_revoke",parameters:{id:d.revokeDevice}});
     if(d.page) return navigate(d.page);
     if(d.setting) return navigate("settings",d.setting);
     if(d.tab) {
@@ -653,6 +711,10 @@ root.addEventListener("submit",event=>{
     event.preventDefault();
     const data=Object.fromEntries(new FormData(form));
     const name=form.dataset.form;
+    if(name==="mobile-config") {
+        send("mobile",{operation:"mobile_enable",parameters:{bind:data.bind,port:Number(data.port),public_origin:data.public_origin.trim()}});
+        return;
+    }
     if(name==="message") {
         if(data.text?.trim()) send("submit",{text:data.text,id:state.chat.id});
     } else {
@@ -682,6 +744,8 @@ root.addEventListener("keydown",event=>{
 });
 root.addEventListener("input",event=>{
     const el=event.target;
+    const mobileForm=el.closest('form[data-form="mobile-config"]');
+    if(mobileForm) state.mobileDraft=Object.fromEntries(new FormData(mobileForm));
     if(el.matches('[data-form="message"] textarea')) {
         resizeComposer(el);
         state.chat.draft=el.value;
@@ -697,6 +761,11 @@ root.addEventListener("input",event=>{
 });
 root.addEventListener("change",event=>{
     const el=event.target;
+    const mobileForm=el.closest('form[data-form="mobile-config"]');
+    if(mobileForm) {
+        state.mobileDraft=Object.fromEntries(new FormData(mobileForm));
+        if(el.name==="bind") {render();return;}
+    }
     if(el.dataset.grant) send("grant",{id:el.dataset.task, tool:el.dataset.grant, enabled:el.checked,
         revision:state.chat.reviews?.[el.dataset.task]?.review?.task_revision});
     if(el.dataset.preference) send("preference",{key:el.dataset.preference,value:el.type==="checkbox"?el.checked:el.value});
@@ -706,7 +775,7 @@ root.addEventListener("change",event=>{
     }
 });
 root.addEventListener("toggle",event=>{
-    if(event.target.dataset.group) {
+    if(event.target.isConnected && event.target.dataset.group) {
         if(event.target.open) state.openGroups.add(event.target.dataset.group);
         else state.openGroups.delete(event.target.dataset.group);
     }
@@ -742,6 +811,7 @@ function receive(kind,data) {
         return;
     case "data":
         if(data.request && revisions[data.key]!==data.request) return;
+        if(data.key==="mobile"&&data.mobileOperation==="mobile_enable"&&!data.value?._error)state.mobileDraft=null;
         state.data[data.key]=data.value;
         if(state.loading===data.key) state.loading="";
         if(data.key==="role" && data.saved) state.draftCard=null;

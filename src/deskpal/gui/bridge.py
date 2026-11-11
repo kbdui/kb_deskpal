@@ -6,8 +6,10 @@ read and control lanes are bounded and owned until shutdown has actually ended.
 
 from collections import deque
 from collections.abc import Callable, Mapping
+from concurrent.futures import Future
 from dataclasses import dataclass
 import json
+from pathlib import Path
 from queue import Empty, Full, Queue
 from threading import Event, RLock, Thread
 from typing import Any, Protocol
@@ -29,6 +31,7 @@ class _Command:
     parameters: dict[str, Any]
     generation: int
     privacy_epoch: int
+    guard: Callable[[], bool] | None = None
 
 
 READ_OPERATIONS = frozenset({"attentions", "notification_policy", "conversation_task_location", "schedule_items", "task_review", "task_updates", "command_status", "conversation_list", "conversation_timeline", "conversation_item", "conversation_cleanup_status", "appearance_snapshot", "tools_catalog", "tool_detail", "plugins_catalog", "plugin_page", "reminder_feed", "reminder_detail", "tasks", "task", "memories", "goals", "goal", "milestones",
@@ -102,6 +105,11 @@ class ApplicationBridge(QObject):
         self._outbox_bytes = 0
         self._shutdown_started = False
         self._wake_posted = False
+        self._remote_waiters: dict[str, Future[dict[str, Any]]] = {}
+        self._remote_generation = 0
+        self._mobile_path: Path | None = None
+        self._mobile_names: dict[str, str] = {}
+        self._mobile: Any = None
         self._delivery_timer = QTimer(self)
         self._delivery_timer.setInterval(50)
         self._delivery_timer.timeout.connect(self._drain)
@@ -159,6 +167,16 @@ class ApplicationBridge(QObject):
                 from .asset_decoder import QtAssetDecoder
                 configure(QtAssetDecoder())
             self._facade = self._facade_factory(app)
+            if self._mobile_path is not None and self._mobile_path.exists() and not self._closing.is_set():
+                from deskpal.mobile.server import MobileRuntime
+                try:
+                    self._mobile = MobileRuntime(self.call_remote, self._mobile_path, self._mobile_names)
+                    self._mobile.restore()
+                except Exception:
+                    # 可选网络入口损坏不能阻止用户打开桌面、备份角色或修复配置。
+                    if self._mobile is not None:
+                        self._mobile.stop()
+                    self._mobile = None
             if not self._closing.is_set():
                 blocked = bool(app.diagnostics().get("cleanup_pending"))
                 self._set_state("CleanupBlocked" if blocked else "Ready")
@@ -174,12 +192,38 @@ class ApplicationBridge(QObject):
             self._initialized.set()
         self._loop(self._commands)
 
-    def send(self, operation: str, parameters: dict[str, Any] | None = None, *, generation: int = 0) -> str:
+    def configure_mobile(self, path: Path, names: dict[str, str]) -> None:
+        """只在 start 前配置；授权库属于应用，不能随角色备份导出。"""
+        if self._threads:
+            raise RuntimeError("Configure mobile before starting the backend")
+        self._mobile_path, self._mobile_names = path, dict(names)
+
+    def update_mobile_names(self, names: dict[str, str]) -> None:
+        self._mobile_names = dict(names)
+        if self._mobile is not None:
+            self._mobile.names = dict(names)
+
+    def call_remote(self, operation: str, parameters: dict[str, Any], guard: Callable[[], bool]) -> dict[str, Any]:
+        """HTTP 工作线程等待自己的回执，不等待模型，也不依赖 Qt 事件循环。"""
+        from deskpal.application.client import FIELDS
+        if operation not in FIELDS:
+            raise ValueError("Unsupported remote operation")
+        future: Future[dict[str, Any]] = Future()
+        with self._lock:
+            self._remote_generation -= 1
+            self.send(operation, parameters, generation=self._remote_generation,
+                      _response=future, _guard=guard)
+        return future.result(timeout=15)
+
+    def send(self, operation: str, parameters: dict[str, Any] | None = None, *, generation: int = 0,
+             _response: Future[dict[str, Any]] | None = None, _guard: Callable[[], bool] | None = None) -> str:
         """Return a receipt ID immediately. Busy/rejected requests also get an async reply."""
         request_id = str(uuid4())
         with self._lock:
             if len(self._outbox) >= MAX_PENDING * 2:
                 raise BufferError("GUI delivery capacity reached; consume replies before submitting")
+            if _response is not None:
+                self._remote_waiters[request_id] = _response
         if operation == "diagnostics" and (not self._initialized.is_set() or self.state == "StartupFailed"):
             self._deliver({"request_id": request_id, "operation": operation, "generation": generation,
                 "privacy_epoch": self.privacy_epoch, "ok": True,
@@ -216,6 +260,7 @@ class ApplicationBridge(QObject):
                         return existing
             if operation in {"request_forget", "conversation_clear", "conversation_delete"} or (operation == "memory" and copied.get("action") in PRIVACY_ACTIONS):
                 self._epoch += 1
+                self._invalidate_remote()
                 self._outbox.clear()
                 self._outbox_bytes = 0
                 self._pending.clear()
@@ -223,7 +268,7 @@ class ApplicationBridge(QObject):
                 self._image_outbox.clear()
                 self._image_pending.clear()
                 self.privacy_changed.emit(self._epoch)
-            command = _Command(request_id, operation, copied, generation, self._epoch)
+            command = _Command(request_id, operation, copied, generation, self._epoch, _guard)
             self._pending[request_id] = command
             if read_key:
                 self._read_keys[read_key] = request_id
@@ -242,6 +287,16 @@ class ApplicationBridge(QObject):
 
     def _deliver(self, value: dict[str, Any]) -> None:
         """Workers never post an unbounded Qt signal per result/rejection."""
+        with self._lock:
+            remote = self._remote_waiters.pop(value["request_id"], None)
+            if remote is not None:
+                command = self._pending.get(value["request_id"])
+                if command is not None:
+                    self._finish(command)
+                if value.get("privacy_epoch") != self._epoch or self._closing.is_set():
+                    value = {"ok": False, "error": {"code": "Changed", "message": "后台或记录已变化，请重新连接。"}}
+                remote.set_result(value)
+                return
         size = len(json.dumps(value, ensure_ascii=False).encode("utf-8"))
         with self._lock:
             if len(self._outbox) >= MAX_PENDING * 3:
@@ -296,6 +351,9 @@ class ApplicationBridge(QObject):
     def _finish(self, command: _Command) -> None:
         with self._lock:
             self._pending.pop(command.request_id, None)
+            remote = self._remote_waiters.pop(command.request_id, None)
+            if remote is not None:
+                remote.set_result({"ok": False, "error": {"code": "Changed", "message": "请求已失效，请重新连接。"}})
             for key, value in tuple(self._read_keys.items()):
                 if value == command.request_id:
                     del self._read_keys[key]
@@ -314,7 +372,24 @@ class ApplicationBridge(QObject):
             facade = self._facade
             if facade is None:
                 raise RuntimeError("Not ready")
-            data = facade.execute(command.operation, command.parameters)
+            if command.guard is not None:
+                from deskpal.application.client import ClientGateway
+                if self._closing.is_set() or not command.guard():
+                    raise RuntimeError("Remote access revoked")
+                data = ClientGateway(facade).execute(command.operation, command.parameters)
+                if not command.guard():
+                    raise RuntimeError("Remote access revoked")
+            elif command.operation.startswith("mobile_"):
+                if self._mobile is None and self._mobile_path is not None:
+                    from deskpal.mobile.server import MobileRuntime
+                    self._mobile = MobileRuntime(self.call_remote, self._mobile_path, self._mobile_names)
+                if self._mobile is None:
+                    raise RuntimeError("Mobile access unavailable")
+                data = self._mobile.local(command.operation, command.parameters)
+                if self._closing.is_set():
+                    self._mobile.reject_new()
+            else:
+                data = facade.execute(command.operation, command.parameters)
             serialized = json.dumps(data, ensure_ascii=False, allow_nan=False)
             if len(serialized.encode("utf-8")) > MAX_REPLY_BYTES:
                 raise ValueError("Reply exceeds the view budget")
@@ -323,6 +398,7 @@ class ApplicationBridge(QObject):
                 with self._lock:
                     if command.privacy_epoch == self._epoch:
                         self._epoch += 1
+                        self._invalidate_remote()
                         delivery_epoch = self._epoch
                         envelope["privacy_epoch"] = delivery_epoch
                         self._outbox.clear(); self._outbox_bytes = 0
@@ -373,6 +449,10 @@ class ApplicationBridge(QObject):
     def shutdown(self) -> None:
         """The main window stays alive until Closed, including startup/close timeout."""
         self._closing.set()
+        if self._mobile is not None:
+            self._mobile.reject_new()
+        with self._lock:
+            self._invalidate_remote()
         self._set_state("Closing")
         self.privacy_changed.emit(self.privacy_epoch)
         # Only closing needs a short poll to observe all worker threads exiting.
@@ -388,6 +468,8 @@ class ApplicationBridge(QObject):
             if self._closing.is_set() and self._initialized.is_set():
                 if self._app is not None and not self._shutdown_started:
                     try:
+                        if self._mobile is not None:
+                            self._mobile.stop()
                         self._app.begin_shutdown()
                     except Exception:
                         self._stopped.wait(0.2)
@@ -408,6 +490,10 @@ class ApplicationBridge(QObject):
                     self._stopped.wait(0.05)
                     continue
                 try:
+                    # 开启监听可能与关闭请求交错；等所有本地命令退出后再次
+                    # 关停，避免迟到的 mobile_enable 留下一条无人管理的监听器。
+                    if self._mobile is not None:
+                        self._mobile.stop()
                     done = self._app is None or self._app.close(timeout=0.2)
                 except Exception:
                     done = False
@@ -439,6 +525,12 @@ class ApplicationBridge(QObject):
                 self._run(command)
             finally:
                 self._controls.task_done()
+
+    def _invalidate_remote(self) -> None:
+        """调用方持有 _lock；解除 HTTP 等待后，旧命令仍受 epoch/guard 检查。"""
+        for future in self._remote_waiters.values():
+            future.set_result({"ok": False, "error": {"code": "Changed", "message": "后台或记录已变化，请重新连接。"}})
+        self._remote_waiters.clear()
 
     def send_image(self, operation: str, parameters: dict[str, Any], generation: int = 0) -> str:
         """Dedicated bounded binary lane. Only the receiving GUI creates QPixmap."""

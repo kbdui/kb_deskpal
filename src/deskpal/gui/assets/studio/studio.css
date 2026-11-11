@@ -89,6 +89,17 @@ background:rgba(255,255,255,.9);color:#171a21;z-index:3}
 #deskpal-studio[data-mode=maintenance] .ds-nav,#deskpal-studio[data-mode=profiles] .ds-nav{display:none}
 #deskpal-studio[data-mode=maintenance] .ds-main,#deskpal-studio[data-mode=profiles] .ds-main{height:100%}
 #deskpal-studio .ds-service-fields{border:0;min-width:0;padding:0;margin:0}
+#deskpal-studio .ds-access-url{min-width:0;overflow-wrap:anywhere;text-align:right;font-size:12px;color:var(--ds-ink)}
+#deskpal-studio .ds-access-addresses summary{color:var(--ds-accent);font-size:12px;list-style-position:inside}
+#deskpal-studio .ds-access-addresses summary:hover{color:var(--ds-ink)}
+#deskpal-studio .ds-access-addresses summary:focus-visible{outline:2px solid var(--ds-accent);outline-offset:4px;border-radius:4px}
+#deskpal-studio .ds-access-addresses>p{line-height:1.7;color:var(--ds-muted);margin-bottom:6px}
+#deskpal-studio .ds-access-addresses .ds-setting-row{gap:12px}
+#deskpal-studio .ds-access-guide details{margin-top:12px;padding-bottom:0}
+#deskpal-studio .ds-access-guide summary{color:var(--ds-accent);font-size:12px}
+#deskpal-studio .ds-access-guide ol{padding-left:20px;margin:12px 0 0;line-height:1.85;color:var(--ds-ink);font-size:12px}
+#deskpal-studio .ds-access-guide li+li{margin-top:8px}
+#deskpal-studio .ds-access-guide code{overflow-wrap:anywhere}
 @media(max-width:560px){
  #deskpal-studio .ds-layout{grid-template-rows:auto minmax(0,1fr)}
  #deskpal-studio .ds-overlay{padding-top:14px}

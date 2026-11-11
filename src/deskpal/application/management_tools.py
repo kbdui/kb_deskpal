@@ -113,7 +113,7 @@ def management_tools(app: Any) -> tuple[ManagementTool, ...]:
         ManagementTool(app, "memory_search", "检索当前角色记忆；更正或遗忘前读取真实id和revision", {"query": text}, ["query"]),
         ManagementTool(app, "memory_remember", "保存用户明确要求记住的内容；不要将推测直接当事实", {"content": text}, ["content"]),
         ManagementTool(app, "memory_correct", "更正一条当前记忆，必须使用实际revision", {"memory_id": identity, "expected_revision": revision, "content": text}, ["memory_id", "expected_revision", "content"]),
-        ManagementTool(app, "memory_forget", "仅用于用户明确要求彻底遗忘或删除信息：会清理相关聊天及依赖任务正文，可能中止当前任务，执行前需用户确认。事情完成、日程结束或归档应更新状态/更正记忆，不要遗忘。Pending只表示已接受，不能声称清理完成", {"memory_id": identity, "expected_revision": revision}, ["memory_id", "expected_revision"]),
+        ManagementTool(app, "memory_forget", "按真实 id 和 revision 遗忘指定提炼记忆及其修订、索引；保留聊天、其他记忆、人格、执行记录和安排。仅用于明确遗忘请求，事项完成应更新状态。Pending 仅表示受理，不能声称清理完成。", {"memory_id": identity, "expected_revision": revision}, ["memory_id", "expected_revision"]),
         ManagementTool(app, "role_read", "读取当前角色卡及其修订", {}, []),
         ManagementTool(app, "role_update", "按用户明确意图修改角色卡；先读取当前修订", {"text": text, "expected_revision": revision}, ["text", "expected_revision"]),
         ManagementTool(app, "task_cancel", "取消指定其它任务的后续步骤，不撤销已经完成的操作", {"task_id": identity}, ["task_id"]),

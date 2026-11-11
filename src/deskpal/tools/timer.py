@@ -12,7 +12,7 @@ from .models import PermissionLevel, ToolContext, ToolSpec
 class TimerCreateTool(_SchedulingTool):
     @property
     def spec(self) -> ToolSpec:
-        return ToolSpec("timer_create", "Create a local countdown without waiting for it. Duration is 1 to 2678400 seconds. Due events are recorded by the running scheduler, and overdue timers are recovered on restart; this is not a notification service.",
+        return ToolSpec("timer_create", "创建本地倒计时，立即返回；duration 为1至2678400秒。运行中的调度器记录到期事件，重启恢复逾期计时；本工具不负责系统通知。",
                         _schema({"duration_seconds": {"type": "number", "minimum": 1, "maximum": MAX_DURATION_SECONDS},
                                  "label": _string()}, ("duration_seconds",)), PermissionLevel.AUTOMATIC, contract_version="2")
 
@@ -24,7 +24,7 @@ class TimerCreateTool(_SchedulingTool):
 class TimerListTool(_SchedulingTool):
     @property
     def spec(self) -> ToolSpec:
-        return ToolSpec("timer_list", "List local timers ordered by persisted UTC due time. Status is pending, fired, or cancelled. Listing does not generate events.",
+        return ToolSpec("timer_list", "按 UTC 到期时间列出计时器；状态为 pending/fired/cancelled。查询不生成事件。",
                         _schema({"status": {"type": "string", "enum": ["all", "pending", "fired", "cancelled"], "default": "all"},
                                  "limit": {"type": "integer", "minimum": 1, "maximum": 1000, "default": 100}}))
 
@@ -36,7 +36,7 @@ class TimerListTool(_SchedulingTool):
 class TimerCancelTool(_SchedulingTool):
     @property
     def spec(self) -> ToolSpec:
-        return ToolSpec("timer_cancel", "Cancel a pending local timer by id. Returns cancelled=false for a missing, fired or already cancelled timer; recorded events remain queryable.",
+        return ToolSpec("timer_cancel", "按 id 取消待到期计时器；不存在、已触发或已取消时返回 cancelled=false，保留历史事件。",
                         _schema({"id": _string(100)}, ("id",)), PermissionLevel.AUTOMATIC, contract_version="2")
 
     def _execute(self, args: Mapping[str, Any], context: ToolContext) -> Any:
@@ -46,7 +46,7 @@ class TimerCancelTool(_SchedulingTool):
 class TimerEventsTool(_SchedulingTool):
     @property
     def spec(self) -> ToolSpec:
-        return ToolSpec("timer_events", "Peek durable local timer due records after the global event id cursor. Repeated reads return the same records. Consumers own their cursor; no consumption, acknowledgement or system notification occurs.", _event_schema())
+        return ToolSpec("timer_events", "按全局游标查询已持久保存的计时到期事件，可重复读取；消费者维护游标，不消费、不确认，也不发送系统通知。", _event_schema())
 
     def _execute(self, args: Mapping[str, Any], context: ToolContext) -> Any:
         return [event.as_dict() for event in self._service.list_events("timer", after_id=args.get("after_id", 0),

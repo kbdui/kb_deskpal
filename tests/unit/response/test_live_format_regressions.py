@@ -60,10 +60,21 @@ def test_gateway_expression_budget_remains_one():
 
 
 def test_feedback_time_instruction_matches_strict_timezone_validation():
-    assert 'ALL time fields' in INSTRUCTIONS and 'WITH explicit timezone' in INSTRUCTIONS
+    assert '所有时间' in INSTRUCTIONS and '带时区的完整 ISO 时间' in INSTRUCTIONS
     with pytest.raises(ValueError):
         moment('2026-11-01')
     assert moment('2026-11-01T00:00:00+08:00').utcoffset().total_seconds() == 28800
+
+
+def test_planning_and_learning_agree_forgetting_preserves_chat_and_personality():
+    from deskpal.planner.llm_planner import PLANNING_INSTRUCTION
+    from deskpal.application.management_tools import management_tools
+    assert '不清除聊天、其他记忆或人格' in PLANNING_INSTRUCTION
+    assert '不删除聊天或其他人格资料' in INSTRUCTIONS
+    assert 'clears related chat' not in PLANNING_INSTRUCTION
+    description = next(tool.spec.description for tool in management_tools(None) if tool.spec.name == 'memory_forget')
+    assert '保留聊天、其他记忆、人格、执行记录和安排' in description
+    assert '会清理相关聊天' not in description
 
 
 def test_planner_corrects_json_call_proposal_without_executing_text_tools():

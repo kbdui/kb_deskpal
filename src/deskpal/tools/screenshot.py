@@ -90,7 +90,7 @@ class ScreenshotCaptureTool:
 
     @property
     def spec(self) -> ToolSpec:
-        return ToolSpec("screenshot_capture", "Capture an authorized screen region to a local workspace PNG.", {
+        return ToolSpec("screenshot_capture", "将获准的屏幕区域保存为工作区 PNG。", {
             "type": "object", "properties": {
                 "path": {"type": "string", "minLength": 1},
                 "monitor": {"type": "integer", "minimum": 1, "default": 1},

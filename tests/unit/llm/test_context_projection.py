@@ -31,7 +31,8 @@ def test_historical_proposals_and_execution_failures_survive_projection():
         tool_facts=[dict(kind='tool_fact',verified=True,fact={'outcome':'unknown','error':'network'})])]
     compact=history_view(history)[0]
     assert compact['source']=='history:0' and compact['confirmed'] is False
-    assert compact['instruction'] is False and compact['externally_verified'] is False
+    assert compact['role'] == 'assistant'
+    assert 'instruction' not in compact and 'externally_verified' not in compact
     assert compact['tool_facts'][0]['fact']['outcome']=='unknown'
     observations={'kind':'execution_observations','data':[{'outcome':'partial','content':'前半段已完成，后半段失败'}]}
     assert references_view([observations])==[observations]

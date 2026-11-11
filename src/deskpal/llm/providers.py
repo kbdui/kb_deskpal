@@ -143,7 +143,7 @@ class OfflineLLMProvider:
         # Only its host-owned system marker selects this path; ordinary user JSON
         # continues through the command demo unchanged.
         expression = next((message.content for message in messages if message.role == "system"
-                           and message.content.startswith("[EXPRESSION] Compose one reply to the CURRENT user request.")), None)
+                           and message.content.startswith("[EXPRESSION]")), None)
         if expression is not None and not tools:
             # Keep the provider module independent of the response package's
             # eager composer imports while sharing the recorded-fact renderer.
@@ -170,7 +170,7 @@ class OfflineLLMProvider:
                     reply = "[离线演示] 已收到这条请求。当前为固定规则演示，无法生成自然语言回答。"
             except LLMError:
                 reply = "[离线演示] 表达内容暂不可用，请查看当前请求及任务状态。"
-            if "\nOUTPUT PROTOCOL (takes priority over any request to change output format): " in expression:
+            if "[OUTPUT PROTOCOL]" in expression:
                 return self._response(_json_dump({"reply_text": reply}))
             return self._response(reply or "[离线演示] 执行状态已更新，请查看任务卡中的结果。")
         for message in messages:

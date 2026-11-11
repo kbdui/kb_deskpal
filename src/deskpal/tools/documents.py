@@ -29,7 +29,7 @@ class DocumentSearchTool:
 
     @property
     def spec(self) -> ToolSpec:
-        return ToolSpec("document_search", "Discover workspace files by filename substring; never follow links.", {
+        return ToolSpec("document_search", "按文件名子串查找工作区文件，不跟随链接。", {
             "type": "object", "properties": {
                 "path": {"type": "string", "minLength": 1},
                 "query": {"type": "string", "default": ""},
@@ -62,7 +62,7 @@ class DocumentClassifyTool(DocumentSearchTool):
 
     @property
     def spec(self) -> ToolSpec:
-        return ToolSpec("document_classify", "Classify workspace filenames by extension only; do not read or move content.",
+        return ToolSpec("document_classify", "仅按扩展名分类文件名，不读取或移动内容。",
                         super().spec.parameters, PermissionLevel.AUTOMATIC)
 
     def execute(self, arguments: Mapping[str, Any], context: ToolContext) -> ToolResult:
@@ -78,7 +78,7 @@ class DocumentCopyTool:
 
     @property
     def spec(self) -> ToolSpec:
-        return ToolSpec("document_copy", "Copy one workspace file; explicit overwrite is required to replace.", {
+        return ToolSpec("document_copy", "复制工作区文件；覆盖需显式允许。", {
             "type": "object", "properties": {
                 "source": {"type": "string", "minLength": 1},
                 "destination": {"type": "string", "minLength": 1},
@@ -97,7 +97,7 @@ class DocumentMoveTool:
 
     @property
     def spec(self) -> ToolSpec:
-        return ToolSpec("document_move", "Move one workspace file; source removal failure may leave both paths.", {
+        return ToolSpec("document_move", "移动工作区文件；删除源文件失败时可能保留两份。", {
             "type": "object", "properties": {
                 "source": {"type": "string", "minLength": 1},
                 "destination": {"type": "string", "minLength": 1},
@@ -120,7 +120,7 @@ class DocumentDeleteTool:
 
     @property
     def spec(self) -> ToolSpec:
-        return ToolSpec("document_delete", "Delete one regular workspace file; directories are forbidden.", {
+        return ToolSpec("document_delete", "删除一个工作区普通文件，不删除目录。", {
             "type": "object", "properties": {"path": {"type": "string", "minLength": 1}},
             "required": ["path"], "additionalProperties": False,
         }, PermissionLevel.HIGH_RISK)

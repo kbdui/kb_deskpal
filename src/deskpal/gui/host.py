@@ -2,10 +2,11 @@
 
 from collections.abc import Callable
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from PySide6.QtCore import QObject, QSettings, QTimer, Signal, Slot
+from PySide6.QtCore import QObject, QSettings, QStandardPaths, QTimer, Signal, Slot
 from PySide6.QtWidgets import QApplication, QMenu
 
 from deskpal.application.service import ApplicationService
@@ -30,6 +31,9 @@ class DesktopHost(QObject):
         super().__init__(parent)
         self.preferences = preferences if preferences is not None else GuiPreferences()
         self.bridge = ApplicationBridge(factory, parent=self)
+        self.bridge.configure_mobile(
+            Path(QStandardPaths.writableLocation(QStandardPaths.StandardLocation.AppLocalDataLocation)) / "mobile" / "access.sqlite3",
+            {"user": self.preferences.user_display_name, "assistant": self.preferences.character_display_name})
         self.window = StudioWindow(self.bridge, self.preferences)
         self.window.defer_closed = True
         self.tray = TrayController(self.window, self.preferences, parent=self)
@@ -246,6 +250,9 @@ class DesktopHost(QObject):
 
     @Slot(str, object)
     def _preference(self, key: str, value: Any) -> None:
+        if key in {"user_display_name", "character_display_name"}:
+            self.bridge.update_mobile_names({"user": self.preferences.user_display_name,
+                                            "assistant": self.preferences.character_display_name})
         if key == "pet_enabled" and not value:
             self._dispose_pet_chat()
         if key == "pet_visible" and not value:

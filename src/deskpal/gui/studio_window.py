@@ -19,7 +19,7 @@ from .studio_surface import StudioSurface
 from .tool_results import operation_records
 
 PAGES = ("chat", "plans", "memory", "plugins", "settings")
-SETTINGS = ("role", "appearance", "notifications", "data", "model")
+SETTINGS = ("role", "appearance", "notifications", "data", "model", "mobile")
 SLOTS = {"role": "character_avatar", "user": "user_avatar", "pet": "pet_main"}
 PREFERENCES = (
     "theme", "pet_visible", "pet_enabled", "pet_scale", "pet_on_top", "close_to_tray",
@@ -617,6 +617,12 @@ class StudioWindow(StudioChatSurface):
     def _workbench_action(self, action: str, args: dict) -> None:
         if action == "load":
             self._load(args)
+        elif action == "mobile":
+            operation = args.get("operation")
+            parameters = args.get("parameters", {})
+            if operation in {"mobile_status", "mobile_enable", "mobile_disable", "mobile_pair", "mobile_revoke"} and isinstance(parameters, dict):
+                # 本机访问配置不使用任务命令回执；保持参数契约，不附加 command_id。
+                self.operations.send(operation, parameters, lambda data: self._data_result("mobile", data, mobileOperation=operation))
         elif action == "pet":
             self.pet_requested.emit()
         elif action in {"maintenance", "profiles", "backup", "restore"}:
@@ -656,14 +662,14 @@ class StudioWindow(StudioChatSurface):
 
     def _load(self, args: dict) -> None:
         key = args.get("key")
-        if key not in {"plans", "memory", "tools", "plugins", "role", "settings", "policy"}:
+        if key not in {"plans", "memory", "tools", "plugins", "role", "settings", "policy", "mobile"}:
             return
         offset = args.get("offset", 0)
         request = args.get("request", 0)
         if type(offset) is not int or offset < 0 or type(request) is not int:
             return
         params: dict[str, Any] = {}
-        operation = {"plugins": "plugins_catalog", "role": "interaction_snapshot", "settings": "settings",
+        operation = {"plugins": "plugins_catalog", "role": "interaction_snapshot", "settings": "settings", "mobile": "mobile_status",
                      "policy": "notification_policy"}.get(key, "")
         tab = args.get("tab", "")
         if key == "plans":

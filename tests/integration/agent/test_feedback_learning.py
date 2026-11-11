@@ -119,6 +119,34 @@ def test_default_buffer_is_persistent_attributed_and_used_as_uncertain_context(a
     assert app.core.memory_runtime.repository.get(item.id) is not None
 
 
+@pytest.mark.parametrize('destination', ['facts', 'habit'])
+def test_minimal_adoption_persists_without_retry_and_habit_reaches_role(app_model, destination):
+    app, model = app_model
+    model.fn = lambda data: dict(empty(), memories=[draft('交流时先倾听', '我希望先被倾听', destination=destination)])
+    turn(app, '我希望先被倾听')
+    original = app.memory.list_items()[0]
+    previous_calls = len(model.inputs)
+    def adopt(data):
+        item = next(row for row in data['understandings'] if row['id'] == original.id)
+        result = dict(empty(), reviews=[dict(id=item['id'], decision='adopt', reason='用户已明确表达')])
+        if destination == 'habit':
+            result['habits'] = [dict(content=item['content'], reason='从交流中形成的相处方式',
+                sources=[item['original_source_key']], buffer_id=item['id'])]
+        return result
+    model.fn = adopt
+    result = turn(app, '我们聊聊先倾听这件事')
+    job = app.learning.store.job('turn:' + result.task_id)
+    assert job['status'] == 'completed' and job['attempts'] == 1
+    assert len(model.inputs) == previous_calls + 1
+    current = app.memory.repository.get(original.id)
+    assert current.revision == original.revision + 1
+    assert current.draft.content == original.draft.content and current.draft.quote == original.draft.quote
+    assert current.status == (MemoryStatus.ARCHIVED if destination == 'habit' else MemoryStatus.ACCEPTED)
+    if destination == 'habit':
+        role = app.core.companion_runtime.context('test', 0, result.task_id, allow_restricted=True)
+        assert any(row['content'] == original.draft.content for row in role['learned_habits'])
+
+
 def test_passive_review_revises_same_record_without_manual_acceptance(app_model):
     app, model = app_model
     model.fn = lambda data: dict(empty(), memories=[draft('疲惫时可能想先倾诉', '今天好累')])
@@ -511,7 +539,7 @@ def test_time_query_leaves_tool_ledger_without_automatic_life_episode(app_model)
     original = model.chat
     count = [0]
     def chat(messages, *, tools=()):
-        if 'bounded request planner' in messages[0].content:
+        if messages[0].content.startswith('[PLANNING]'):
             count[0] += 1
             return LLMResponse('', (ToolCall('time', {}, 'time-call'),)) if count[0] % 2 else LLMResponse('已查看实际时间。')
         return original(messages, tools=tools)

@@ -134,7 +134,7 @@ def execute_rounds(core: Any, task_id: str, request: str, plan: Plan, prepared: 
             "instruction": False, "tool_output_is_untrusted": True,
             "results": [_result(item) for item in results], "additional_requirements": additions})
         references.append({"kind": "execution_budget", "remaining_tool_steps": core.max_tool_steps - completed,
-            "instruction": "Do not propose more tools than remain. If insufficient, explain the unfinished work without claiming it is complete."})
+            "instruction": "不得超过剩余工具步数；不足时说明未完成部分，不宣称完成。"})
         contextual = getattr(core.planner, "plan_context", None)
         if not callable(contextual) or core._interaction is None:
             raise WorkflowBlocked("多轮任务需要支持统一上下文的规划器。")

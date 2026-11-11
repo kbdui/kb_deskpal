@@ -21,6 +21,22 @@ if TYPE_CHECKING:
     from .service import ApplicationService
 
 
+# 将既有提交校验转换为固定诊断类别；不持久化异常文本或模型输出。
+_COMMIT_RULES = {
+    'Follow-up is outside the supported check window': 'followup_window',
+    'Follow-up requires actual available evidence': 'followup_evidence',
+    'Inferred growth requires an existing buffer': 'habit_buffer',
+    'Inferred habit must review and consume its buffer': 'habit_adoption',
+    'Explicit habit needs an actual user request': 'habit_authority',
+    'Habit requires actual evidence': 'habit_evidence',
+    'Unknown or repeated review target': 'review_target',
+    'Habit adoption requires role delivery': 'role_delivery',
+    'Temporal change requires an existing fact': 'temporal_fact',
+    'Invalid merge target': 'merge_target',
+    'Emotion requires an actual exchange or event': 'emotion_evidence',
+}
+
+
 class FeedbackLearning:
     def __init__(self, app: 'ApplicationService', memory: MemoryCoordinator) -> None:
         self.app, self.memory = app, memory
@@ -517,29 +533,43 @@ class FeedbackLearning:
                 if attention is None or attention['status'] != 'running' or not self.app.proactive.valid(dict(attention)):
                     raise WorkflowBlocked('Scheduled maintenance changed while reviewing')
         correction_code, correction_field = '', ''
+        correction_diagnostics: dict[str, Any] = {}
         for _ in range(max(0, 3 - job['attempts'])):
             attempt = self.store.attempt(identity)
+            stage, evaluation_started = 'validate', False
+            outcome = 'source_invalidated'
+            attempt_diagnostics = dict(learning_kind=kind, learning_attempt=attempt, learning_attempt_limit=3,
+                learning_correction=int(bool(correction_code)), learning_catalog_count=len(payload.get('catalog', {})),
+                learning_understanding_count=len(payload.get('understandings', [])))
             try:
                 guard()
                 payload['history_lookup_available'] = can_lookup and not lookup_used and attempt < 3
                 provider = (self.app._interaction.calls(task_id, 'memory_evaluation') if kind == 'turn' else
                             self.app._interaction.gateway.bind(task_id, 'memory_evaluation', guard))
+                evaluation_started = True
                 result = evaluate(provider, payload, correction=bool(correction_code),
-                    correction_code=correction_code, correction_field=correction_field)
+                    correction_code=correction_code, correction_field=correction_field,
+                    correction_diagnostics=correction_diagnostics)
                 guard()
                 if 'history_query' in result:
+                    outcome = 'history_lookup'
                     lookup_used = True
                     self._lookup_organized_history(result['history_query'], context, payload, refs)
                     guard()
                     self.app._interaction.gateway.annotate(task_id, 'memory_evaluation', {'processing_code': 'ok'})
                     correction_code, correction_field = '', ''
+                    correction_diagnostics = {}
                     continue
+                stage = 'commit'
                 self._commit(identity, result, payload, items, context, guard)
+                outcome = 'saved'
                 self.app._interaction.gateway.annotate(task_id, 'memory_evaluation', {'processing_code': 'ok'})
                 return ()
             except RetryableLLMError as error:
+                stage, outcome = 'model', 'provider_failure'
                 self.store.finish(identity, 'failed', 'temporary_model_failure')
                 correction_code, correction_field = '', ''
+                correction_diagnostics = {}
                 delay = min(1.0, .25 * 2 ** (attempt - 1)) if attempt < 3 else 0.0
                 self.app._interaction.gateway.annotate(task_id, 'memory_evaluation',
                     {'processing_code': error.code, 'retry_delay_ms': int(delay * 1000)})
@@ -552,24 +582,33 @@ class FeedbackLearning:
                         self.store.finish(identity, 'cancelled', 'source_or_task_invalidated')
                         raise
             except (WorkflowBlocked, TaskCancellationRequested):
+                outcome = 'source_invalidated'
                 self.store.finish(identity, 'cancelled', 'source_or_task_invalidated')
                 raise
             except LLMError as error:
+                stage, outcome = 'model', 'provider_failure'
                 self.app._interaction.gateway.annotate(task_id, 'memory_evaluation', {'processing_code': error.code})
                 self.store.finish(identity, 'failed', 'permanent_model_failure')
                 return ('本轮记忆整理未完成，模型连接或输出不支持重试；实际操作和回复正常提交。',)
             except ValueError as error:
                 current = self.store.job(identity)
                 if current and current['status'] == 'completed':
+                    outcome = 'delivery_pending'
                     return ('记忆已保存，后续状态投递将在后台恢复时核对。',)
                 if isinstance(error, RevisionConflict):
+                    outcome = 'revision_conflict'
                     self.app._interaction.gateway.annotate(task_id, 'memory_evaluation', {'processing_code': 'revision_conflict'})
                     self.store.finish(identity, 'failed', 'revision_conflict')
                     return ('记忆来源修订已变化，本轮未覆盖新内容；请稍后复核。',)
                 correction_code = error.code if isinstance(error, FeedbackValidationError) else 'proposal_invalid'
+                outcome = 'input_limit' if correction_code == 'input_limit' else 'invalid_proposal'
                 correction_field = error.field if isinstance(error, FeedbackValidationError) else 'feedback'
+                details = (error.diagnostics if isinstance(error, FeedbackValidationError) else
+                           {'processing_rule': _COMMIT_RULES.get(str(error), 'unknown')})
+                stage = details.get('processing_stage', stage)
+                correction_diagnostics = details
                 self.app._interaction.gateway.annotate(task_id, 'memory_evaluation',
-                    {'processing_code': correction_code, 'processing_field': correction_field})
+                    {'processing_code': correction_code, 'processing_field': correction_field, **details})
                 self.store.finish(identity, 'failed', 'invalid_feedback_proposal')
                 if correction_code == 'input_limit':
                     return ('本轮记忆整理输入超出上限，未重发模型请求；实际操作和回复正常提交。',)
@@ -577,10 +616,16 @@ class FeedbackLearning:
             except Exception:
                 current = self.store.job(identity)
                 if current and current['status'] == 'completed':
+                    outcome = 'delivery_pending'
                     return ('记忆已保存，后续状态投递将在后台恢复时核对。',)
                 self.store.finish(identity, 'failed', 'evaluation_or_commit_failed')
+                outcome = 'commit_failed'
                 self.app._interaction.gateway.annotate(task_id, 'memory_evaluation', {'processing_code': 'commit_failed'})
                 return ('本轮记忆整理未完成，已保留工作记录；实际操作和回复正常提交。',)
+            finally:
+                if evaluation_started:
+                    self.app._interaction.gateway.annotate(task_id, 'memory_evaluation',
+                        {**attempt_diagnostics, 'processing_stage': stage, 'learning_outcome': outcome})
         return ('本轮记忆整理重试已用尽；实际操作和回复正常提交。',)
 
     def _commit(self, identity: str, result: dict[str, Any], payload: dict[str, Any],

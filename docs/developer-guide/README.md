@@ -8,6 +8,7 @@
 | [仓库地图](repository-map.md)、[模块](modules.md) | 文件位置与职责 |
 | [架构边界](architecture.md)、[请求链路](request-lifecycle.md) | 服务层、Core、工具、学习与发布 |
 | [GUI](gui.md)、[GUI 状态边界](gui-refactor.md) | 主线程、后台桥、来源与迟到回调 |
+| [手机入口](mobile-access.md) | 共享后台、HTTP 认证、命令白名单、断线恢复与生命周期 |
 | [存储与维护](storage-and-maintenance.md) | 四库、角色切换、迁移和恢复 |
 | [扩展方法](extending.md) | 工具、模型与后台能力接入 |
 | [依赖](dependencies.md)、[Embedding](embedding-setup.md) | 安装分组与可选本地检索 |

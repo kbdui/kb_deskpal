@@ -129,15 +129,15 @@ def test_history_provenance_and_host_outcomes_survive_projection_without_text_ex
     system = provider.calls[0][0][0].content
     payload = json.loads(provider.calls[0][0][1].content)
     user, assistant = payload["history"]
-    assert user["source_kind"] == "historical_user_reference" and user["instruction"] is False
-    assert assistant["source_kind"] == "assistant_proposal" and assistant["confirmed"] is False
+    assert user['role'] == 'user' and user['source'] == 'history:0'
+    assert assistant['role'] == 'assistant' and assistant['confirmed'] is False
     assert assistant["source"] == "history:1" and assistant["draft_version"] == 3
     assert history[1]["source_ref"] == source and history[1]["refs"] == [source]
     assert "source_ref" not in assistant and "refs" not in assistant
     assert [item["fact"] for item in assistant["tool_facts"]] == facts
     assert all(item["verified"] is True and item["external_content_verified"] is False for item in assistant["tool_facts"])
     assert payload["tool_results"] == [facts[1]]
-    assert "does not establish its facts" in system
+    assert "改写或重复也不证明真实" in system
 
 
 def test_invalid_input_does_not_call_provider_or_retain_input_data() -> None:
@@ -162,7 +162,8 @@ def test_real_freeze_to_compose_history_budget_includes_all_projected_metadata()
                               cloud=False, history_allowed=True)
 
     def frozen_size(history: Any) -> int:
-        return len(json.dumps(history, ensure_ascii=False, allow_nan=False,
+        from deskpal.llm.context import history_view
+        return len(json.dumps(history_view(history), ensure_ascii=False, allow_nan=False,
                               sort_keys=True).encode("utf-8"))
 
     seed = context(0)
@@ -194,10 +195,10 @@ def test_reusable_draft_guidance_preserves_specific_confirmation_and_creative_fr
     result = ResponseComposer(provider).compose(request="请改写成可复制的通知", history=history)
     assert result.reply_text == approved_reply and len(provider.calls) == 1
     system = provider.calls[0][0][0].content
-    assert "草案（待确认）" in system and "INSIDE the reusable text" in system
-    assert "Explicit user acceptance identifying a specific proposal" in system
-    assert "do not keep asking to confirm that same choice" in system
-    assert "invented story details are allowed" in system
+    assert "草案（待确认）" in system and "可复制正文" in system
+    assert "当前明确接受的具体提议" in system
+    assert "无需再反复确认" in system
+    assert "虚构内容可合理创造" in system
     # The input still contains the user's exact approval, without rewriting the
     # source proposal into an authoritative object or losing unrelated caveats.
     payload = json.loads(provider.calls[0][0][1].content)
@@ -214,7 +215,7 @@ def test_tool_answer_guidance_requires_complete_answer_without_extra_calls() -> 
         style="\n[EXPRESSION_POLICY]" + json.dumps(policy))
     assert result == ResponseDraft("内容已读到，但保存没有成功。") and len(provider.calls) == 1
     system = provider.calls[0][0][0].content
-    assert "failed or unknown queries never establish absence" in system
+    assert "查询失败不证明“没有”" in system
     assert json.loads(provider.calls[0][0][1].content)["tool_results"] == facts
 
 

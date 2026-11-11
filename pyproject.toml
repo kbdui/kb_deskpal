@@ -29,6 +29,7 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 "deskpal.gui" = ["assets/pet/*.png", "assets/pet/*.json", "assets/pet/*.md", "assets/avatars/*.png", "assets/studio/*.html", "assets/studio/*.css", "assets/studio/*.js"]
+"deskpal.mobile" = ["assets/*.html", "assets/*.css", "assets/*.js"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

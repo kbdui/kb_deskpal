@@ -59,15 +59,20 @@ def test_sanitize_drops_text_and_invalid_metrics():
 
 
 def test_v5_upgrade_is_additive_and_reopen_preserves_diagnostics(tmp_path):
+    from deskpal.workflow.store import _SCHEMA, migrate_schema_1, migrate_schema_2, migrate_schema_3, migrate_schema_4
+    from deskpal.workflow.migrations import SCHEMA_VERSION
     path=tmp_path/'workflow.sqlite3'
-    store=WorkflowStore(path)
-    with store.transaction() as db:
-        db.execute('DROP TABLE model_call_diagnostic')
-        db.execute('UPDATE schema_version SET version=5')
-    store.close()
+    # 构造真实 v5，不能把含后续表的当前库只改版本号伪装成旧库。
+    with sqlite3.connect(path) as db:
+        db.execute('PRAGMA foreign_keys=ON')
+        for statement in _SCHEMA:
+            db.execute(statement)
+        for migrate in (migrate_schema_1, migrate_schema_2, migrate_schema_3, migrate_schema_4):
+            migrate(db)
+        assert db.execute('SELECT version FROM schema_version').fetchone()[0] == 5
     upgraded=WorkflowStore(path)
     with upgraded.read_connection() as db:
-        assert db.execute('SELECT version FROM schema_version').fetchone()[0]==6
+        assert db.execute('SELECT version FROM schema_version').fetchone()[0]==SCHEMA_VERSION
         assert [row[1] for row in db.execute('PRAGMA table_info(task_call_attempt)')]==['id','task_id','purpose','slot','status']
         assert db.execute('PRAGMA foreign_key_check').fetchall()==[]
     upgraded.close()

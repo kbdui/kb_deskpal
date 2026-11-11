@@ -22,7 +22,7 @@ def install(model, *, planning=None, feedback=None):
             return feedback(system, data) if feedback else LLMResponse('{}')
         if system.startswith('[EXPRESSION]'):
             return LLMResponse('我明白了，慢慢聊。')
-        assert 'bounded request planner' in system
+        assert system.startswith('[PLANNING]')
         return planning(messages, tools) if planning else LLMResponse(json.dumps(dict(action='answer',reply='草稿',
             context=dict(entries=[dict(layer='interaction_approach',content='先听用户分享，不急着建议',reason='当前是在分享',
                 nature='inferred',scope='turn')])),ensure_ascii=False), usage=LLMUsage(100,80,20,5),request_id='response_test_1')
@@ -99,6 +99,32 @@ def test_feedback_retry_diagnostics_remain_after_success_and_correct_only_valida
     else:
         assert rows[0]['status']=='unknown' and rows[0]['metadata']['retry_delay_ms']==250
     assert 'sk-' not in json.dumps(rows)
+
+
+def test_learning_shape_diagnostics_survive_retry_in_the_actual_ledger(app_model):
+    app, model = app_model
+    attempts = []
+    def feedback(system, data):
+        attempts.append(system)
+        if len(attempts) > 1:
+            return LLMResponse('{}')
+        return LLMResponse(json.dumps({'memories': [dict(content='合成事实', destination='facts',
+            claim_type='user_report', reason='合成原因', quote='合成事实', sources=['user'], status='不应写入日志的正文')]}))
+    install(model, feedback=feedback)
+    result = run(app, '合成事实')
+    assert result.status == TaskStatus.COMPLETED
+    rows = sorted([row for row in app.diagnostics()['model_calls']
+        if row['task_id'] == result.task_id and row['purpose'] == 'memory_evaluation'], key=lambda row: row['slot'])
+    assert len(rows) == 2
+    first, second = [row['metadata'] for row in rows]
+    assert first['processing_extra_fields'] == ['status']
+    assert first['processing_missing_fields'] == []
+    assert first['processing_stage'] == 'validate' and first['learning_attempt'] == 1
+    assert second['processing_code'] == 'ok' and second['learning_attempt'] == 2
+    assert second['processing_stage'] == 'commit' and second['learning_correction'] == 1
+    assert '"processing_extra_fields":["status"]' in attempts[1]
+    assert first['learning_kind'] == 'turn' and first['learning_attempt_limit'] == 3
+    assert '不应写入日志' not in json.dumps(rows, ensure_ascii=False)
 
 
 def test_foreground_feedback_excludes_unrelated_old_understandings(app_model):

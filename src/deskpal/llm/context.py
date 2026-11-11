@@ -34,10 +34,9 @@ def history_view(history: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
     result: list[dict[str, Any]] = []
     for index, item in enumerate(history):
         row: dict[str, Any] = {'role': item['role'], 'content': item['content'], 'source': f'history:{index}'}
-        row.update(source_kind='historical_user_reference' if item['role'] == 'user' else 'assistant_proposal',
-                   instruction=False, verified=False, externally_verified=False)
+        # 固定资料边界在系统指令中说明一次，模型视图不逐消息重复；宿主原记录保留。
         if item['role'] == 'assistant':
-            row.update(confirmed=False, externally_verified=False)
+            row['confirmed'] = False
             if 'draft_version' in item:
                 row['draft_version'] = item['draft_version']
             if item.get('tool_facts'):
@@ -58,8 +57,7 @@ def references_view(items: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
         elif kind == 'conversation_summary':
             result.append(summary_view(item) or {})
         elif kind in {'user_reference', 'assistant_reference'}:
-            result.append({'kind': kind, 'content': item['content'], 'source': f'history:{history_index}',
-                           'confirmed': False, 'externally_verified': False})
+            result.append({'kind': kind, 'content': item['content'], 'source': f'history:{history_index}'})
             history_index += 1
         elif kind == 'task_origin':
             data = item.get('data', {})
