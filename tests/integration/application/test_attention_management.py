@@ -64,8 +64,9 @@ def test_ending_attention_during_lookup_does_not_reactivate_internal_review(tmp_
     app = create_application(config)
     try:
         now = datetime.now(timezone.utc)
+        source = app.memory.remember('合成复查依据')
         identity = app.proactive.offer(key='race', method='maintenance', goal='复核一个未决理解', basis='合成依据',
-            refs=[dict(kind='memory', id='synthetic-source', revision=1)], due_at=(now + timedelta(seconds=10)).isoformat())
+            refs=[dict(kind='memory', id=source.id, revision=source.revision)], due_at=(now + timedelta(seconds=10)).isoformat())
         app.proactive.clock = lambda: now + timedelta(seconds=20)
         enqueued = []
         monkeypatch.setattr(app.proactive, 'valid', lambda item: True)

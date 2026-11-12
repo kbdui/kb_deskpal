@@ -24,7 +24,7 @@ from .models import MemoryKind
 
 _VERSION = 4
 _ORIGINS = frozenset(("user_message", "user_confirmation", "tool_result", "imported_document",
-                      "assistant_output", "legacy"))
+                      "assistant_output", "character_reflection", "legacy"))
 
 
 def _text(value: object, name: str, maximum: int, *, empty: bool = False) -> str:
@@ -185,7 +185,7 @@ def _normalize_draft(source: MemorySource, draft: MemoryDraft, now: datetime,
         ClaimType.USER_REPORT: ("user_message", "user_confirmation"),
         ClaimType.OBSERVED_EVENT: ("tool_result",),
         ClaimType.EXTERNAL_CLAIM: ("imported_document", "user_message", "user_confirmation"),
-        ClaimType.HYPOTHESIS: ("assistant_output", "user_message", "user_confirmation", "tool_result", "imported_document"),
+        ClaimType.HYPOTHESIS: ("assistant_output", "character_reflection", "user_message", "user_confirmation", "tool_result", "imported_document"),
         ClaimType.LEGACY: ("legacy",),
     }
     if source.origin not in permitted[draft.claim_type]:
@@ -198,7 +198,7 @@ def _normalize_draft(source: MemorySource, draft: MemoryDraft, now: datetime,
     character_idea = (source.speaker_kind == 'character' and bool(source.speaker_id)
                       and draft.subject == source.speaker_id and draft.claim_type == ClaimType.HYPOTHESIS)
     if accepted and (draft.claim_type == ClaimType.LEGACY
-                     or (source.origin == "assistant_output" and not character_idea)):
+                     or (source.origin in ("assistant_output", "character_reflection") and not character_idea)):
         raise MemoryError("This source cannot be automatically accepted")
     begin = _optional_utc(draft.valid_from, "valid_from")
     end = _optional_utc(draft.valid_to, "valid_to")

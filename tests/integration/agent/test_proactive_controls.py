@@ -517,7 +517,7 @@ def test_reminders_still_fulfil_without_model_and_pause_does_not_replay(tmp_path
     clock = ScheduleClock()
     store = WorkflowStore(tmp_path/'workflow.sqlite3')
     scheduling = SchedulingService(tmp_path/'scheduling.sqlite3', clock=clock)
-    policy = NotificationPolicy(store, clock=clock.now)
+    policy = NotificationPolicy(store, clock=clock.now, quiet_start='00:00', quiet_end='00:00')
     inbox = ReminderInbox(store, scheduling, now=clock.now, policy=policy)
     try:
         policy.set('chat', True, None, 'mute-chat')
@@ -552,7 +552,7 @@ def test_fallback_review_reuses_feedback_and_no_repeat_without_new_revision(setu
             result['reviews'] = [dict(id=current['id'], revision=current['revision'], decision='retain',
                 target=None, temporal=False, content=current['content'], quote=data['catalog'][key]['content'],
                 destination='facts', claim_type='hypothesis', reason='复查后仍不确定，继续保留原理解',
-                uncertainty='需要后续交流才能判断', sources=[key], review_after=None, valid_from=None, valid_to=None)]
+                uncertainty='需要后续交流才能判断', sources=[key], review_after=(app.proactive.clock() + timedelta(days=1)).isoformat(), valid_from=None, valid_to=None)]
         return result
     model.feedback_fn = feedback
     enable(app)
@@ -753,7 +753,7 @@ def test_user_submission_waits_for_active_internal_review_without_preemption(set
     enable(app);app.proactive.method('fallback',True)
     entered,release=Event(),Event()
     def review(data):
-        if not data['current_exchange']['request']:
+        if 'user' not in data['catalog']:
             entered.set()
             assert release.wait(10)
         return dict(memories=[],reviews=[],habits=[],emotion=None,summary=None)
@@ -768,3 +768,132 @@ def test_user_submission_waits_for_active_internal_review_without_preemption(set
     finally:
         release.set()
     assert app.wait(task.id,10).status==TaskStatus.COMPLETED
+
+
+def test_reflection_tool_quiet_learns_character_without_chat_or_user_authority(setup):
+    from deskpal.proactive.reflection import read
+    app, model, _, clock, _ = setup
+    app.notification_policy.set('chat', True, None, 'pause-chat-for-thinking')
+    decisions = iter([
+        LLMResponse('', (ToolCall('reflection_record', dict(topic='自己的形象', content='我喜欢简洁而有辨识度的形象。', reason='来自自己的审美探索'), 'thought'),)),
+        LLMResponse('{"action":"quiet","reply":""}'),
+    ])
+    model.fn = lambda messages, tools: next(decisions)
+    def learn(data):
+        row = data['catalog']['reflection']
+        assert row['speaker_kind'] == 'character' and 'user' not in data['catalog']
+        assert not any(x['origin'] == 'tool_result' for x in data['catalog'].values())
+        return dict(memories=[dict(content=row['content'], quote=row['content'], sources=['reflection'],
+            destination='facts', claim_type='hypothesis', reason='角色自身的兴趣', subject=row['speaker_id'],
+            review_after=(clock() + timedelta(days=1)).isoformat())],
+            followups=[dict(goal='继续探索形象', reason='还有可探索的方向', mode='reflection',
+                due_at=(clock() + timedelta(hours=2)).isoformat(), sources=['reflection'])])
+    model.feedback_fn = learn
+    task = app.submit_proactive('探索自己的形象', '合成自主思考机会', 'think-quiet')
+    result = app.wait(task.id, 10)
+    assert result.status == TaskStatus.COMPLETED and not result.response
+    assert read(app, task.id)['content'] == '我喜欢简洁而有辨识度的形象。'
+    item, = app.memory.list_items()
+    assert item.source.origin == 'character_reflection' and item.draft.subject.startswith('character:')
+    assert item.draft.subject == item.source.speaker_id
+    assert app.learning.store.job('turn:' + task.id)['status'] == 'completed'
+    assert not app.conversation_timeline(app.conversation_ensure_default()['id'])['items']
+    followup, = app.proactive.page()['items']
+    assert followup['method'] == 'reflection'
+    model.feedback_fn = lambda data: dict(reviews=[dict(id=item.id, decision='adopt', reason='这是角色自己的兴趣，不是外部事实')])
+    app.proactive.freeze_review('adopt-own-thought', [dict(kind='memory', id=item.id, revision=item.revision)])
+    app.learning.run_review('adopt-own-thought')
+    from deskpal.memory.contracts import MemoryStatus
+    assert app.memory.repository.get(item.id).status == MemoryStatus.ACCEPTED
+    with app.store.transaction() as db:
+        db.execute("DELETE FROM context_snapshot WHERE task_id=? AND purpose='reflection'", (task.id,))
+    with pytest.raises(WorkflowBlocked):
+        app.learning._source_valid([dict(kind='reflection', id=task.id, revision=1)])
+    with app.store.read_connection() as db:
+        pending = dict(db.execute('SELECT * FROM attention WHERE id=?', (followup['id'],)).fetchone())
+    assert not app.proactive.valid(pending)
+
+
+def test_reflection_opportunity_persistent_budget_pause_and_no_catchup(setup):
+    app, model, _, clock, _ = setup
+    enable(app)
+    app.notification_policy.set('chat', True, None, 'silent-thinking')
+    model.fn = lambda messages, tools: LLMResponse('{"action":"quiet","reply":""}')
+    app.proactive.poll()
+    assert not model.requests
+    for index in range(3):
+        clock.advance(4 * 3600)
+        app.proactive.poll()
+        until(lambda: len(model.requests) == index + 1)
+        until(lambda: not app._dispatcher.diagnostics()['active_task_id'])
+    clock.advance(4 * 3600)
+    app.proactive.poll()
+    assert len(model.requests) == 3 and not app.memory.list_items()
+    saved = app.proactive._meta('reflection_next')
+    app.proactive.method('reflection', False)
+    clock.advance(48 * 3600)
+    app.proactive.poll()
+    assert len(model.requests) == 3 and app.proactive._meta('reflection_next') == saved
+    app.proactive.method('reflection', True)
+    app.proactive.poll()
+    until(lambda: len(model.requests) == 4)
+    app.proactive.poll()
+    assert len(model.requests) == 4  # 只做当前一次，不补做关闭期间的全部机会。
+
+
+def test_reflection_followup_reenters_core_under_chat_pause(setup):
+    app, model, _, clock, _ = setup
+    enable(app)
+    app.notification_policy.set('chat', True, None, 'no-chat')
+    decisions = iter([
+        LLMResponse('', (ToolCall('reflection_record', dict(topic='主题', content='还想继续研究自己的审美。', reason='尚未想清楚')),)),
+        LLMResponse('{"action":"quiet","reply":""}'),
+    ])
+    model.fn = lambda messages, tools: next(decisions)
+    task = app.submit_proactive('合成思考', '合成依据', 'reflection-parent')
+    assert app.wait(task.id, 10).status == TaskStatus.COMPLETED
+    identity = app.proactive.schedule(task.id, '继续探索审美', '需要进一步考虑',
+        (clock() + timedelta(hours=2)).isoformat(), 'reflection')
+    model.fn = lambda messages, tools: LLMResponse('{"action":"quiet","reply":""}')
+    before = len(model.requests)
+    clock.advance(2 * 3600)
+    app.proactive.poll()
+    until(lambda: len(model.requests) == before + 1)
+    assert attention_task(app, identity)['task_id'] != task.id
+    assert not app.notification_policy.allowed('chat')
+
+
+def test_reflection_budget_survives_restart(setup):
+    app, model, _, clock, config = setup
+    enable(app)
+    app.proactive._meta('reflection_runs', json.dumps([clock().isoformat()] * 3))
+    app.proactive._meta('reflection_next', (clock() - timedelta(hours=1)).isoformat())
+    assert app.close(timeout=10)
+    with create_application(config) as reopened:
+        reopened.proactive.clock = clock
+        assert not reopened.proactive._think()
+        assert not model.requests
+
+
+def test_reflection_cannot_be_submitted_by_user_or_on_finished_task(setup):
+    from deskpal.proactive.reflection import record
+    app, _, _, _, _ = setup
+    task, _ = user_turn(app)
+    with pytest.raises(WorkflowBlocked):
+        record(app, task.id, '主题', '正文', '依据')
+    task = app.submit_proactive('思考', '合成依据', 'done-thought')
+    assert app.wait(task.id, 10).status == TaskStatus.COMPLETED
+    with pytest.raises(WorkflowBlocked):
+        record(app, task.id, '主题', '正文', '依据')
+
+
+def test_reflection_alone_cannot_adopt_external_guess(setup):
+    from deskpal.memory.contracts import MemorySource, MemoryDraft, ClaimType, MemoryError
+    app, _, _, _, _ = setup
+    source = MemorySource('他一定不喜欢复杂形象', origin='character_reflection',
+        speaker_id='character:test', speaker_kind='character')
+    draft = MemoryDraft(source.content, source.content, claim_type=ClaimType.HYPOTHESIS, subject='user')
+    with pytest.raises(MemoryError):
+        app.memory.repository.ingest(source, draft, accepted=True)
+    with pytest.raises(MemoryError):
+        app.memory.repository.ingest(source, replace(draft, claim_type=ClaimType.USER_REPORT))

@@ -11,7 +11,7 @@ from deskpal.memory.feedback import FeedbackValidationError, evaluate
 
 def payload():
     return {'catalog': {'memory0': {'content': '合成原话', 'origin': 'user_message'}},
-            'understandings': [{'id': 'synthetic', 'revision': 1, 'content': '合成理解',
+            'understandings': [{'id': 'synthetic', 'revision': 1, 'status': 'accepted', 'content': '合成理解',
                 'destination': 'facts', 'claim_type': 'user_report', 'uncertainty': '',
                 'original_source_key': 'memory0', 'quote': '合成原话'}]}
 
@@ -91,3 +91,50 @@ def test_new_diagnostic_fields_are_bounded_and_filtered():
         'learning_attempt': 2, 'processing_actual_bytes': -1, 'learning_correction': True})
     assert clean == {'processing_missing_fields': ['quote', 'unknown'], 'processing_extra_fields': ['status'],
                      'learning_kind': 'review', 'learning_attempt': 2}
+
+
+@pytest.mark.parametrize('deadline', [None, '2026-11-12T12:00:00+00:00', '2026-11-11T12:00:00+00:00', '2026-11-13T12:00:00'])
+def test_new_pending_requires_future_aware_review_time(deadline):
+    data = payload() | {'now': '2026-11-12T12:00:00+00:00'}
+    row = dict(content='合成理解', quote='合成原话', reason='依据', destination='facts',
+        claim_type='user_report', sources=['memory0'], review_after=deadline)
+    provider = SimpleNamespace(chat=lambda *a, **k: LLMResponse(json.dumps({'memories': [row]})))
+    with pytest.raises(FeedbackValidationError) as caught:
+        evaluate(provider, data)
+    assert caught.value.code == 'time_invalid' and caught.value.field == 'memories[0].review_after'
+
+
+@pytest.mark.parametrize('decision', ['retain', 'update'])
+def test_pending_review_must_renew_deadline_instead_of_inheriting_old_date(decision):
+    data = payload() | {'now': '2026-11-12T12:00:00+00:00'}
+    data['understandings'][0].update(status='candidate', review_after='2026-11-11T12:00:00+00:00')
+    row = dict(id='synthetic', decision=decision, reason='仍不确定', content='合成理解',
+        destination='facts', claim_type='user_report', quote='合成原话', sources=['memory0'])
+    provider = SimpleNamespace(chat=lambda *a, **k: LLMResponse(json.dumps({'reviews': [row]})))
+    with pytest.raises(FeedbackValidationError) as caught:
+        evaluate(provider, data)
+    assert caught.value.diagnostics['processing_rule'] == 'review_schedule'
+    row['review_after'] = '2026-11-13T12:00:00+00:00'
+    assert evaluate(provider, data)['reviews'][0]['review_after'] == row['review_after']
+
+
+@pytest.mark.parametrize('decision', ['adopt', 'archive'])
+def test_terminal_review_drops_old_deadline_without_requesting_a_new_one(decision):
+    data = payload() | {'now': '2026-11-12T12:00:00+00:00'}
+    data['understandings'][0].update(status='candidate', review_after='2026-11-11T12:00:00+00:00')
+    provider = SimpleNamespace(chat=lambda *a, **k: LLMResponse(json.dumps({'reviews': [
+        dict(id='synthetic', decision=decision, reason='复查结论')]})))
+    assert evaluate(provider, data)['reviews'][0]['review_after'] is None
+
+
+def test_merge_into_pending_memory_must_also_keep_a_future_review():
+    data = payload() | {'now': '2026-11-12T12:00:00+00:00'}
+    data['understandings'].append(dict(data['understandings'][0], id='pending-target', status='candidate'))
+    row = dict(id='synthetic', decision='merge', target='pending-target', reason='合并理解',
+        content='合成理解', destination='facts', claim_type='user_report', quote='合成原话', sources=['memory0'])
+    provider = SimpleNamespace(chat=lambda *a, **k: LLMResponse(json.dumps({'reviews': [row]})))
+    with pytest.raises(FeedbackValidationError) as caught:
+        evaluate(provider, data)
+    assert caught.value.diagnostics['processing_rule'] == 'review_schedule'
+    row['review_after'] = '2026-11-13T12:00:00+00:00'
+    assert evaluate(provider, data)['reviews'][0]['review_after'] == row['review_after']

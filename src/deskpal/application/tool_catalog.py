@@ -19,6 +19,7 @@ _DISPLAY = {
     'notification_control': ('调整通知', 'agent', '分别暂停或恢复主动聊天与提醒'),
     'attention_schedule': ('安排后续关注', 'agent', '有理由地安排后续复查'),
     'attention_end': ('结束当前关注', 'agent', '结束已处理或不再适用的关注'),
+    'reflection_record': ('记录自主思考', 'agent', '保存角色的简短思考成果，供学习与后续探索使用'),
     'memory_search': ('检索记忆', 'agent', '查找当前角色的相关记忆'),
     'memory_remember': ('保存记忆', 'agent', '保存用户明确要求记住的内容'),
     'memory_correct': ('更正记忆', 'agent', '修正已有理解'),

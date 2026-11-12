@@ -22,9 +22,11 @@ class ProactiveCoordinator:
         # 可信内置方法注册表；扩展方法只报告机会，不是插件执行框架。
         self.triggers: dict[str, Callable[[], None]] = {
             'event': self.collect, 'review': lambda: None,
-            'opportunity': self.opportunity, 'fallback': self._review, 'maintenance': lambda: None}
+            'opportunity': self.opportunity, 'fallback': self._review, 'maintenance': lambda: None,
+            'reflection': lambda: None}
         with self.store.transaction() as db:
             db.execute("INSERT OR IGNORE INTO proactive_method VALUES('maintenance',1)")
+            db.execute("INSERT OR IGNORE INTO proactive_method VALUES('reflection',1)")
 
     def register_trigger(self, name: str, trigger: Callable[[], None]) -> None:
         if not isinstance(name, str) or not 1 <= len(name) <= 32 or not name.replace('_', '').isalnum() or not callable(trigger):
@@ -91,7 +93,7 @@ class ProactiveCoordinator:
         if not isinstance(key, str) or not 1 <= len(key) <= 200:
             raise ValueError('Invalid attention source key')
         for ref in refs:
-            if (set(ref) != {'kind', 'id', 'revision'} or ref['kind'] not in {'proposal', 'memory', 'dialogue_turn'}
+            if (set(ref) != {'kind', 'id', 'revision'} or ref['kind'] not in {'proposal', 'memory', 'dialogue_turn', 'reflection'}
                     or not isinstance(ref['id'], str) or not 1 <= len(ref['id']) <= 200
                     or type(ref['revision']) is not int or ref['revision'] < 1):
                 raise ValueError('Invalid attention reference')
@@ -132,7 +134,15 @@ class ProactiveCoordinator:
             elif turn and origin['kind'] == 'user':
                 refs = [dict(kind='dialogue_turn', id=task_id + ':user', revision=turn['sequence'])]
             else:
-                raise WorkflowBlocked('No real attention source')
+                from .reflection import read
+                if read(self.app, task_id) is None:
+                    raise WorkflowBlocked('No real attention source')
+                refs = [dict(kind='reflection', id=task_id, revision=1)]
+            if mode == 'reflection':
+                from .reflection import read
+                own = dict(kind='reflection', id=task_id, revision=1)
+                if read(self.app, task_id) is not None:
+                    refs = [own, *(ref for ref in refs if ref != own)][:16]
         with self.store.read_connection() as db:
             count = db.execute("SELECT COUNT(*) FROM attention WHERE refs=? AND created_at>=?", (canonical(refs), (now-timedelta(days=1)).isoformat())).fetchone()[0]
         if count >= 4:
@@ -143,7 +153,7 @@ class ProactiveCoordinator:
     def schedule_followup(self, command: str, *, goal: str, reason: str, due_at: str,
                           mode: str, refs: list[dict[str, Any]]) -> str:
         """聊天工具和反馈学习共用关注记录；内部维护不产生另一套情绪定时器。"""
-        if mode not in {'internal', 'chat'}:
+        if mode not in {'internal', 'chat', 'reflection'}:
             raise ValueError('Invalid follow-up mode')
         now = self.clock()
         due = max(datetime.fromisoformat(due_at), now + timedelta(seconds=self.MIN_INTERVAL))
@@ -157,7 +167,7 @@ class ProactiveCoordinator:
                 (canonical(clean), (now - timedelta(days=1)).isoformat())).fetchone()[0]
         if count >= 4:
             raise WorkflowBlocked('This source has reached the daily recheck budget')
-        return self.offer(key=key, method='maintenance' if mode == 'internal' else 'review',
+        return self.offer(key=key, method={'internal': 'maintenance', 'chat': 'review', 'reflection': 'reflection'}[mode],
             goal=goal, basis=reason, refs=clean, due_at=due.isoformat(),
             expires_at=min(due + timedelta(days=1), now + timedelta(days=7)).isoformat())
 
@@ -206,6 +216,10 @@ class ProactiveCoordinator:
                     return False
             else:
                 policy = self.app._humanization.reference_policy(ref['kind'], ref['id'], ref['revision'])
+                if ref['kind'] == 'reflection':
+                    from .reflection import read
+                    if read(self.app, ref['id']) is None:
+                        return False
                 if policy is None or (policy == 'local_only' and self.app.config.llm.is_cloud):
                     return False
         return True
@@ -242,6 +256,10 @@ class ProactiveCoordinator:
 
     def _enqueue_review(self, identity: str) -> None:
         def run() -> None:
+            # 入队之后可能开始遗忘；此时保留批次，恢复后重新核对，不能假记复查完成。
+            if (self.app._closing or self.app._cleanup_pending
+                    or self.app._humanization.privacy()['blocked']):
+                return
             with self.store.read_connection() as db:
                 enabled = db.execute("SELECT enabled FROM proactive_method WHERE name='fallback'").fetchone()[0]
             batch = self._meta('review_batch:' + identity)
@@ -343,6 +361,8 @@ class ProactiveCoordinator:
             return
         if methods.get('maintenance', False) and app.config.memory.mode == 'automatic' and app.config.llm.ready and self._maintenance():
             return
+        if methods.get('reflection', False) and app.config.llm.ready and self._think():
+            return
         if methods.get('fallback', False) and 'fallback' in self.triggers and app.config.memory.mode == 'automatic' and app.config.llm.ready:
             self.triggers['fallback']()
         if not self.policy.allowed('chat') or not app.config.llm.ready or self.policy.is_quiet(now):
@@ -351,7 +371,7 @@ class ProactiveCoordinator:
         if last and (now - datetime.fromisoformat(last)).total_seconds() < self.MIN_INTERVAL:
             return
         with self.store.read_connection() as db:
-            row = db.execute("SELECT * FROM attention WHERE status='pending' AND method!='maintenance' AND due_at<=? ORDER BY due_at,id LIMIT 1", (now.isoformat(),)).fetchone()
+            row = db.execute("SELECT * FROM attention WHERE status='pending' AND method NOT IN ('maintenance','reflection') AND due_at<=? ORDER BY due_at,id LIMIT 1", (now.isoformat(),)).fetchone()
         if row is None:
             return
         item = self._refresh_due_sources(dict(row))
@@ -389,6 +409,10 @@ class ProactiveCoordinator:
                 proposal = self.app.proposals.preflight(ref['id'])
                 source_policy = proposal.use_policy
                 body = dict(reason=proposal.reason, request=proposal.request)
+            elif ref['kind'] == 'reflection':
+                from .reflection import read
+                body = read(self.app, ref['id'])
+                source_policy = body['use_policy'] if body else None
             else:
                 source_policy = self.app._humanization.reference_policy(ref['kind'], ref['id'], ref['revision'])
                 task = self.app.tasks.get(ref['id'].rsplit(':', 1)[0])
@@ -405,6 +429,42 @@ class ProactiveCoordinator:
         if len(basis.encode()) > 8192:
             basis = canonical(dict(reason=item['basis'], source_refs=json.loads(item['refs'])))
         return basis, policy
+
+    def _think(self) -> bool:
+        """低频空闲机会与模型安排共用预算，不把通知暂停等同于暂停内部思考。"""
+        now = self.clock()
+        with self.app._dispatcher.control(), self.store.transaction() as db:
+            stamps = [s for s in json.loads(self._meta('reflection_runs') or '[]')
+                if datetime.fromisoformat(s) > now - timedelta(days=1)]
+            if len(stamps) >= 3 or (stamps and now - datetime.fromisoformat(stamps[-1]) < timedelta(hours=1)):
+                return False
+            due = self._meta('reflection_next')
+            if not due:
+                self._meta('reflection_next', (now + timedelta(hours=4)).isoformat())
+            row = db.execute("SELECT * FROM attention WHERE method='reflection' AND status='pending' AND due_at<=? ORDER BY due_at,id LIMIT 1", (now.isoformat(),)).fetchone()
+            if row:
+                item = self._refresh_due_sources(dict(row))
+                if not self.valid(item):
+                    db.execute("UPDATE attention SET status='invalidated' WHERE id=?", (item['id'],))
+                    return False
+                basis, policy = self._source_context(item)
+                goal = item['goal']
+                key = 'reflection:' + item['id'] + ':' + str(item['attempts'])
+            elif due and now >= datetime.fromisoformat(due):
+                goal = '结合自己的身份、兴趣、相关经历与未完成的思考，自主选择一个值得探索的方向；没有新想法可以安静结束。'
+                basis, policy = canonical(dict(purpose='reflection', opportunity='free', reason='低频自主思考机会，不是用户请求')), 'cloud_allowed'
+                key = 'reflection:free:' + due
+            else:
+                return False
+            # 预留次数与实际提交同一事务；失败回滚，不在重启后补做全部积压。
+            task = self.app.submit_proactive(goal, basis, key, use_policy=policy)
+            if row:
+                self.app.journal.set_dependencies(task.id, tuple(json.loads(item['refs'])))
+                db.execute("UPDATE attention SET status='running',task_id=?,attempts=attempts+1 WHERE id=? AND status='pending'", (task.id, item['id']))
+            self._meta('reflection_runs', canonical(stamps + [now.isoformat()]))
+            self._meta('reflection_next', (now + timedelta(hours=4)).isoformat())
+            self.store.record_event('character_reflection_submitted', task.id)
+            return True
 
     def validate_task(self, task_id: str, refs: Any = ()) -> None:
         with self.store.read_connection() as db:

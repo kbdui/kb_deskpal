@@ -5,6 +5,10 @@
 - [2026-10-28 人格与记忆重构讨论](2026-10-28-character-memory-redesign-discussion.md)
 - [2026-10-29 十项补充问题的确认结论](2026-10-29-redesign-follow-up-decisions.md)
 - [分阶段开发与验收](../companion-redesign/README.md)
+- [2026-11-12 安静结束与按需记忆整理](2026-11-12-quiet-and-memory-consolidation.md)：最新确认、待实现；普通 quiet 跳过自动学习，明确后台整理例外，含每轮流程、QQ 双侧整理与未整理材料补齐。
+- [2026-11-11 角色自主思考设计与实施](2026-11-11-proactive-reflection.md)：触发、内部成果、预算和旧行为验证；已注明 12 日 quiet 收尾新规划。
+- [QQ 插件当前方案](../plugins/2026-11-09-qq-plugin-design.md)：主体保持一对一、插件社交数据隔离；可复用执行链，按 quiet 规则收尾，局部整理后选择性投递角色经历。
+- [2026-11-11 通用多人历史备选](2026-11-11-multi-person-integration-design.md)：保留人物归属等设计供插件参考；主体改造、迁移及 M1–M6 已不作为 QQ 开发前置，尚未实施。
 
 整理后补充的两项确认仍保留：所有面向用户的聊天回复都应经过表达润色，原文中“普通聊天不强制第二次润色”的记录有误；普通记忆更正后，不要求程序立即枚举和重写所有派生理解，由后续模型学习逐步纠偏，更系统的关联复核列为正式版后方向。详细补充见[人格与记忆摘要](../../design/companion/character-memory-decisions.md)、[执行与生命周期摘要](../../design/companion/execution-lifecycle-decisions.md)和[正式版后规划](../../roadmap/post-release.md)。
 

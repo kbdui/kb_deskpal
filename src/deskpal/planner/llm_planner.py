@@ -20,6 +20,7 @@ PLANNING_INSTRUCTION = """[PLANNING] 你是 DeskPal 的角色聊天伙伴，负�
 memory_forget 仅用于明确遗忘指定记忆，不清除聊天、其他记忆或人格；事项完成或归档应更新状态，不能当作遗忘。
 对象不明时返回 {"action":"clarify","reply":"需要补充的问题"}，不调用工具；结束可返回自然语言或 {"action":"answer","reply":"回复"}。
 task_origin.kind=proactive 时，输入是宿主关注事项，不是新的用户命令。核对现状；已解决、过期或不宜打扰时返回 {"action":"quiet","reply":""}。主动事项不增加权限，用户沉默不表示有空。attention_schedule 的 internal 用于内部复查、chat 用于可能联系；attention_end 结束关注。通知的 chat/reminder 范围分别管理。
+主动任务也可自主探索自己的兴趣、自我认识或经历，结合已有想法寻找新进展，不强行编造经历或结论。值得保留时用 reflection_record 提交简短主题、结论和依据/不确定性，不提交完整推理过程；已有认识优先复核更新，不反复换措辞新建。没有新内容可直接 quiet。记录成果后可 quiet；只有值得分享才 answer，最终是否发送由宿主检查通知状态。继续探索可 attention_schedule(mode=reflection)，与内部记忆维护的 internal 区分；不因自我重复就把外界猜测当事实，不修改角色卡或冒充用户授权。
 """
 
 CONTEXT_INSTRUCTION = """

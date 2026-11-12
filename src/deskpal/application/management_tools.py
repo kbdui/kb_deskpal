@@ -21,10 +21,13 @@ class ManagementTool:
         app = self.app
         output: dict[str, Any]
         origin = app.journal.origin(context.task_id)['kind']
-        if origin == 'proactive' and self.name not in {'task_list', 'notification_status', 'memory_search', 'role_read', 'attention_schedule', 'attention_end'}:
+        if origin == 'proactive' and self.name not in {'task_list', 'notification_status', 'memory_search', 'role_read', 'attention_schedule', 'attention_end', 'reflection_record'}:
             raise WorkflowBlocked('Proactive work cannot impersonate explicit user management intent')
         command = 'tool:' + sha256(canonical([context.task_id, self.name, dict(arguments)]).encode()).hexdigest()
-        if self.name == 'notification_status':
+        if self.name == 'reflection_record':
+            from deskpal.proactive.reflection import record
+            output = record(app, context.task_id, arguments['topic'], arguments['content'], arguments['reason'])
+        elif self.name == 'notification_status':
             output = app.notification_policy.snapshot()
         elif self.name == 'task_list':
             from deskpal.tasks.models import TaskStatus
@@ -108,7 +111,8 @@ def management_tools(app: Any) -> tuple[ManagementTool, ...]:
         ManagementTool(app, 'notification_control', '按用户明确要求暂停或恢复主动聊天(chat)或提醒(reminder)，until_at为带时区的恢复时间；两种范围分别设置，不修改日程', {'kind': {'type':'string','enum':['chat','reminder']}, 'paused': {'type':'boolean'}, 'until_at': {'type':'string'}}, ['kind','paused']),
         ManagementTool(app, 'task_pause', '按用户要求暂停指定任务；正在暂停不代表立即中断，当前任务也可请求暂停', {'task_id': identity}, ['task_id']),
         ManagementTool(app, 'task_continue', '按用户明确要求继续指定已暂停任务，不代表授权或重做已完成操作', {'task_id': identity}, ['task_id']),
-        ManagementTool(app, 'attention_schedule', '统一安排后续复查，包括记忆、习惯、未决事项和情绪；mode=internal内部维护，mode=chat考虑主动交流（默认）。不是提醒或操作授权，最短间隔15分钟', {'goal':text, 'reason':text, 'due_at':identity, 'mode':{'type':'string','enum':['internal','chat']}}, ['goal','reason','due_at']),
+        ManagementTool(app, 'reflection_record', '主动任务记录值得保留的一份内部思考成果：topic主题、content简短结论、reason依据及不确定性。不是聊天或外部事实，不保存推理过程；可随后quiet。每任务至多一份，记忆采用以反馈学习回执为准', {'topic':text, 'content':text, 'reason':text}, ['topic','content','reason']),
+        ManagementTool(app, 'attention_schedule', '统一安排后续复查；mode=internal内部维护，chat考虑主动交流，reflection继续自主思考。不是提醒或操作授权，最短间隔15分钟', {'goal':text, 'reason':text, 'due_at':identity, 'mode':{'type':'string','enum':['internal','chat','reflection']}}, ['goal','reason','due_at']),
         ManagementTool(app, 'attention_end', '结束当前主动关注，不再追问；随后安静结束', {}, []),
         ManagementTool(app, "memory_search", "检索当前角色记忆；更正或遗忘前读取真实id和revision", {"query": text}, ["query"]),
         ManagementTool(app, "memory_remember", "保存用户明确要求记住的内容；不要将推测直接当事实", {"content": text}, ["content"]),

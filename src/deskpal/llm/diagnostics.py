@@ -25,7 +25,7 @@ ENUMS = {
     'processing_stage': {'model', 'parse', 'normalize', 'validate', 'commit'},
     'processing_rule': {'field_set', 'wrong_type', 'empty_text', 'invalid_text', 'byte_limit', 'unknown',
         'followup_window', 'followup_evidence', 'habit_buffer', 'habit_adoption', 'habit_authority',
-        'habit_evidence', 'review_target', 'role_delivery', 'temporal_fact', 'merge_target', 'emotion_evidence'},
+        'habit_evidence', 'review_target', 'review_schedule', 'role_delivery', 'temporal_fact', 'merge_target', 'emotion_evidence'},
     'processing_expected_type': {'object', 'array', 'string', 'number', 'boolean', 'null', 'other'},
     'processing_actual_type': {'object', 'array', 'string', 'number', 'boolean', 'null', 'other'},
     'processing_decision': {'retain', 'adopt', 'update', 'archive', 'merge', 'unknown'},

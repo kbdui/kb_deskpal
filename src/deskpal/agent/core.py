@@ -542,8 +542,8 @@ class AgentCore:
         from .loop import READ_ONLY_TOOLS
         if self._journal and self._journal.origin(task_id)['kind'] == 'proactive':
             return tuple(spec for spec in self.tools.list_tools() if spec.name != 'memory_forget' and
-                (spec.name in READ_ONLY_TOOLS | {'attention_schedule', 'attention_end'} or int(spec.permission_level) > 0))
-        return tuple(self.tools.list_tools())
+                (spec.name in READ_ONLY_TOOLS | {'attention_schedule', 'attention_end', 'reflection_record'} or int(spec.permission_level) > 0))
+        return tuple(spec for spec in self.tools.list_tools() if spec.name != 'reflection_record')
 
     def _run(self, request: str, authorization: frozenset[str], high_risk: frozenset[str],
              *, task_id: str | None = None, confirmed_plan: Plan | None = None) -> AgentResult:

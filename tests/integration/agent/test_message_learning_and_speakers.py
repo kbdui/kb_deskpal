@@ -1,5 +1,6 @@
 """合成档案验证最终消息整理、角色设想和多参与者归属。"""
 from dataclasses import replace
+from datetime import datetime, timedelta
 import pytest
 
 from deskpal.conversation import ConversationRuntime
@@ -41,7 +42,8 @@ def test_published_character_idea_can_be_buffered_then_adopted_with_user_agreeme
                           if k.startswith('history') and v['role'] == 'assistant')
         return dict(empty(), memories=[dict(content='小鱼设想自己留深色短发、穿长袖宽松外套',
             quote=idea, claim_type='hypothesis', destination='episode', reason='角色提出自己的形象设想',
-            sources=[key], subject=source['speaker_id'])])
+            sources=[key], subject=source['speaker_id'],
+            review_after=(datetime.fromisoformat(data['now']) + timedelta(days=1)).isoformat())])
     model.fn = learn
     turn(app, '这个样子很适合你，我喜欢')
     item = next(x for x in app.memory.list_items() if x.source.origin == 'assistant_output')

@@ -9,7 +9,9 @@
 | 开发 | [开发者指南](developer-guide/README.md) | 模块、执行链路、存储、扩展及测试纪律 |
 | 设计约定 | [28 日完整讨论](planning/companion-model/2026-10-28-character-memory-redesign-discussion.md)、[29 日确认结论](planning/companion-model/2026-10-29-redesign-follow-up-decisions.md) | 原路径恢复完整原文；后续补充与阅读说明见[目录](planning/companion-model/README.md)，摘要不替代原文 |
 | 实施 | [六阶段开发与验收](planning/companion-redesign/README.md) | P1–P5 实施证据、P6 后续工作、公共契约与数据库设计 |
-| QQ 插件规划 | [QQ 插件开发设计](planning/plugins/2026-11-09-qq-plugin-design.md) | 已确认范围、开发阶段安装、渠道工具边界、多人记忆及待讨论事项 |
+| 按需整理规划 | [quiet 与记忆整理](planning/companion-model/2026-11-12-quiet-and-memory-consolidation.md) | 已确认待实现：普通安静结束跳过学习、后台整理例外、未整理材料补齐与每轮流程 |
+| QQ 插件规划 | [QQ 插件开发设计](planning/plugins/2026-11-09-qq-plugin-design.md) | 主体保持一对一；插件数据隔离、复用执行链及 quiet 收尾、局部整理和选择性投递经历 |
+| 通用多人备选 | [历史接入设计](planning/companion-model/2026-11-11-multi-person-integration-design.md) | 已由插件隔离路线替代；人物归属等设计可下沉插件，不再作为主体改造与迁移任务 |
 | 持续报告 | [实施日志](reports/implementation-log.md) | GUI 优化及后续短报告统一追加，按日期记录 |
 | 长期方向 | [路线图](roadmap/README.md) | 当前收尾与正式版后拓展 |
 | 维护记录 | [本次整理](maintenance/2026-10-30-repository-cleanup.md)、[测试目录](../tests/README.md) | 路径变更、退役依据、测试现状 |

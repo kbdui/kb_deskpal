@@ -340,11 +340,20 @@ class SubmissionDispatcher:
                     self._control_revision += 1
             if task is None:
                 try:
+                    self._stage = "internal_work"
                     internal()
+                except (WorkflowBlocked, TaskCancellationRequested) as error:
+                    # 清理、来源失效或取消是正常阻断，不应令唯一工作线程退出。
+                    self.tasks.store.record_event("internal_work_blocked", data={"error_type": type(error).__name__})
                 finally:
                     with self._condition:
                         self._internal_active = False
                         self._condition.notify_all()
+                try:
+                    # 内部工作结束也进入安全空闲点，让 Pending 清理有机会继续。
+                    self._on_idle()
+                except Exception:
+                    pass  # 与普通任务后的维护边界一致；失败仍由持久清理记录跟踪。
                 continue
             try:
                 self._stage = "execution"

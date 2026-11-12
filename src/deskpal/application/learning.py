@@ -75,6 +75,13 @@ class FeedbackLearning:
                 if policy is None or (policy == 'local_only' and not self.app._interaction.allow_restricted):
                     raise WorkflowBlocked('Learning original message is no longer available')
 
+            elif ref['kind'] == 'reflection':
+                from deskpal.proactive.reflection import read
+                value = read(self.app, ref['id'])
+                if (ref['revision'] != 1 or value is None
+                        or (value['use_policy'] == 'local_only' and not self.app._interaction.allow_restricted)):
+                    raise WorkflowBlocked('Internal reflection is no longer available')
+
     def recover(self) -> None:
         """只投递已提交的角色调整，绝不重新运行来源任务或盲目覆盖新角色。"""
         self._recover_summaries()
@@ -118,7 +125,6 @@ class FeedbackLearning:
 
     def review_candidates(self, now: datetime) -> list[dict[str, Any]]:
         """全体有效记录中选有界批次；已看修订和尝试时间分开，遗漏项不会被假记完成。"""
-        coverage = json.loads(self.app.proactive._meta('review_coverage') or '{}')
         attempts = json.loads(self.app.proactive._meta('review_attempts') or '{}')
         candidates: list[MemoryItem] = []
         for item in self.memory.list_items():
@@ -128,17 +134,24 @@ class FeedbackLearning:
                     or (item.draft.review_after is not None and item.draft.review_after > now)
                     or (not self.app._interaction.allow_restricted and item.source.use_policy != UsePolicy.CLOUD_ALLOWED)):
                 continue
-            seen = coverage.get(item.id, {})
-            attempted = attempts.get(item.id, {})
-            if attempted.get('revision') == item.revision and attempted.get('count', 0) >= 3:
-                continue  # 未处理不假记完成；无变化的同一修订也不能无限兜底调用。
-            due = item.draft.review_after is not None and item.draft.review_after.timestamp() > seen.get('at', 0)
-            if seen.get('revision') != item.revision or due:
+            if (item.draft.review_after is not None or
+                    item.status in (MemoryStatus.CANDIDATE, MemoryStatus.DISPUTED)):
                 candidates.append(item)
         candidates.sort(key=lambda item: (attempts.get(item.id, {}).get('at', 0),
             0 if item.draft.review_after is not None else 1,
             item.draft.review_after or item.recorded_at, item.id))
         return [dict(kind='memory', id=item.id, revision=item.revision) for item in candidates[:16]]
+
+    def _note_review_attempt(self, items: dict[str, MemoryItem]) -> None:
+        """轮转记录不代表复查成功；无输出和失败项仍有资格在后续批次出现。"""
+        with self.app.store.transaction():
+            attempts = json.loads(self.app.proactive._meta('review_attempts') or '{}')
+            stamp = self.app.proactive.clock().timestamp()
+            for item in items.values():
+                old = attempts.get(item.id, {})
+                attempts[item.id] = dict(revision=item.revision, at=stamp,
+                    count=old.get('count', 0) + 1 if old.get('revision') == item.revision else 1)
+            self.app.proactive._meta('review_attempts', json.dumps(attempts))
 
     def _input(self, task_id: str, request: str, response: str, observations: tuple[dict[str, Any], ...],
                context: PreparedTurn, batch: dict[str, Any] | None = None) -> tuple[dict[str, Any], list[dict[str, Any]], dict[str, MemoryItem]]:
@@ -173,6 +186,8 @@ class FeedbackLearning:
                 use_policy=source.get('use_policy', context.use_policy), created_at=historical_task.created_at.isoformat() if historical_task else created_at)
             refs.append(ref)
         for index, observation in enumerate(observations):
+            if observation.get('tool_name') == 'reflection_record':
+                continue  # 单独读取宿主成果；不把自述工具回执误当作客观观察。
             content = json.dumps(observation, ensure_ascii=False, allow_nan=False)
             if len(content.encode('utf-8')) > 6000:
                 content = json.dumps({key: observation.get(key) for key in ('tool_name', 'call_id', 'success', 'outcome')})
@@ -180,11 +195,22 @@ class FeedbackLearning:
                 conversation_id=context.conversation_id, available=True)
             catalog[f'tool{index}'] = dict(content=content, role='tool', origin='tool_result', refs=[ref], use_policy=context.use_policy, created_at=created_at)
             refs.append(ref)
+        if context.origin == 'proactive':
+            from deskpal.proactive.reflection import read
+            thought = read(self.app, task_id)
+            if thought:
+                ref = dict(kind='reflection', id=task_id, revision=1, available=True)
+                catalog['reflection'] = dict(content=thought['content'], role='assistant',
+                    origin='character_reflection', refs=[ref], published=False, available=True,
+                    created_at=thought['created_at'], use_policy=thought['use_policy'], **character_speaker)
+                refs.append(ref)
         candidates = [item for item in self.memory.list_items() if item.status in
             (MemoryStatus.CANDIDATE, MemoryStatus.DISPUTED, MemoryStatus.ACCEPTED)
             and item.draft.kind in (MemoryKind.SEMANTIC, MemoryKind.EPISODIC)
             and (item.draft.expires_at is None or item.draft.expires_at > now)
             and (self.app._interaction.allow_restricted or item.source.use_policy == UsePolicy.CLOUD_ALLOWED)]
+        due_ids = [ref['id'] for ref in self.review_candidates(now)] if batch is None else []
+        due_items = {item.id: item for item in candidates}
         if request and batch is None:
             relevant = {row.id for row in context.memory_records}
             recent_tasks = {str(entry.get('source_ref', {}).get('id', '')).rsplit(':', 1)[0]
@@ -195,10 +221,12 @@ class FeedbackLearning:
         if request:
             candidates.sort(key=lambda item: (-_lexical(request, item.draft.content),
                 0 if item.status != MemoryStatus.ACCEPTED else 1, -item.recorded_at.timestamp()))
-        elif batch is None:
-            candidates = [item for item in candidates if item.draft.review_after is None or item.draft.review_after <= now]
-            candidates.sort(key=lambda item: (item.draft.review_after or item.recorded_at, item.id))
-        selected = candidates[:5] if request and batch is None else candidates[:16]
+        selected = candidates[:16]
+        if batch is None:
+            due = [due_items[key] for key in due_ids if key in due_items]
+            # 普通整理为到期项留出位置，同时给本轮新信息保留输入空间。
+            selected = (due[:4] + [item for item in candidates if item.id not in due_ids][:4]
+                if request else due[:16])
         if batch is not None:
             selected = []
             eligible = {item.id: item for item in candidates}
@@ -253,6 +281,13 @@ class FeedbackLearning:
             if emotion:
                 source_refs.extend(emotion['source'].get('refs', []))
         for ref in source_refs[:64]:
+            if ref['kind'] == 'reflection' and ref.get('available', True):
+                from deskpal.proactive.reflection import read
+                thought = read(self.app, ref['id'])
+                if thought and (thought['use_policy'] != 'local_only' or self.app._interaction.allow_restricted):
+                    catalog['source:' + ref['id']] = dict(thought, origin='character_reflection',
+                        role='assistant', available=True, refs=[ref], published=False)
+                continue
             if ref['kind'] != 'dialogue_turn' or not ref.get('available', True):
                 continue
             policy = self.app._humanization.reference_policy(ref['kind'], ref['id'], ref['revision'])
@@ -372,7 +407,7 @@ class FeedbackLearning:
                *, fresh: bool = False) -> tuple[MemorySource, MemoryDraft]:
         permitted = {'observed_event': {'tool_result'}, 'user_report': {'user_message', 'user_confirmation'},
             'external_claim': {'user_message', 'user_confirmation', 'imported_document'},
-            'hypothesis': {'user_message', 'user_confirmation', 'tool_result', 'imported_document', 'assistant_output'}}
+            'hypothesis': {'user_message', 'user_confirmation', 'tool_result', 'imported_document', 'assistant_output', 'character_reflection'}}
         evidence = next((catalog[key] for key in row['sources'] if catalog[key].get('origin') in permitted[row['claim_type']]
             and catalog[key].get('available', True) and row['quote'] in catalog[key]['content']
             and (catalog[key]['origin'] != 'assistant_output' or bool(catalog[key].get('refs')))
@@ -432,6 +467,8 @@ class FeedbackLearning:
 
     def run_review(self, command_id: str) -> None:
         """由唯一 Dispatcher 调用；内部工作不发布消息，也没有工具执行能力。"""
+        if self.app._closing or self.app._cleanup_pending or self.app._humanization.privacy()['blocked']:
+            return
         prior = self.store.job('review:' + command_id)
         if prior and prior['status'] in ('completed', 'cancelled'):
             return
@@ -447,8 +484,13 @@ class FeedbackLearning:
                 return
             batch['goal'] = attention['goal']
         task = self.app.tasks.get(prior['task_id']) if prior else None
-        task = task or self.app.tasks.create('内部维护复查')
         try:
+            # 上面的状态检查与创建任务之间仍可能发生清理，以实际创建结果为准。
+            if task is None:
+                try:
+                    task = self.app.tasks.create('内部维护复查')
+                except WorkflowBlocked:
+                    return  # 尚未开始工作，不消耗模型次数、不写完成覆盖。
             if task.status == TaskStatus.CREATED:
                 self.app.tasks.update_status(task.id, TaskStatus.PLANNING)
                 self.app.tasks.update_status(task.id, TaskStatus.RUNNING)
@@ -459,13 +501,13 @@ class FeedbackLearning:
                 role_json=json.dumps(role, ensure_ascii=False), profile_id=self.app._interaction.profile_id,
                 runtime_id=self.app._interaction.runtime_id)
             warnings = self.review(command_id, context, batch)
-            attempts = json.loads(self.app.proactive._meta('review_attempts') or '{}')
             stamp = self.app.proactive.clock().timestamp()
-            for ref in batch['refs']:
-                old = attempts.get(ref['id'], {})
-                attempts[ref['id']] = dict(revision=ref['revision'], at=stamp,
-                    count=old.get('count', 0) + 1 if old.get('revision') == ref['revision'] else 1)
-            self.app.proactive._meta('review_attempts', json.dumps(attempts))
+            job = self.store.job('review:' + command_id)
+            if not job or job['status'] != 'completed':
+                with self.app.store.transaction() as db:
+                    db.execute('DELETE FROM proactive_meta WHERE key=?', ('review_batch:' + command_id,))
+                self.app.tasks.update_status(task.id, TaskStatus.FAILED, error='内部整理未完成')
+                return
             coverage = json.loads(self.app.proactive._meta('review_coverage') or '{}')
             for row in self.store.records(100):
                 if row['job_id'] == 'review:' + command_id and row['memory_id'] and row['action'] in {'retain', 'adopt', 'update', 'archive', 'merge'}:
@@ -477,6 +519,8 @@ class FeedbackLearning:
                 db.execute('DELETE FROM proactive_meta WHERE key=?', ('review_batch:' + command_id,))
             self.app.tasks.update_status(task.id, TaskStatus.COMPLETED, result={'internal_learning': True, 'warnings': list(warnings)})
         except Exception:
+            if task is None:
+                raise  # 非预期的存储/创建故障仍须暴露，不能伪装成正常跳过。
             if self.store.job('review:' + command_id) is None:
                 self.store.register('review:' + command_id, kind='review', task_id=task.id,
                     conversation_id='single:' + task.id, conversation_epoch=0,
@@ -546,6 +590,7 @@ class FeedbackLearning:
                 payload['history_lookup_available'] = can_lookup and not lookup_used and attempt < 3
                 provider = (self.app._interaction.calls(task_id, 'memory_evaluation') if kind == 'turn' else
                             self.app._interaction.gateway.bind(task_id, 'memory_evaluation', guard))
+                self._note_review_attempt(items)
                 evaluation_started = True
                 result = evaluate(provider, payload, correction=bool(correction_code),
                     correction_code=correction_code, correction_field=correction_field,
@@ -628,6 +673,12 @@ class FeedbackLearning:
                         {**attempt_diagnostics, 'processing_stage': stage, 'learning_outcome': outcome})
         return ('本轮记忆整理重试已用尽；实际操作和回复正常提交。',)
 
+    def _check_pending_deadline(self, draft: MemoryDraft, status: MemoryStatus) -> None:
+        # 模型返回期间也可能已过所选时间，按实际提交时间再核对。
+        if status in (MemoryStatus.CANDIDATE, MemoryStatus.DISPUTED) and (
+                draft.review_after is None or draft.review_after <= self.app.proactive.clock()):
+            raise FeedbackValidationError('time_invalid', 'feedback.review_after', processing_rule='review_schedule')
+
     def _commit(self, identity: str, result: dict[str, Any], payload: dict[str, Any],
                 items: dict[str, MemoryItem], context: PreparedTurn, guard: Any) -> None:
         catalog = payload['catalog']
@@ -647,7 +698,7 @@ class FeedbackLearning:
                         parent = db.execute('SELECT refs FROM attention WHERE task_id=?', (context.task_id,)).fetchone()
                     if parent:
                         actual.extend(json.loads(parent['refs']))
-            actual = [ref for ref in actual if ref['kind'] in {'memory', 'dialogue_turn'} and ref.get('available', True)]
+            actual = [ref for ref in actual if ref['kind'] in {'memory', 'dialogue_turn', 'reflection'} and ref.get('available', True)]
             actual = list({(ref['kind'], ref['id'], ref['revision']): ref for ref in actual}.values())
             if not actual or not any(catalog[key]['origin'] != 'assistant_output' and catalog[key].get('available', True) for key in row['sources']):
                 raise ValueError('Follow-up requires actual available evidence')
@@ -673,6 +724,7 @@ class FeedbackLearning:
             guard()
             for row in result['memories']:
                 source, draft = self._draft(row, catalog, context, fresh=identity.startswith('turn:'))
+                self._check_pending_deadline(draft, MemoryStatus.CANDIDATE)
                 # 精确相同文本只作为确定性去重；语义合并由 reviews 决定。
                 duplicate = next((item for item in items.values() if item.draft.content == draft.content
                     and item.draft.destination == draft.destination and item.draft.subject == draft.subject
@@ -707,6 +759,7 @@ class FeedbackLearning:
                     if not any(habit['buffer_id'] == previous.id for habit in role_habits):
                         raise ValueError('Habit adoption requires role delivery')
                     status = MemoryStatus.ARCHIVED
+                self._check_pending_deadline(draft, status)
                 if row['temporal']:
                     if previous.status != MemoryStatus.ACCEPTED or draft.destination == 'habit':
                         raise ValueError('Temporal change requires an existing fact')
@@ -722,6 +775,7 @@ class FeedbackLearning:
                     if target is None or target.id == previous.id or target.id in used or target.status not in (MemoryStatus.ACCEPTED, MemoryStatus.CANDIDATE):
                         raise ValueError('Invalid merge target')
                     used.add(target.id)
+                    self._check_pending_deadline(draft, target.status)
                     merged = self.repository.update_understanding(target.id, target.revision, source, draft, target.status)
                     changed[target.id] = (merged.id, merged.revision)
                     self.store.link(target.id, self.store.refs(previous.id) + new_refs)

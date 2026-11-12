@@ -26,7 +26,7 @@ def empty():
 def draft(content, quote, *, destination='facts', sources=None, **kwargs):
     return dict(content=content, quote=quote, destination=destination, claim_type='user_report',
         reason='来自实际交流，目前不推广到其他情境', uncertainty='仍需后续核对，适用于所述时间',
-        sources=sources or ['user'], review_after=None, valid_from=None, valid_to=None, **kwargs)
+        sources=sources or ['user'], review_after=(datetime.now(timezone.utc) + timedelta(days=1)).isoformat(), valid_from=None, valid_to=None, **kwargs)
 
 
 def review(payload, *, decision='adopt', content=None, quote=None, sources=None, destination=None):
@@ -34,7 +34,8 @@ def review(payload, *, decision='adopt', content=None, quote=None, sources=None,
     key = item['original_source_key']
     raw = payload['catalog'][key]['content']
     return dict(draft(content or item['content'], quote or raw, destination=destination or item['destination'],
-        sources=sources or [key]), id=item['id'], revision=item['revision'], decision=decision, target=None, temporal=False)
+        sources=sources or [key]), id=item['id'], revision=item['revision'], decision=decision, target=None, temporal=False,
+        review_after=(datetime.fromisoformat(payload['now']) + timedelta(days=1)).isoformat() if decision in ('retain', 'update') else None)
 
 
 class Model:
@@ -373,6 +374,8 @@ def test_internal_review_uses_dispatcher_without_creating_chat(app_model):
     before = deepcopy(app.conversation_timeline(conversation['id'])['items'])
     model.fn = lambda data: dict(empty(), reviews=[review(data, decision='retain')])
     from deskpal.application.desktop import DesktopFacade
+    due = app.memory.list_items()[0].draft.review_after
+    app.proactive.clock = lambda: due + timedelta(seconds=1)
     receipt = DesktopFacade(app).execute('learning_review', {'command_id': 'review-one'})
     assert receipt['accepted'] and receipt['work_id'] == 'review:review-one'
     wait_until(lambda: (app.learning.store.job('review:review-one') or {}).get('status') == 'completed')
@@ -700,3 +703,89 @@ def test_rolling_summary_crosses_old_provenance_limit(app_model):
         count = db.execute('SELECT COUNT(*) FROM conversation_summary_source WHERE conversation_id=?',
                            (conversation['id'],)).fetchone()[0]
     assert count > 384
+
+
+def test_review_pool_uses_deadlines_not_coverage_or_permanent_attempt_limit(app_model):
+    app, _ = app_model
+    now = datetime.now(timezone.utc)
+    def seed(label, *, accepted=False, deadline=None):
+        return app.memory.repository.ingest(MemorySource(label),
+            MemoryDraft(label, label, review_after=deadline), accepted=accepted)
+    missing = seed('无时间的旧候选')
+    overdue = seed('已确认但需要复查', accepted=True, deadline=now - timedelta(hours=1))
+    stable = seed('稳定事实无需复查', accepted=True)
+    future = seed('尚未到期', deadline=now + timedelta(days=1))
+    app.proactive._meta('review_coverage', json.dumps({missing.id: dict(revision=1, at=now.timestamp())}))
+    app.proactive._meta('review_attempts', json.dumps({missing.id: dict(revision=1, at=now.timestamp(), count=99)}))
+    ids = {row['id'] for row in app.learning.review_candidates(now)}
+    assert ids == {missing.id, overdue.id}
+    assert stable.id not in ids and future.id not in ids
+
+
+def test_ordinary_learning_rotates_all_overdue_records_even_without_topic_match(app_model):
+    app, model = app_model
+    items = [app.memory.repository.ingest(MemorySource(f'旧资料{index}'), MemoryDraft(f'旧理解{index}', f'旧资料{index}'))
+        for index in range(21)]
+    model.fn = lambda data: empty()  # 不处理并不等于归档或复查成功。
+    seen = set()
+    for index in range(6):
+        turn(app, f'完全不同的新话题{index}')
+        rows = model.inputs[-1]['understandings']
+        assert len(rows) <= 8
+        seen.update(row['id'] for row in rows)
+    assert seen == {item.id for item in items}
+    assert all(app.memory.repository.get(item.id).draft.review_after is None for item in items)
+    assert len(app.learning.review_candidates(datetime.now(timezone.utc))) == 16
+
+
+def test_retained_candidate_reappears_when_due_then_can_archive(app_model):
+    app, model = app_model
+    now = datetime.now(timezone.utc)
+    app.proactive.clock = lambda: now
+    item = app.memory.repository.ingest(MemorySource('未决计划'), MemoryDraft('可能有计划', '未决计划'))
+    model.fn = lambda data: dict(reviews=[dict(id=item.id, decision='retain', reason='暂时保留',
+        review_after=(now + timedelta(hours=2)).isoformat())])
+    app.learning.run_review('schedule-retain')
+    assert app.learning.store.job('review:schedule-retain')['status'] == 'completed'
+    assert not app.learning.review_candidates(now + timedelta(hours=1))
+    now += timedelta(hours=2, seconds=1)
+    assert [row['id'] for row in app.learning.review_candidates(now)] == [item.id]
+    model.fn = lambda data: dict(reviews=[dict(id=item.id, decision='archive', reason='已无后续价值')])
+    app.learning.run_review('schedule-archive')
+    archived = app.memory.repository.get(item.id)
+    assert archived.status == MemoryStatus.ARCHIVED and archived.draft.content == '可能有计划'
+    assert archived.draft.review_after is None and not app.learning.review_candidates(now)
+
+
+def test_failed_review_does_not_complete_task_or_prevent_later_archive(app_model):
+    app, model = app_model
+    item = app.memory.repository.ingest(MemorySource('旧依据'), MemoryDraft('待核对', '旧依据'))
+    model.fn = lambda data: dict(reviews=[dict(id=item.id, decision='retain', reason='故意漏掉时间')])
+    app.learning.run_review('missing-date')
+    job = app.learning.store.job('review:missing-date')
+    assert job['status'] == 'failed' and job['attempts'] == 3
+    assert app.tasks.get(job['task_id']).status == TaskStatus.FAILED
+    assert app.memory.repository.get(item.id).revision == 1
+    assert [row['id'] for row in app.learning.review_candidates(app.proactive.clock())] == [item.id]
+    assert len(model.inputs) == 3
+    model.fn = lambda data: dict(reviews=[dict(id=item.id, decision='archive', reason='随后归档')])
+    app.learning.run_review('retry-after-failure')
+    assert app.learning.store.job('review:retry-after-failure')['status'] == 'completed'
+    assert app.memory.repository.get(item.id).status == MemoryStatus.ARCHIVED
+
+
+def test_deadline_that_passed_during_model_wait_cannot_be_committed(app_model):
+    app, model = app_model
+    now = datetime.now(timezone.utc)
+    app.proactive.clock = lambda: now
+    item = app.memory.repository.ingest(MemorySource('待复查依据'), MemoryDraft('旧理解', '待复查依据'))
+    def feedback(data):
+        nonlocal now
+        deadline = datetime.fromisoformat(data['now']) + timedelta(minutes=1)
+        now += timedelta(hours=1)
+        return dict(reviews=[dict(id=item.id, decision='retain', reason='已错过复查时间', review_after=deadline.isoformat())])
+    model.fn = feedback
+    app.learning.run_review('late-date')
+    assert app.learning.store.job('review:late-date')['status'] == 'failed'
+    assert app.memory.repository.get(item.id).revision == 1
+    assert app.memory.repository.get(item.id).draft.review_after is None
