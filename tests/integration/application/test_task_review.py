@@ -29,7 +29,15 @@ def config(tmp_path):
         "DESKPAL_DATA_DIR": str(tmp_path / "data")})
 
 
-class WritePlanner:
+class ContextPlanner:
+    """当前多轮接口：执行后的观察只用于收尾，不重复发出旧的固定操作。"""
+    def plan_context(self, request, *, memories=(), tools=(), references=(), llm=None):
+        if any(item.get("kind") == "execution_observations" for item in references):
+            return Plan("已按实际执行结果完成。")
+        return self.plan(request, memories=memories, tools=tools)
+
+
+class WritePlanner(ContextPlanner):
     def plan(self, request, *, memories=(), tools=()):
         return Plan("先确认两项写入。", (
             ToolCall("echo", {"text": "只读前置说明"}),
@@ -123,7 +131,7 @@ def test_nonblocking_confirmation_duplicate_payload_precedes_revision_and_no_sec
 def test_restart_direct_confirmation_restores_original_plan_without_planning(config):
     with create_application(config, planner=WritePlanner()) as app:
         task, review = waiting(app)
-    class NeverPlan:
+    class NeverPlan(ContextPlanner):
         def plan(self, request, *, memories=(), tools=()):
             raise AssertionError("Restoring confirmation cannot replan")
     with create_application(config, planner=NeverPlan()) as reopened:
@@ -164,7 +172,7 @@ def test_historical_confirmation_receipt_never_restores_execution_authority(conf
 def test_recovered_confirmation_can_queue_while_other_task_executes(config, monkeypatch):
     with create_application(config, planner=WritePlanner()) as app:
         recovered, _ = waiting(app)
-    class EchoPlanner:
+    class EchoPlanner(ContextPlanner):
         def plan(self, request, *, memories=(), tools=()):
             return Plan("完成", (ToolCall("echo", {"text": request}),))
     app = create_application(config, planner=EchoPlanner())
@@ -192,7 +200,7 @@ def test_recovered_confirmation_can_queue_while_other_task_executes(config, monk
 
 
 def test_high_risk_grant_is_distinct_and_incomplete_confirmation_cannot_run_ordinary_step(config):
-    class MixedPlanner:
+    class MixedPlanner(ContextPlanner):
         def plan(self, request, *, memories=(), tools=()):
             return Plan("写入后删除", (ToolCall("write_text", {"path": "new.txt", "text": "ok"}),
                 ToolCall("document_delete", {"path": "old.txt"})))
@@ -287,11 +295,13 @@ def test_historical_review_survives_unrelated_epoch_and_scrub_never_returns_body
 
 
 def test_review_current_target_summary_is_trusted_and_outside_frozen_plan_hash(config):
-    class CancelPlanner:
+    class CancelPlanner(ContextPlanner):
         identity = ""
 
         def plan(self, request, *, memories=(), tools=()):
-            return Plan("取消指定计时器", (ToolCall("timer_cancel", {"id": self.identity}),))
+            # 计时器取消本身为自动操作；同组写入需要许可，供本例审核冻结参数。
+            return Plan("取消指定计时器并写入结果", (ToolCall("timer_cancel", {"id": self.identity}),
+                ToolCall("write_text", {"path": "timer-result.txt", "text": "取消计时器"})))
     planner = CancelPlanner()
     with create_application(config, planner=planner) as app:
         timer = app.scheduling.create_timer(3600, label="阅读休息")
@@ -313,7 +323,7 @@ def test_catalogue_is_live_read_only_and_unknown_arguments_are_lossless(config, 
         facade = DesktopFacade(app)
         catalogue = facade.execute("tools_catalog", {})
         assert {item["id"] for item in catalogue["items"]} == {spec.name for spec in app.tools.list_tools()}
-        assert len(catalogue["items"]) == 19
+        assert len(catalogue["items"]) == len(app.tools.list_tools())
         screenshot = facade.execute("tool_detail", {"id": "screenshot_capture"})["item"]
         assert screenshot["availability"] in {"unavailable", "check_at_execution"}
         assert screenshot["reason"]

@@ -100,6 +100,7 @@ class ExecutionJournal:
                 "call_id": f"round-{round_index}-step-{i}"} for i, call in enumerate(plan.steps)]
             data["reply"] = plan.reply
             data["action"] = plan.action
+            data['organize_memory'] = plan.organize_memory
             data["memory_refs"] = list(memory_refs)
             data["use_policy"] = conn.execute("SELECT use_policy FROM task WHERE id=?", (task_id,)).fetchone()[0]
             data["dependencies"] = [(ref.kind, ref.object_id, ref.revision) for ref in self.get_dependencies(task_id)]
@@ -158,6 +159,7 @@ class ExecutionJournal:
                  for spec in tool_specs]
         value = {"task_id": task_id, "reply": plan.reply, "action": plan.action, "steps": calls, "tool_specs": specs,
                  "workspace_dir": str(workspace_dir), "memory_refs": list(memory_refs), "policy_version": "2", "loop_version": 1}
+        value['organize_memory'] = plan.organize_memory
         with self.store.transaction() as conn:
             self.set_dependencies(task_id, memory_refs)
             self.store.check_dependencies(conn, task_id)
@@ -173,6 +175,8 @@ class ExecutionJournal:
             prior = conn.execute("SELECT hash,scrubbed,canonical_json FROM immutableplan WHERE task_id=?", (task_id,)).fetchone()
             if prior is not None and not prior["scrubbed"]:
                 old = json.loads(prior["canonical_json"])
+                if 'organize_memory' not in old:
+                    value.pop('organize_memory', None)  # 旧不可变快照的幂等核对不重写字节/哈希。
                 if str(old.get("policy_version", "1")) == "1" and context is None:
                     # Legacy save_plan idempotency uses the original canonical
                     # shape. Reading a plan never rewrites its bytes or hash.
@@ -206,7 +210,10 @@ class ExecutionJournal:
             policy_version = str(data.get("policy_version", "1"))
             if policy_version not in {"1", "2"}:
                 raise WorkflowBlocked("Unsupported immutable plan policy version")
-            plan = Plan(data["reply"], tuple(ToolCall(call["name"], call["arguments"], call["call_id"]) for call in data["steps"]), data.get("action", "answer"))
+            plan = Plan(data["reply"], tuple(ToolCall(call["name"], call["arguments"], call["call_id"]) for call in data["steps"]),
+                        data.get("action", "answer"), organize_memory=data.get('organize_memory', data.get('action') != 'quiet'))
+            if type(plan.organize_memory) is not bool:
+                raise WorkflowBlocked('Invalid persisted memory organization decision')
             specs = tuple(ToolSpec(spec["name"], spec["description"], spec["parameters"],
                                    PermissionLevel(spec["permission_level"]), spec["contract_version"])
                           for spec in data["tool_specs"])
@@ -222,6 +229,26 @@ class ExecutionJournal:
             if task is None:
                 raise KeyError(task_id)
             return {"task": task, "plan": self.get_plan(task_id), "attempts": self.attempts(task_id)}
+
+    def rejected_authorizations(self, task_id: str) -> tuple[dict[str, Any], ...]:
+        """读取宿主在控制事务中保存的拒绝决定，不把拒绝伪装成工具执行结果。"""
+        with self.store.read_connection() as conn:
+            rows = conn.execute("SELECT data FROM audit_outbox WHERE task_id=? AND event='tool_authorization_rejected' ORDER BY sequence LIMIT 9", (task_id,)).fetchall()
+        if len(rows) > 8:
+            raise WorkflowBlocked("Authorization rejection budget exceeded")
+        decisions = []
+        for row in rows:
+            data = json.loads(row[0])
+            tools = data.get("tools")
+            if not isinstance(tools, list) or not tools or any(not isinstance(name, str) for name in tools):
+                raise WorkflowBlocked("Authorization rejection record is unavailable")
+            operations = data.get("operations", [])
+            if not isinstance(operations, list) or any(not isinstance(item, dict) or not isinstance(item.get("tool_name"), str)
+                    or not isinstance(item.get("arguments"), dict) for item in operations):
+                raise WorkflowBlocked("Authorization rejection details are unavailable")
+            decisions.append({"tools": tools, "operations": operations, "executed": False,
+                "reason": "用户拒绝了这里列出的具体操作；当前请求继续处理，不代表封锁整个工具。"})
+        return tuple(decisions)
 
     def start_step(self, task_id: str, index: int) -> StepAttempt:
         self.check_task(task_id)

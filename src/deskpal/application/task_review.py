@@ -155,7 +155,36 @@ class TaskReviewService:
             actions.append("resume")
         if snapshot is not None and blocked is None and task.status in {TaskStatus.WAITING, TaskStatus.NEEDS_REVIEW} and state["state"] != "accepted":
             actions.append("confirm")
+            if ordinary or high:
+                actions = [action for action in actions if action != "cancel"]
+                actions.append("reject_tools")
+        rejections = app.journal.rejected_authorizations(task_id) if not (source and source["scrubbed"]) else ()
+        rejected_operations = []
+        for decision in rejections:
+            for operation in decision.get("operations", []):
+                name = operation["tool_name"]
+                arguments = operation["arguments"]
+                target = next((arguments[key] for key in ("path", "destination", "id", "memory_id", "task_id")
+                               if isinstance(arguments.get(key), str)), "")
+                short_target = target if len(target) <= 90 else target[:35] + "…" + target[-45:]
+                summary = display_name(name) + ("：" + short_target if target else "（此前提议）")
+                rejected_operations.append({"tool_name": name, "display_name": display_name(name), "summary": summary})
         cleared = source is not None and bool(source["scrubbed"])
+        completed_steps = []
+        if not cleared:
+            for attempt in attempts:
+                if attempt.status != "Succeeded" or attempt.result is None:
+                    continue
+                result = attempt.result
+                unchanged = isinstance(result.output, dict) and result.output.get("status") == "unchanged"
+                completed_steps.append({"index": attempt.index, "tool_name": result.tool_name,
+                    "display_name": display_name(result.tool_name), "status": "unchanged" if unchanged else "completed"})
+        cancellation_notice = "取消只停止后续步骤，不会撤销已经完成的操作。"
+        if task.status == TaskStatus.CANCELLED:
+            cancellation_notice = ("后续步骤已取消；此前已完成的操作仍然保留。" if completed_steps
+                                   else "请求已取消，没有已完成的工具操作。")
+        elif task.cancel_requested:
+            cancellation_notice = "正在停止后续步骤；已经开始的操作可能仍在完成，不会自动撤销已完成的操作。"
         task_value = asdict(task)
         if cleared:
             task_value.update(request="", result=None, error=None)
@@ -166,6 +195,10 @@ class TaskReviewService:
             "granted_in_current_process": permissions(granted[0] & ordinary, granted[1] & high),
             "missing_permissions": permissions(ordinary - granted[0], high - granted[1]),
             "available_actions": actions, "blocked_reason": blocked, "confirmation_state": state["state"],
+            "execution_progress": {"completed": completed_steps, "remaining_count": len(steps)},
+            "rejected_operations": rejected_operations,
+            "continuing_after_rejection": bool(rejections) and snapshot is not None and snapshot.plan.action == "continue",
+            "cancellation_notice": cancellation_notice,
             "confirmation": state, "confirmation_revision": state["revision"], "attempt_summary": {"count": len(attempts),
                 "items": [{"index": attempt.index, "status": attempt.status} for attempt in attempts]},
             "source_use_summary": {"use_policy": None if source is None else source["use_policy"],

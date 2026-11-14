@@ -28,6 +28,10 @@ def publish_task_state(store: WorkflowStore, conn: sqlite3.Connection, task_id: 
     text = data.get("response", data.get("reply", ""))
     if not isinstance(text, str):
         text = ""
+    if status == "Cancelled":
+        completed = conn.execute("SELECT 1 FROM attempt WHERE task_id=? AND status='Succeeded' LIMIT 1", (task_id,)).fetchone()
+        text = ("后续步骤已取消；此前已完成的操作仍然保留，可查看执行记录。" if completed
+                else "请求已取消，没有已完成的工具操作。")
     if not text:
         text = {"Waiting": "这项安排需要你确认后继续。", "NeedsReview": "这项工作需要重新审阅。",
                 "Uncertain": "执行结果需要人工核实。", "Failed": "这次请求未能完成，具体原因请查看执行详情。",

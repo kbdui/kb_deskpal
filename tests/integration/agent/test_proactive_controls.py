@@ -46,7 +46,12 @@ class Model:
             self.feedback.append(payload)
             return LLMResponse(json.dumps(self.feedback_fn(payload), ensure_ascii=False))
         self.requests.append(messages)
-        return self.fn(messages, tools)
+        result = self.fn(messages, tools)
+        if not result.tool_calls:
+            decision = json.loads(result.content) if result.content.lstrip().startswith('{') else dict(action='answer', reply=result.content)
+            decision.setdefault('organize_memory', decision['action'] == 'answer')
+            return LLMResponse(json.dumps(decision, ensure_ascii=False))
+        return result
 
     def generate(self, prompt):
         raise AssertionError('Unexpected model entry')
@@ -241,6 +246,7 @@ def test_pause_persistence_failure_rolls_back(setup, monkeypatch):
 def test_proactive_quiet_uses_core_no_fake_user_no_empty_message(setup):
     app, model, _, _, _ = setup
     task, conversation = user_turn(app)
+    feedback_count = len(model.feedback)
     enable(app)
     identity = offer(app, task)
     model.fn = lambda messages, tools: LLMResponse('{"action":"quiet","reply":""}')
@@ -251,7 +257,8 @@ def test_proactive_quiet_uses_core_no_fake_user_no_empty_message(setup):
     assert result.response == ''
     assert app.journal.origin(active)['kind'] == 'proactive'
     assert 'task_origin' in '\n'.join(m.content for m in model.requests[-1])
-    assert 'user' not in model.feedback[-1]['catalog']
+    assert len(model.feedback) == feedback_count  # quiet 不再创建一份反馈输入；此前用户轮次仍正常学习。
+    assert app.learning.receipt(active)['reason'] == 'model_deferred'
     timeline = app.conversation_timeline(conversation['id'])['items']
     assert not [item for item in timeline if item['task_id'] == active]
 
@@ -770,7 +777,7 @@ def test_user_submission_waits_for_active_internal_review_without_preemption(set
     assert app.wait(task.id,10).status==TaskStatus.COMPLETED
 
 
-def test_reflection_tool_quiet_learns_character_without_chat_or_user_authority(setup):
+def test_reflection_quiet_defers_learning_until_explicit_silent_review(setup):
     from deskpal.proactive.reflection import read
     app, model, _, clock, _ = setup
     app.notification_policy.set('chat', True, None, 'pause-chat-for-thinking')
@@ -780,23 +787,27 @@ def test_reflection_tool_quiet_learns_character_without_chat_or_user_authority(s
     ])
     model.fn = lambda messages, tools: next(decisions)
     def learn(data):
-        row = data['catalog']['reflection']
+        key, row = next((key, row) for key, row in data['catalog'].items() if row['origin'] == 'character_reflection')
         assert row['speaker_kind'] == 'character' and 'user' not in data['catalog']
         assert not any(x['origin'] == 'tool_result' for x in data['catalog'].values())
-        return dict(memories=[dict(content=row['content'], quote=row['content'], sources=['reflection'],
+        return dict(memories=[dict(content=row['content'], quote=row['content'], sources=[key],
             destination='facts', claim_type='hypothesis', reason='角色自身的兴趣', subject=row['speaker_id'],
             review_after=(clock() + timedelta(days=1)).isoformat())],
             followups=[dict(goal='继续探索形象', reason='还有可探索的方向', mode='reflection',
-                due_at=(clock() + timedelta(hours=2)).isoformat(), sources=['reflection'])])
+                due_at=(clock() + timedelta(hours=2)).isoformat(), sources=[key])])
     model.feedback_fn = learn
     task = app.submit_proactive('探索自己的形象', '合成自主思考机会', 'think-quiet')
     result = app.wait(task.id, 10)
     assert result.status == TaskStatus.COMPLETED and not result.response
     assert read(app, task.id)['content'] == '我喜欢简洁而有辨识度的形象。'
+    assert not model.feedback and not app.memory.list_items()
+    assert app.learning.store.job('turn:' + task.id) is None
+    app.proactive.freeze_review('organize-own-thought', [], materials=app.learning.materials.select())
+    app.learning.run_review('organize-own-thought')
     item, = app.memory.list_items()
     assert item.source.origin == 'character_reflection' and item.draft.subject.startswith('character:')
     assert item.draft.subject == item.source.speaker_id
-    assert app.learning.store.job('turn:' + task.id)['status'] == 'completed'
+    assert app.learning.store.job('review:organize-own-thought')['status'] == 'completed'
     assert not app.conversation_timeline(app.conversation_ensure_default()['id'])['items']
     followup, = app.proactive.page()['items']
     assert followup['method'] == 'reflection'

@@ -48,7 +48,7 @@ class LearningStore:
             sha256(content.encode('utf-8')).hexdigest()).encode('utf-8')).hexdigest()
 
     def organized_messages(self, messages: dict[str, str]) -> set[str]:
-        """按实际正文标记双方消息；旧整轮回执只证明用户消息曾被整理。"""
+        """按实际正文识别消息或内部成果；旧整轮回执只证明用户消息曾被整理。"""
         if not messages:
             return set()
         tokens = {self._message_token(key, content): key for key, content in messages.items()}

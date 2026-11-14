@@ -15,7 +15,8 @@ class ManagementTool:
         self.app, self.name = app, name
         self.spec = ToolSpec(name, description, {"type": "object", "properties": properties,
             "required": required, "additionalProperties": False},
-            PermissionLevel.CONFIRM if name == "memory_forget" else PermissionLevel.AUTOMATIC)
+            PermissionLevel.CONFIRM if name in {"memory_forget", "role_update"} else PermissionLevel.AUTOMATIC,
+            contract_version="2" if name == "role_update" else "1")
 
     def execute(self, arguments: Mapping[str, Any], context: ToolContext) -> ToolResult:
         app = self.app
@@ -70,11 +71,18 @@ class ManagementTool:
                                                        allow_restricted=not app.config.llm.is_cloud)
         elif self.name == "role_update":
             runtime = app.core.companion_runtime
+            before = runtime.interaction_snapshot()
+            # 每份实际操作各自去重；同一任务内的新修改不能共用旧修改的回执。
             runtime.command("character_card", text=arguments["text"], expected_revision=arguments["expected_revision"],
-                            command_id="role-tool:" + context.task_id,
-                            use_policy=app._humanization.task_policy(context.task_id))
+                            command_id=command, use_policy=app._humanization.task_policy(context.task_id))
             snapshot = runtime.interaction_snapshot()
-            output = {"revision": snapshot["revision"], "character_card": snapshot["character_card"], "status": "saved"}
+            changed = before["character_card"] != snapshot["character_card"]
+            matches = snapshot["character_card"]["text"] == arguments["text"].strip()
+            output = {"revision": snapshot["revision"], "character_card": snapshot["character_card"],
+                      "status": "saved" if changed else "unchanged" if matches else "previously_applied", "changed": changed,
+                      "message": ("角色卡已保存，不要再次执行本次修改。" if changed else
+                                  "角色卡已经是所要求的内容，无需再次修改。" if matches else
+                                  "本次修改此前已受理，当前角色卡后来已有变化；没有重放旧修改，请以返回的当前正文为准。")}
         elif self.name == 'notification_control':
             output = app.notification_control(arguments['kind'], arguments['paused'], command, arguments.get('until_at'))
         elif self.name in {'task_pause', 'task_continue'}:
@@ -92,7 +100,7 @@ class ManagementTool:
         elif self.name == "task_cancel":
             if arguments["task_id"] == context.task_id:
                 raise ValueError("Use the task cancellation control for the current task")
-            output = asdict(app.cancel_task(arguments["task_id"]))
+            output = asdict(app.cancel_task(arguments["task_id"], command_id=command))
             output["status"] = output["status"].value
             output["created_at"] = output["created_at"].isoformat()
             output["updated_at"] = output["updated_at"].isoformat()
@@ -118,7 +126,7 @@ def management_tools(app: Any) -> tuple[ManagementTool, ...]:
         ManagementTool(app, "memory_remember", "保存用户明确要求记住的内容；不要将推测直接当事实", {"content": text}, ["content"]),
         ManagementTool(app, "memory_correct", "更正一条当前记忆，必须使用实际revision", {"memory_id": identity, "expected_revision": revision, "content": text}, ["memory_id", "expected_revision", "content"]),
         ManagementTool(app, "memory_forget", "按真实 id 和 revision 遗忘指定提炼记忆及其修订、索引；保留聊天、其他记忆、人格、执行记录和安排。仅用于明确遗忘请求，事项完成应更新状态。Pending 仅表示受理，不能声称清理完成。", {"memory_id": identity, "expected_revision": revision}, ["memory_id", "expected_revision"]),
-        ManagementTool(app, "role_read", "读取当前角色卡及其修订", {}, []),
-        ManagementTool(app, "role_update", "按用户明确意图修改角色卡；先读取当前修订", {"text": text, "expected_revision": revision}, ["text", "expected_revision"]),
+        ManagementTool(app, "role_read", "读取角色卡、相处习惯与状态；修改角色卡使用返回对象最外层 revision，而非 character_card.revision", {}, []),
+        ManagementTool(app, "role_update", "仅在用户明确要求修改角色卡或角色身份时使用，执行前需用户授权；先 role_read，expected_revision 取最外层 revision。相处习惯调整由反馈学习处理，不要复制进角色卡；成功后不要重复调用", {"text": text, "expected_revision": revision}, ["text", "expected_revision"]),
         ManagementTool(app, "task_cancel", "取消指定其它任务的后续步骤，不撤销已经完成的操作", {"task_id": identity}, ["task_id"]),
     )

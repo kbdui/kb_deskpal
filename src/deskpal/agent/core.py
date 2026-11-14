@@ -524,6 +524,8 @@ class AgentCore:
             raise ValueError('Invalid context decision')
         if plan.action not in {"answer", "clarify", "quiet", "continue"}:
             raise ValueError("Unknown decision action")
+        if type(plan.organize_memory) is not bool:
+            raise ValueError('Invalid memory organization decision')
         if not plan.steps and not plan.reply.strip() and plan.action != "quiet" and plan.context is None:
             raise ValueError("Plan must contain a reply or tool calls")
         calls: list[ToolCall] = []
@@ -536,14 +538,40 @@ class AgentCore:
                 raise ValueError("Duplicate planned call_id")
             ids.add(call.call_id)
             calls.append(_call_copy(call))
-        return Plan(plan.reply, tuple(calls), plan.action, _json_copy(plan.context) if plan.context is not None else None)
+        return Plan(plan.reply, tuple(calls), plan.action, _json_copy(plan.context) if plan.context is not None else None,
+                    plan.organize_memory)
 
     def _planning_tools(self, task_id: str) -> tuple[Any, ...]:
         from .loop import READ_ONLY_TOOLS
+        tools = tuple(self.tools.list_tools())
         if self._journal and self._journal.origin(task_id)['kind'] == 'proactive':
-            return tuple(spec for spec in self.tools.list_tools() if spec.name != 'memory_forget' and
+            return tuple(spec for spec in tools if spec.name not in {'memory_forget', 'role_update'} and
                 (spec.name in READ_ONLY_TOOLS | {'attention_schedule', 'attention_end', 'reflection_record'} or int(spec.permission_level) > 0))
-        return tuple(spec for spec in self.tools.list_tools() if spec.name != 'reflection_record')
+        return tuple(spec for spec in tools if spec.name != 'reflection_record')
+
+    def _learning_references(self, task_id: str, references: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """在原有规划中提供有界未整理资料，不另起一次判断或据数量自动整理。"""
+        preview = getattr(self._feedback, 'planning_materials', None)
+        if not callable(preview):
+            return references
+        from deskpal.llm.context import references_view
+        material = preview(task_id)
+        if not material['items']:
+            return references
+        header: dict[str, Any] = dict(kind='unorganized_materials', instruction=False, items=[])
+        admitted = []
+        for item in material['items']:
+            candidate = {**header, 'items': [*header['items'], {key: value for key, value in item.items() if key != 'refs'}]}
+            encoded = json.dumps(references_view([*references, candidate]), ensure_ascii=False,
+                                 separators=(',', ':')).encode('utf-8')
+            if len(encoded) <= 60000:  # 为追加要求及实际观察留出空间，完整省略材料而不截断原话。
+                header = candidate
+                admitted.extend(item.get('refs', []))
+        if header['items']:
+            if self._journal:
+                self._journal.set_dependencies(task_id, tuple(admitted))
+            references.append(header)
+        return references
 
     def _run(self, request: str, authorization: frozenset[str], high_risk: frozenset[str],
              *, task_id: str | None = None, confirmed_plan: Plan | None = None) -> AgentResult:
@@ -598,7 +626,7 @@ class AgentCore:
                 contextual = getattr(self.planner, "plan_context", None)
                 if self._interaction is not None and callable(contextual):
                     self._event("model_decision_attempt", task_id, {"round": 0, "attempt": 1, "observation_count": 0})
-                    initial_references = _json_copy(list(prepared.planning_items)) if prepared else []
+                    initial_references = self._learning_references(task_id, _json_copy(list(prepared.planning_items)) if prepared else [])
                     if self._journal is not None:
                         initial_references.append({"kind": "current_task_amendments", "items": self._journal.consume_amendments(task_id, 0)})
                     plan = self._plan_copy(contextual(request, memories=memories,
@@ -613,7 +641,7 @@ class AgentCore:
                     warnings.extend(item for item in prepared.warnings if item not in warnings)
                     if recheck or (not plan.steps and not plan.reply.strip() and plan.action != 'quiet'):
                         # 补查后的模型才决定行动；首份草稿和工具提议不会执行。
-                        references = _json_copy(list(prepared.planning_items))
+                        references = self._learning_references(task_id, _json_copy(list(prepared.planning_items)))
                         if self._journal is not None:
                             references.append({'kind': 'current_task_amendments', 'items': self._journal.consume_amendments(task_id, 0)})
                         self._event('model_decision_attempt', task_id, {'round': 0, 'attempt': 2, 'observation_count': 0})
@@ -629,7 +657,7 @@ class AgentCore:
                 self._boundary(task_id)
                 if self._journal is not None:
                     plan = Plan(plan.reply, tuple(ToolCall(call.name, _json_copy(call.arguments), f"round-0-step-{index}")
-                        for index, call in enumerate(plan.steps)), plan.action)
+                        for index, call in enumerate(plan.steps)), plan.action, organize_memory=plan.organize_memory)
                     snapshot = self._journal.save_plan(task_id, plan, tuple(self.tools.list_tools()),
                         str(self.workspace_dir), self._task_dependencies.get(task_id, ()))
                     plan = snapshot.plan
@@ -664,7 +692,12 @@ class AgentCore:
                 self._transition(task_id, TaskStatus.RUNNING)
             phase = "memory"
             # P4：只有统一反馈入口负责学习；工具明细保留在执行账本。
-            if self._feedback is not None and not clarifying:
+            skip_learning = not plan.organize_memory
+            self._event('memory_learning_decided', task_id,
+                        {'organize_memory': plan.organize_memory, 'final_action': plan.action})
+            if skip_learning:
+                self._event("memory_learning_skipped", task_id, {"reason": "model_deferred", "final_action": plan.action})
+            if self._feedback is not None and not clarifying and not skip_learning:
                 try:
                     warnings.extend(self._feedback.finish(task_id=task_id, request=request, response=plan.reply,
                         observations=tuple(_result_data(item) for item in results), context=prepared))
@@ -676,8 +709,9 @@ class AgentCore:
             if self._interaction is not None and prepared is not None:
                 # 学习可能通过既有受控入口刷新角色或撤下旧记忆引用。
                 prepared = self._interaction.current_turn(task_id)
-            learning_receipt: dict[str, Any] = {"status": "not_run", "saved_understandings": []}
-            if self._feedback is not None and not clarifying:
+            learning_receipt: dict[str, Any] = ({"status": "skipped", "reason": "model_deferred", "saved_understandings": []}
+                                               if skip_learning else {"status": "not_run", "saved_understandings": []})
+            if self._feedback is not None and not clarifying and not skip_learning:
                 receipt = getattr(self._feedback, 'receipt', None)
                 if callable(receipt):
                     try:
@@ -759,10 +793,12 @@ class AgentCore:
                         response_signals = {}
                 if self._journal is not None and self._journal.unconsumed_amendments(task_id):
                     warnings.append("有追加要求未赶上最后一次模型判断，未纳入本次执行；请继续发起续办。")
-                if prepared is not None and prepared.origin == 'proactive' and self._proactive_publication is not None and not self._proactive_publication(task_id):
+                if plan.action == 'quiet' or (prepared is not None and prepared.origin == 'proactive' and self._proactive_publication is not None and not self._proactive_publication(task_id)):
                     response = ''
                 payload = {"response": response, "tool_results": [_result_data(item) for item in results],
-                           "warnings": list(warnings), "memory_effects": memory_effects}
+                           "warnings": list(warnings), "memory_effects": memory_effects,
+                           "final_action": plan.action, "organize_memory": plan.organize_memory,
+                           "learning_receipt": learning_receipt}
                 if clarifying:
                     # 问题也经过统一表达，但尚未完成的交流不触发反馈学习或完成发布。
                     self._transition(task_id, TaskStatus.AWAITING_INPUT, result=payload)

@@ -47,6 +47,7 @@ _SCHEMA = (
 # Existing histories pay the index-build cost once during owned startup, inside
 # the initialization transaction; snapshot reads never create or rebuild them.
 _PRESENTATION_INDEXES = (
+    "CREATE INDEX IF NOT EXISTS audit_task_event ON audit_outbox(task_id,event,sequence)",
     "CREATE INDEX IF NOT EXISTS task_presentation_status ON task(status,updated_at DESC,id DESC)",
     "CREATE INDEX IF NOT EXISTS task_presentation_latest ON task(updated_at DESC,id DESC)",
     "CREATE INDEX IF NOT EXISTS submission_presentation_status ON submission(status,sequence,task_id)",

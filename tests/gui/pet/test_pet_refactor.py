@@ -93,7 +93,8 @@ def test_scale_validates_full_canvas_mask_and_readable_label(qtbot, tmp_path):
     assert not window.mask().contains(QPoint(24, 400))
     region = window.mask()
     window.present(QPixmap.fromImage(image("#ff0000")), "等待确认")
-    assert window.mask() == region
+    assert window.mask().contains(region.boundingRect())
+    assert window.mask().contains(QPoint(8, 8))  # 当前不透明帧不能被主图轮廓裁掉。
     window.set_scale(.6)
     assert window.height() == 144 and not hasattr(window, "_label")
 

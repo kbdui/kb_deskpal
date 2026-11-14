@@ -24,6 +24,7 @@ from deskpal.goals import GoalManager
 from deskpal.memory.contracts import DeletionReceipt, MemoryItem, MemoryRuntime, MemoryStatus
 from deskpal.plugins.manifest import AGENT, SCHEDULE
 from deskpal.plugins.runtime import PluginRuntime
+from deskpal.planner.models import Plan
 from deskpal.plugins.schedule import record_schedule_occurrence, register_schedule_page
 from deskpal.proactive import LocalRuleEngine, ProposalManager
 from deskpal.proactive.policy import NotificationPolicy
@@ -596,13 +597,23 @@ class ApplicationService:
                             for job in self.journal.pending_deletions()],
                 "waiting_for_worker": self._dispatcher.diagnostics().get("active_task_id") is not None}
 
-    def resume(self, task_id: str) -> PlanSnapshot | Task:
+    def resume(self, task_id: str, *, command_id: str | None = None) -> PlanSnapshot | Task:
         self._ready()
         with self._dispatcher.management():
+            if command_id is not None and self.task_control.replayed(task_id, command_id, "resume_unstarted"):
+                task = self.tasks.get(task_id)
+                if task is None:
+                    raise KeyError(task_id)
+                return task
             snapshot = self.journal.get_plan(task_id)
             if snapshot is not None:
                 self._verify_snapshot(snapshot)
-            task = self.journal.resume_unstarted(task_id)
+            # 外部来源校验不能放进工作流写事务。
+            self.store.validate_external(task_id)
+            with self.store.transaction():
+                if command_id is not None:
+                    self.task_control._receipt(task_id, command_id, "resume_unstarted")
+                task = self.tasks.resume(task_id)
             if snapshot is not None:
                 self.core.restore_pending(task_id, snapshot.plan, snapshot.memory_refs)
                 self._reviewed[task_id] = snapshot.hash
@@ -708,8 +719,70 @@ class ApplicationService:
                 raise
             return task
 
-    def cancel_task(self, task_id: str) -> Task:
-        return self._cancel_task_impl(task_id)
+    def cancel_task(self, task_id: str, *, command_id: str | None = None) -> Task:
+        return self._cancel_task_impl(task_id, command_id=command_id)
+
+    def reject_tools(self, task_id: str, *, command_id: str, plan_hash: str, expected_revision: int) -> Task:
+        """拒绝当前待授权组，丢弃未执行计划，由原任务继续判断；不授予任何工具许可。"""
+        self._ready()
+        if type(expected_revision) is not int or expected_revision < 1 or not isinstance(plan_hash, str) or not plan_hash:
+            raise ValueError("An exact reviewed plan and positive task revision are required")
+        payload = {"plan_hash": plan_hash, "expected_revision": expected_revision}
+        with self._dispatcher.control():
+            if self.task_control.replayed(task_id, command_id, "reject_tools", payload):
+                task = self.tasks.get(task_id)
+                if task is None:
+                    raise KeyError(task_id)
+                return task
+            state = self._dispatcher.confirmation_state(task_id)
+            if state["active"] or state["queued"] or self._dispatcher.diagnostics()["active_task_id"] == task_id:
+                raise WorkflowBlocked("操作已经受理或正在执行，不能再拒绝旧的授权请求。")
+            snapshot = self.journal.get_plan(task_id)
+            if snapshot is None or snapshot.hash != plan_hash:
+                raise WorkflowBlocked("待授权计划已经变化，请刷新后再决定。")
+            self._verify_snapshot(snapshot)
+            self.store.validate_external(task_id)
+            queued = False
+            try:
+                with self.store.transaction() as db:
+                    self.store.check_privacy(db, task_id)
+                    task = self.tasks.get(task_id)
+                    if task is None:
+                        raise KeyError(task_id)
+                    if task.revision != expected_revision or task.status not in {TaskStatus.WAITING, TaskStatus.NEEDS_REVIEW} or task.cancel_requested:
+                        raise WorkflowBlocked("任务状态已经变化，请重新查看当前操作。")
+                    self.store.check_dependencies(db, task_id)
+                    attempts = self.journal.attempts(task_id)
+                    if any(item.status not in {"Succeeded", "Failed"} for item in attempts):
+                        raise WorkflowBlocked("存在结果不确定的操作，应先核实其实际结果。")
+                    ordinary, high = required_permissions(snapshot, len(attempts))
+                    tools = sorted(ordinary | high)
+                    if not tools:
+                        raise WorkflowBlocked("当前没有等待授权的工具操作。")
+                    if len(self.journal.rejected_authorizations(task_id)) >= 8:
+                        raise WorkflowBlocked("本请求的拒绝次数已达上限。")
+                    self.task_control._receipt(task_id, command_id, "reject_tools", payload)
+                    self.store.record_event("tool_authorization_rejected", task_id,
+                        {"tools": tools, "plan_hash": snapshot.hash, "executed": False,
+                         "operations": [{"tool_name": call.name, "arguments": dict(call.arguments)}
+                                        for call in snapshot.plan.steps[len(attempts):] if call.name in tools]})
+                    self.journal.save_round(task_id, Plan("用户拒绝了本轮待授权操作，请重新判断允许的下一步。", (), "continue"),
+                        tuple(self.tools.list_tools()), str(self.core.workspace_dir), snapshot.memory_refs, replace_unstarted=True)
+                    if task.status == TaskStatus.NEEDS_REVIEW:
+                        self.tasks.resume(task_id)
+                    db.execute("UPDATE task SET revision=revision+1 WHERE id=?", (task_id,))
+                    self._dispatcher.clear_cached((task_id,))
+                    self._reviewed.pop(task_id, None)
+                    self._live_pending.discard(task_id)
+                    self._dispatcher.confirm(task_id, frozenset(), frozenset(), _external_validated=True)
+                    queued = True
+                # 撤下 Core 缓存不持有工作流写锁；唯一 worker 在 control 释放后才可领取。
+                self.core.revoke_pending((task_id,))
+            except BaseException:
+                if queued:
+                    self._dispatcher.clear_cached((task_id,))
+                raise
+            return self.tasks.get(task_id) or task
 
     def append_requirement(self, task_id: str, content: str, command_id: str) -> dict[str, Any]:
         self._ready()
@@ -773,10 +846,11 @@ class ApplicationService:
                 self._dispatcher.confirm(task_id, frozenset(), frozenset())
             return receipt
 
-    def _cancel_task_impl(self, task_id: str) -> Task:
+    def _cancel_task_impl(self, task_id: str, *, command_id: str | None = None) -> Task:
         if self._closed:
             raise RuntimeError("Application is closed")
-        task = self.tasks.request_cancel(task_id)
+        task = (self.task_control.cancel(task_id, command_id) if command_id is not None
+                else self.tasks.request_cancel(task_id))
         self.core.revoke_pending((task_id,))
         self._dispatcher.clear_cached((task_id,))
         self._reviewed.pop(task_id, None)
@@ -786,9 +860,16 @@ class ApplicationService:
             return replace(task, request="[redacted pending cleanup]", result=None, error=None)
         return task
 
-    def review_uncertain(self, task_id: str, verdict: str, evidence: str) -> Task:
+    def review_uncertain(self, task_id: str, verdict: str, evidence: str, *, command_id: str | None = None) -> Task:
         self._ready()
-        return self.journal.review_uncertain(task_id, verdict, evidence)
+        payload = {"verdict": verdict, "evidence": evidence}
+        with self.store.transaction():
+            task = self.tasks.get(task_id)
+            if task is None:
+                raise KeyError(task_id)
+            if command_id is not None and self.task_control._receipt(task_id, command_id, "review_uncertain", payload):
+                return task
+            return self.journal.review_uncertain(task_id, verdict, evidence)
 
     def memory_command(self, action: str, **parameters: Any) -> Any:
         self._ready()

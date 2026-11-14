@@ -17,10 +17,24 @@ class TaskControl:
             row = db.execute('SELECT * FROM task_control WHERE task_id=?', (task_id,)).fetchone()
             return dict(row) if row else dict(task_id=task_id, requested=0, checkpoint='', elapsed=0.0)
 
-    def _receipt(self, task_id: str, command_id: str, operation: str) -> bool:
+    @staticmethod
+    def _fingerprint(task_id: str, command_id: str, operation: str, payload: Any = None) -> str:
         if not isinstance(command_id, str) or not 1 <= len(command_id) <= 200:
             raise ValueError('Invalid task control command')
-        digest = sha256(canonical([operation, task_id]).encode()).hexdigest()
+        values = [operation, task_id] if payload is None else [operation, task_id, payload]
+        return sha256(canonical(values).encode()).hexdigest()
+
+    def replayed(self, task_id: str, command_id: str, operation: str, payload: Any = None) -> bool:
+        """历史回执仅证明受理，不恢复执行权，也不再次审查或执行旧操作。"""
+        digest = self._fingerprint(task_id, command_id, operation, payload)
+        with self.store.read_connection() as db:
+            old = db.execute('SELECT fingerprint FROM task_control_receipt WHERE command_id=?', (command_id,)).fetchone()
+            if old and old[0] != digest:
+                raise ValueError('Task control command conflict')
+            return old is not None
+
+    def _receipt(self, task_id: str, command_id: str, operation: str, payload: Any = None) -> bool:
+        digest = self._fingerprint(task_id, command_id, operation, payload)
         with self.store.transaction() as db:
             if db.execute('SELECT 1 FROM command WHERE id=? UNION SELECT 1 FROM conversation_receipt WHERE command_id=? UNION SELECT 1 FROM notification_policy_receipt WHERE command_id=?', (command_id, command_id, command_id)).fetchone():
                 raise ValueError('Control command namespace conflict')
@@ -53,6 +67,16 @@ class TaskControl:
             if not active and task.status in {TaskStatus.WAITING, TaskStatus.AWAITING_INPUT}:
                 self.checkpoint(task_id, task.status.value, 0)
             return self.tasks.get(task_id) or task
+
+    def cancel(self, task_id: str, command_id: str) -> Task:
+        """取消与回执在同一事务提交，丢失网络响应后也可安全查询或重试。"""
+        with self.store.transaction():
+            task = self.tasks.get(task_id)
+            if task is None:
+                raise KeyError(task_id)
+            if self._receipt(task_id, command_id, 'cancel'):
+                return task
+            return self.tasks.request_cancel(task_id)
 
     def checkpoint(self, task_id: str, mode: str, elapsed: float) -> bool:
         with self.store.transaction() as db:

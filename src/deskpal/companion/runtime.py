@@ -172,13 +172,16 @@ class CompanionRuntime:
                     return self.snapshot()
             if type(parameters.get("expected_revision")) is not int or parameters["expected_revision"] != state["revision"]:
                 raise CompanionRevisionConflict("companion_revision_conflict")
+            changed = True
             if action == "character_card":
                 policy = parameters.get("use_policy", "cloud_allowed")
                 if policy not in ("cloud_allowed", "local_only"):
                     raise CompanionValidationError("companion_use_policy_invalid")
-                state["card"].update(text=_text(parameters.get("text"), 8192),
-                                     revision=state["card"]["revision"] + 1,
-                                     use_policy=policy, origin="user")
+                text = _text(parameters.get("text"), 8192)
+                changed = text != state["card"]["text"] or policy != state["card"]["use_policy"]
+                if changed:
+                    state["card"].update(text=text, revision=state["card"]["revision"] + 1,
+                                         use_policy=policy, origin="user")
             else:
                 target = parameters.get("target")
                 if target not in ("affect", "persona", "all"):
@@ -192,8 +195,9 @@ class CompanionRuntime:
                 if target == "all":
                     state["user_understanding"], state["interaction_approach"] = [], []
                 state["reset_epoch"] += 1
-            state["revision"] += 1
-            self._repository.save(state)
+            if changed:
+                state["revision"] += 1
+                self._repository.save(state)
             if command_id is not None:
                 self._receipt(command_id, fingerprint)
         return self.snapshot()

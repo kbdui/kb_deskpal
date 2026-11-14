@@ -153,7 +153,7 @@ function composer() {
         (chat.canSend?"":"disabled")+'>'+icon("arrow-up")+'</button></div></form></div>';
 }
 
-const actions = {confirm:"确认并继续",cancel:"取消请求",task_pause:"暂停",task_continue:"继续",resume:"继续执行",
+const actions = {confirm:"确认并继续",reject_tools:"拒绝该操作并继续",cancel:"终止整个请求",task_pause:"暂停",task_continue:"继续",resume:"继续执行",
     review_uncertain:"核实结果",task_answer:"补充信息",task_append_requirement:"追加要求"};
 function taskCard(id) {
     const item = (state.chat.reviews || {})[id];
@@ -164,17 +164,32 @@ function taskCard(id) {
     else if(["Paused","Created","Planning","Running","Waiting"].includes(r.status)) buttons.push("task_append_requirement");
     const high = r.missing_permissions?.high_risk_tools || [];
     const steps = r.steps || [];
+    const completed = r.execution_progress?.completed || [];
+    const rejected = r.rejected_operations || [];
+    const rejectedHtml = rejected.length ? '<p class="ds-muted">此前拒绝的提议（当时未执行）：'+
+        rejected.map(step=>esc(step.summary || step.display_name || step.tool_name)).join("、")+'。</p>' : "";
+    const completedHtml = completed.length ? '<div class="ds-task-completed"><strong>已经完成</strong><ul>'+
+        completed.map(step=>'<li>'+esc(step.display_name || step.tool_name)+
+            (step.status==="unchanged"?' · 内容相同，无需修改':' · 已完成')+'</li>').join("")+'</ul></div>' : "";
     const confirming = buttons.includes("confirm");
     const detail = confirming ? (r.workspace?'<details><summary>执行位置</summary><p class="ds-technical">'+esc(r.workspace)+'</p></details>':"")+
+        '<p class="ds-muted">以下操作尚未执行，确认后才会继续。</p>'+
+        (steps.some(step=>step.tool_name==="role_update")?'<p class="ds-error">本次将替换角色卡正文，请核对内容；相处习惯不属于角色卡。</p>':"")+
         '<ol>'+steps.map(step => '<li><strong>'+esc(step.display_name || step.tool_name)+'</strong>'+
         structured(step.arguments)+'</li>').join("")+'</ol>' : "";
     const grantHtml = confirming ? high.map(key => '<label><input type="checkbox" data-grant="'+attr(key)+'" data-task="'+attr(id)+'" '+
         (grants.includes(key)?"checked":"")+(pending?" disabled":"")+'> 允许 '+esc(steps.find(step=>step.tool_name===key)?.display_name || key)+'</label>').join("") : "";
     const operationButtons = buttons.map(action => '<button type="button" class="ds-btn '+(action==="confirm"?"ds-primary":"")+
         '" data-task="'+attr(id)+'" data-task-action="'+action+'" '+(pending || action==="confirm"&&high.some(key=>!grants.includes(key))?"disabled":"")+
-        '>'+actions[action]+'</button>').join("");
-    return '<div class="ds-task" data-task-card="'+attr(id)+'"><div class="ds-row ds-between"><h3>'+esc(r.title || "任务")+'</h3>'+tag(statusText(r.status),confirming?"warn":"accent")+
-        '</div>'+ (r.blocked_reason?'<p class="ds-error">'+esc(r.blocked_reason)+'</p>':"")+detail+grantHtml+
+        '>'+(action==="cancel"&&completed.length?"取消后续步骤":actions[action])+'</button>').join("");
+    const statusLabel = r.continuing_after_rejection && r.confirmation_state==="accepted" ? "正在重新判断" : statusText(r.status);
+    return '<div class="ds-task" data-task-card="'+attr(id)+'"><div class="ds-row ds-between"><h3>'+esc(r.title || "任务")+'</h3>'+tag(statusLabel,confirming?"warn":"accent")+
+        '</div>'+completedHtml+rejectedHtml+
+        (r.continuing_after_rejection && r.confirmation_state==="accepted"?'<p class="ds-muted">已拒绝本轮操作，正在重新判断下一步。</p>':"")+
+        (r.blocked_reason?'<p class="ds-error">'+esc(r.blocked_reason)+'</p>':"")+detail+grantHtml+
+        (buttons.includes("reject_tools")?'<p class="ds-muted">拒绝仅跳过本轮待授权操作，当前请求将继续处理；已完成操作保留。</p>':"")+
+        (buttons.includes("cancel") || r.status==="Cancelled" || r.task?.cancel_requested ?
+            '<p class="ds-muted ds-task-cancellation">'+esc(r.cancellation_notice || "取消只停止后续步骤，不会撤销已经完成的操作。")+'</p>':"")+
         (operationButtons || state.mode!=="pet"&&steps.length ? buttonRow(operationButtons+(state.mode==="pet"||!steps.length?"":'<button type="button" class="ds-btn" data-record="'+attr(id)+'">执行记录</button>')):"")+'</div>';
 }
 
@@ -364,7 +379,7 @@ const toggle = (key,label,checked) => '<input type="checkbox" class="ds-switch" 
 const control = (key,value,label,type="text") => '<input class="ds-input" data-preference="'+key+'" type="'+type+'" value="'+attr(value)+'" aria-label="'+esc(label)+'">';
 const select = (key,value,choices,label) => '<select data-preference="'+key+'" aria-label="'+esc(label)+'">'+choices.map(([id,title])=>option(id,title,id===value)).join("")+'</select>';
 function imageRow(key,title,description) {
-    const preview = key==="pet"?'<span class="ds-asset-pet">'+image("pet","cat")+'</span>':avatar(key,true);
+    const preview = key.startsWith("pet")?'<span class="ds-asset-pet">'+image(key,"cat")+'</span>':avatar(key,true);
     return '<div class="ds-setting-row ds-asset-row"><div class="ds-row ds-grow">'+preview+
         '<div class="ds-setting-label">'+esc(title)+'<small>'+esc(description)+'</small></div></div>'+
         '<div class="ds-asset-actions"><button type="button" class="ds-btn" data-image="'+key+'">选择图片</button>'+
@@ -426,15 +441,25 @@ function settingsContent() {
             row("API 密钥","保存在本机凭据存储",esc(model.credential_source==="system_vault"?"系统凭据库":model.credential_source==="environment"?"环境变量":"查看连接配置")))+
             '<details><summary>高级连接选项</summary>'+pair("协议",model.protocol || "")+pair("连接状态",model.llm_ready?"已就绪":"待配置")+'</details>'+
             buttonRow(btn("编辑连接与密钥","maintenance",true,"arrow-up-right"));
-    case "appearance":
+    case "appearance": {
+        const petSlots=[["pet","普通"],["pet_thinking","思考"],["pet_focused","专注"],["pet_pleased","愉悦"],["pet_alert","提示"]];
+        const petKey=state.petSlot || "pet";
         return '<h2>桌宠与外观</h2>'+group(row("显示桌宠","在桌面显示当前桌宠形象",toggle("pet_visible","显示桌宠",p.pet_visible))+
-            imageRow("pet","桌宠形象","用于桌面桌宠，与聊天头像独立")+
+            row("表情槽位","每次为当前槽位选择一张图片，预览后点击保存应用",'<select id="ds-pet-slot" aria-label="桌宠表情槽位">'+petSlots.map(([id,title])=>option(id,title,id===petKey)).join("")+'</select>')+
+            imageRow(petKey,"桌宠形象 · "+petSlots.find(([id])=>id===petKey)[1],"只修改当前角色的这个槽位，与聊天头像独立")+
             row("桌宠大小","调整桌宠的显示比例",'<div class="ds-row"><input type="range" min="60" max="160" value="'+
                 Math.round((p.pet_scale || 1)*100)+'" aria-label="桌宠大小" data-preference="pet_scale"><span id="ds-size-label">'+Math.round((p.pet_scale || 1)*100)+'%</span></div>')+
             row("桌宠对话小窗","单击桌宠即可开始聊天",btn("预览小窗","pet",false,"panel-right")))+
             group(row("界面主题","默认使用清透浅色",select("theme",p.theme,[["light","清透浅色"],["auto","跟随系统"],["dark","深色"]],"界面主题"))+
             row("内容间距","调整阅读的疏密程度",select("density",p.density,[["comfortable","舒适"],["compact","紧凑"]],"内容间距"))+
-            row("桌宠置顶","保持在其他窗口上方",toggle("pet_on_top","桌宠置顶",p.pet_on_top)));
+            row("桌宠置顶","保持在其他窗口上方",toggle("pet_on_top","桌宠置顶",p.pet_on_top)))+
+            '<div class="ds-observation ds-pet-guide"><h3>图片建议与要求</h3>'+
+            '<p>建议使用透明背景 PNG、1:1 正方形画布，尺寸 512 × 512 或 1024 × 1024 像素。角色完整居中，四周留白；各张保持相同画布尺寸、角色大小、位置与脚底基线，只改变表情，切换时更稳定。图片按比例完整显示，非正方形也可使用。</p>'+
+            '<p><strong>普通</strong>：日常默认；<strong>思考</strong>：正在思考；<strong>专注</strong>：专注处理；<strong>愉悦</strong>：轻松开心；<strong>提示</strong>：需要留意。</p>'+
+            '<p>可以先只设置“普通”，其余四张按需分别选择。未配置的表情会使用自定义普通形象；没有可用自定义图片时使用内置小机器人。每个槽位单独保存或恢复默认，不会一次上传五张。</p>'+
+            '<p>支持静态 PNG / JPEG，不支持 GIF、动画或精灵图切帧；每张不超过 5 MiB、宽高均不超过 2048 像素，不能全透明。五个自定义槽位合计不超过 800 万像素、20 MiB；建议一套五张均使用 1024 × 1024 或更小尺寸。JPEG 不支持透明背景，通常会显示背景色。</p>'+
+            '<p>图片只在本机导入并托管，不会通过本操作发送给模型。桌宠形象和表情按角色档案独立保存，切换角色不会共用你的自定义图片；新角色默认使用内置小机器人。</p></div>';
+    }
     case "notifications": {
         const asTime = n => String(Math.floor((n||0)/60)).padStart(2,"0")+":"+String((n||0)%60).padStart(2,"0");
         return '<h2>通知</h2>'+group(row("桌面通知","提醒到达时显示桌面通知",toggle("notifications_enabled","桌面通知",p.notifications_enabled))+
@@ -761,6 +786,12 @@ root.addEventListener("input",event=>{
 });
 root.addEventListener("change",event=>{
     const el=event.target;
+    if(el.id==="ds-pet-slot") {
+        state.petSlot=el.value;
+        send("pet-slot",{key:el.value});
+        render();
+        return;
+    }
     const mobileForm=el.closest('form[data-form="mobile-config"]');
     if(mobileForm) {
         state.mobileDraft=Object.fromEntries(new FormData(mobileForm));

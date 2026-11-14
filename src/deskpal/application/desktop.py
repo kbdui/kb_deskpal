@@ -245,15 +245,19 @@ class DesktopFacade:
             return self._receipt(app.enqueue_confirmation(**args, authorized_tools=ordinary,
                 high_risk_authorized_tools=high))
         if operation == "resume":
-            args.pop("command_id", None)
-            return app.resume(**args)
+            self._command(args)
+            app.resume(**args)
+            return self._receipt(app.tasks.get(args["task_id"]))
         if operation == "cancel":
-            args.pop("command_id", None)
-            return app.cancel_task(**args)
+            self._command(args)
+            return self._receipt(app.cancel_task(**args))
+        if operation == "reject_tools":
+            self._command(args)
+            return self._receipt(app.reject_tools(**args))
         if operation == "review_uncertain":
-            args.pop("command_id", None)
+            self._command(args)
             with app._dispatcher.management():
-                return app.review_uncertain(**args)
+                return self._receipt(app.review_uncertain(**args))
         if operation == "memories":
             offset, limit = self._page(args)
             if "status" in args and args["status"] is not None:

@@ -25,9 +25,10 @@ FIELDS = {
     "task_append_requirement": {"task_id", "content", "command_id"},
     "task_answer": {"task_id", "content", "command_id"},
     "cancel": {"task_id", "command_id"},
+    "reject_tools": {"task_id", "command_id", "plan_hash", "expected_revision"},
 }
 WRITES = frozenset({"conversation_create", "submit", "confirm", "task_pause", "task_continue",
-                    "task_append_requirement", "task_answer", "cancel"})
+                    "task_append_requirement", "task_answer", "cancel", "reject_tools"})
 
 
 class ClientGateway:

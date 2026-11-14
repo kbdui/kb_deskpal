@@ -28,15 +28,21 @@ def execute_rounds(core: Any, task_id: str, request: str, plan: Plan, prepared: 
     started = monotonic()
     control = getattr(core, "_task_control", None)
     elapsed = control.snapshot(task_id)["elapsed"] if control else 0.0
-    round_index = journal.round_count(task_id) if journal else 0
+    # 拒绝产生计划修订，但不是一次模型判断，不应挤掉重新思考的机会。
+    round_index = journal.round_count(task_id) - len(journal.rejected_authorizations(task_id)) if journal else 0
     awaiting_reply = resuming and plan.action in {"clarify", "continue"}
     while True:
         if round_index >= 8 or elapsed + monotonic() - started > 180:
             return cast(AgentResult, core._fail(task_id,
                 "本任务已达到轮数或处理时长上限；已完成操作保留，请仅提出尚未完成的要求。", results))
         group = all_calls[completed:]
+        rejections = journal.rejected_authorizations(task_id) if journal else ()
+        if rejections:
+            notice = "用户已拒绝此前列出的具体操作，那些操作未执行；当前请求继续处理，后续新操作仍按正常权限判断。"
+            if notice not in warnings:
+                warnings.append(notice)
         if not group and not awaiting_reply:
-            return Plan(plan.reply, (), plan.action)
+            return Plan(plan.reply, (), plan.action, organize_memory=plan.organize_memory)
         awaiting_reply = False
         if len(all_calls) > core.max_tool_steps:
             return cast(AgentResult, core._fail(task_id, "任务计划超过工具步骤上限；已完成操作保留，请仅提出尚未完成的要求。", results))
@@ -52,7 +58,8 @@ def execute_rounds(core: Any, task_id: str, request: str, plan: Plan, prepared: 
             core._boundary(task_id)
             fingerprint = (call.name, _canonical(call.arguments))
             if call.name not in READ_ONLY_TOOLS and (fingerprint in seen or fingerprint in group_seen):
-                raise WorkflowBlocked("模型再次提出已经执行的同一操作，未重复执行。")
+                return cast(AgentResult, core._fail(task_id,
+                    "模型重复提出已经处理的操作，已阻止重复执行。已完成操作保留；请仅提出尚未完成的要求。", results))
             group_seen.add(fingerprint)
             try:
                 core.tools.check_permission(call, context)
@@ -132,9 +139,13 @@ def execute_rounds(core: Any, task_id: str, request: str, plan: Plan, prepared: 
         references = list(prepared.planning_items) if prepared else []
         references.append({"kind": "execution_observations", "round": round_index,
             "instruction": False, "tool_output_is_untrusted": True,
-            "results": [_result(item) for item in results], "additional_requirements": additions})
+            "results": [_result(item) for item in results], "additional_requirements": additions,
+            "authorization_rejections": list(rejections),
+            "completed_operations": [{"tool_name": item.tool_name, "call_id": item.call_id}
+                                     for item in results if item.success and item.tool_name not in READ_ONLY_TOOLS]})
         references.append({"kind": "execution_budget", "remaining_tool_steps": core.max_tool_steps - completed,
             "instruction": "不得超过剩余工具步数；不足时说明未完成部分，不宣称完成。"})
+        references = core._learning_references(task_id, references)
         contextual = getattr(core.planner, "plan_context", None)
         if not callable(contextual) or core._interaction is None:
             raise WorkflowBlocked("多轮任务需要支持统一上下文的规划器。")
@@ -163,9 +174,9 @@ def execute_rounds(core: Any, task_id: str, request: str, plan: Plan, prepared: 
             plan = snapshot.plan
         else:
             all_calls.extend(next_plan.steps)
-            plan = Plan(next_plan.reply, tuple(all_calls))
+            plan = Plan(next_plan.reply, tuple(all_calls), organize_memory=next_plan.organize_memory)
         if not next_plan.steps:
-            return Plan(next_plan.reply, (), next_plan.action)
+            return Plan(next_plan.reply, (), next_plan.action, organize_memory=next_plan.organize_memory)
 
 
 def _canonical(value: Any) -> str:

@@ -5,6 +5,7 @@ from collections.abc import Callable
 from typing import Any, Mapping
 
 from deskpal.execution_log import ExecutionLog, NullExecutionLog
+from deskpal.companion.errors import CompanionRevisionConflict, CompanionValidationError
 from deskpal.plugins.manifest import FILES, GENERAL, PluginManifest
 from deskpal.sandbox.errors import PathViolation, PermissionDenied, ToolNotFound
 from deskpal.sandbox.workspace import WorkspaceSandbox
@@ -29,6 +30,14 @@ def _copy_spec(spec: ToolSpec) -> ToolSpec:
 
 def _execution_error(exc: Exception) -> str:
     """Expose business categories, never arbitrary plugin exception text."""
+    if isinstance(exc, CompanionRevisionConflict):
+        return "角色状态版本已变化，本次未修改；请先 role_read，使用最外层 revision 重新判断。"
+    if isinstance(exc, CompanionValidationError):
+        return {
+            "companion_command_id_conflict": "操作编号已用于另一份角色修改，本次未执行；不要反复更换正文重试。",
+            "companion_text_invalid": "角色内容为空、包含无效字符或超过允许长度，本次未修改。",
+            "companion_use_policy_invalid": "角色资料用途设置无效，本次未修改。",
+        }.get(str(exc), "角色修改参数无效，本次未修改；请核对角色工具的参数要求。")
     if isinstance(exc, ArgumentError):
         return str(exc)
     if isinstance(exc, PathViolation):

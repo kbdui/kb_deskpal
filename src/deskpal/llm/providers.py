@@ -137,8 +137,14 @@ class OfflineLLMProvider:
 
     def chat(self, messages: Sequence[ChatMessage], *, tools: Sequence[ToolSpec] = ()) -> LLMResponse:
         _validate_inputs(messages, tools)
+        planning = any(m.role == 'system' and m.content.startswith('[PLANNING]') for m in messages)
+        def respond(content: str, calls: tuple[ToolCall, ...] = ()) -> LLMResponse:
+            # 离线演示无语义学习能力；只在规划协议中明确给出暂缓决定。
+            if planning and not calls:
+                content = _json_dump(dict(action='answer', reply=content, organize_memory=False))
+            return self._response(content, calls)
         if any(message.role == 'system' and message.content.startswith('[MEMORY_FEEDBACK]') for message in messages):
-            return self._response(_json_dump(dict(memories=[], reviews=[], habits=[], emotion=None, summary=None)))
+            return respond(_json_dump(dict(memories=[], reviews=[], habits=[], emotion=None, summary=None)))
         # ResponseComposer sends an internal data envelope as the user message.
         # Only its host-owned system marker selects this path; ordinary user JSON
         # continues through the command demo unchanged.
@@ -171,28 +177,28 @@ class OfflineLLMProvider:
             except LLMError:
                 reply = "[离线演示] 表达内容暂不可用，请查看当前请求及任务状态。"
             if "[OUTPUT PROTOCOL]" in expression:
-                return self._response(_json_dump({"reply_text": reply}))
-            return self._response(reply or "[离线演示] 执行状态已更新，请查看任务卡中的结果。")
+                return respond(_json_dump({"reply_text": reply}))
+            return respond(reply or "[离线演示] 执行状态已更新，请查看任务卡中的结果。")
         for message in messages:
             if message.role == "user" and message.content.startswith("[UNTRUSTED HISTORICAL REFERENCES]\n"):
                 references = _json_load(message.content.split("\n", 1)[1])
                 observation = next((item for item in reversed(references) if item.get("kind") == "execution_observations"), None)
                 if observation is not None:
                     from deskpal.response.templates import tool_response_fallback
-                    return self._response("[离线演示] " + tool_response_fallback(observation["results"], expression_failed=False))
+                    return respond("[离线演示] " + tool_response_fallback(observation["results"], expression_failed=False))
         latest_user = max((index for index, message in enumerate(messages) if message.role == "user"), default=-1)
         reflect = any(message.role == "system" and "[REFLECT]" in message.content for message in messages)
         if reflect:
             outputs = [message.content for message in messages if message.role == "tool"]
             if not outputs and latest_user >= 0:
                 outputs = [messages[latest_user].content]
-            return self._response("[离线演示] 执行反馈：\n" + "\n".join(outputs))
+            return respond("[离线演示] 执行反馈：\n" + "\n".join(outputs))
         # Only tool feedback after the latest user turn triggers reflection;
         # earlier completed tools must not hide a new user request.
         outputs = [message.content for index, message in enumerate(messages)
                    if index > latest_user and message.role == "tool"]
         if not tools and outputs:
-            return self._response("[离线演示] 工具结果：\n" + "\n".join(outputs))
+            return respond("[离线演示] 工具结果：\n" + "\n".join(outputs))
         prompt = next((message.content.strip() for message in reversed(messages) if message.role == "user"), "")
         if not prompt:
             raise LLMError("Offline chat requires a nonempty user message")
@@ -212,7 +218,7 @@ class OfflineLLMProvider:
                     raise LLMError("Tool arguments must be an object")
                 name, arguments = parts[1], parsed
             except LLMError:
-                return self._response('[离线演示] 命令格式：tool 工具名 {"参数名":"值"}，参数须为有限JSON对象。')
+                return respond('[离线演示] 命令格式：tool 工具名 {"参数名":"值"}，参数须为有限JSON对象。')
         elif prompt.startswith(("read ", "write ")):
             match = re.fullmatch(r'(read|write)\s+(?:"([^"\n]+)"|(\S+))(?:\s+([\s\S]+))?', prompt)
             if match and match[1] == "read" and match[4] is None:
@@ -220,17 +226,17 @@ class OfflineLLMProvider:
             elif match and match[1] == "write" and match[4] is not None:
                 name, arguments = "write_text", {"path": match[2] or match[3], "text": match[4]}
             else:
-                return self._response('[离线演示] 命令格式：read 路径 或 write 路径 文本；含空格的路径请加双引号。')
+                return respond('[离线演示] 命令格式：read 路径 或 write 路径 文本；含空格的路径请加双引号。')
         if name:
             if name not in {spec.name for spec in tools}:
-                return self._response(f"[离线演示] 当前未提供 {name} 工具，未执行命令。")
+                return respond(f"[离线演示] 当前未提供 {name} 工具，未执行命令。")
             existing_ids = {call.call_id for message in messages for call in message.tool_calls}
             index = 1
             while f"offline_call_{index}" in existing_ids:
                 index += 1
             call = ToolCall(name=name, arguments=arguments, call_id=f"offline_call_{index}")
-            return self._response(f"[离线演示] 已生成 {name} 工具计划。", (call,))
-        return self._response("[离线演示] 这是固定规则演示，不具备真实自然语言理解。输入 echo 文本、time、read 路径、write 路径 文本可演示工具；你说：" + prompt)
+            return respond(f"[离线演示] 已生成 {name} 工具计划。", (call,))
+        return respond("[离线演示] 这是固定规则演示，不具备真实自然语言理解。输入 echo 文本、time、read 路径、write 路径 文本可演示工具；你说：" + prompt)
 
     def _response(self, content: str, calls: tuple[ToolCall, ...] = ()) -> LLMResponse:
         return LLMResponse(content, calls, "offline", self.model)

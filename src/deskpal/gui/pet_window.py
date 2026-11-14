@@ -1,6 +1,6 @@
-"""GUI-thread pet canvas with logical geometry and a stable main-image mask."""
+"""GUI-thread pet canvas; fitted frames and a non-clipping stable visible region."""
 
-from PySide6.QtCore import QEvent, QPoint, QRect, QTimer, Qt, Signal
+from PySide6.QtCore import QEvent, QPoint, QRect, QRectF, QTimer, Qt, Signal
 from PySide6.QtGui import (QCloseEvent, QContextMenuEvent, QMouseEvent, QMoveEvent,
                           QPainter, QPaintEvent, QPixmap, QRegion, QScreen, QShowEvent, QWheelEvent)
 from PySide6.QtWidgets import QApplication, QWidget
@@ -39,6 +39,8 @@ class PetWindow(QWidget):
         self._dpr = self.devicePixelRatioF()
         self._screen_connected = False
         self._neutral: QPixmap | None = None
+        self._mask_base_key: tuple[int, int] | None = None
+        self._frame_mask_key: tuple[int, int] | None = None
         self._pixmap: QPixmap | None = None
         self._status = "状态未知"
         self._diagnostic = ""
@@ -68,6 +70,7 @@ class PetWindow(QWidget):
         # Keep the native window bounded to the visible pet canvas.
         self.setFixedSize(self._canvas, self._canvas)
         self.set_stable_mask(self._neutral)
+        self._include_frame(self._pixmap)
         self.fit_to_screens()
         self.display_metrics_changed.emit()
         self.update()
@@ -124,19 +127,44 @@ class PetWindow(QWidget):
 
     def set_stable_mask(self, neutral: QPixmap | None) -> None:
         self._neutral = neutral
+        key = (neutral.cacheKey() if neutral is not None else 0, self._canvas)
+        if key == self._mask_base_key:
+            return
+        self._mask_base_key = key
+        self._frame_mask_key = None
         if neutral is None or neutral.isNull():
             region = QRegion(self._fallback_rect(), QRegion.RegionType.Ellipse)
         else:
-            logical = neutral.scaled(self._canvas, self._canvas, Qt.AspectRatioMode.KeepAspectRatio,
-                                     Qt.TransformationMode.SmoothTransformation)
-            logical.setDevicePixelRatio(1)
-            region = QRegion(logical.mask())
-            region.translate((self._canvas - logical.width()) // 2,
-                             (self._canvas - logical.height()) // 2)
+            region = self._visible_region(neutral)
         self._mask_region = region
         self.setMask(self._mask_region)
 
+    def _visible_region(self, pixmap: QPixmap) -> QRegion:
+        logical = pixmap.scaled(self._canvas, self._canvas, Qt.AspectRatioMode.KeepAspectRatio,
+                                Qt.TransformationMode.SmoothTransformation)
+        logical.setDevicePixelRatio(1)
+        mask = logical.mask()
+        # JPEG 等不带透明通道的图片没有位图遮罩，但整张图仍须可见。
+        region = QRegion(logical.rect()) if mask.isNull() else QRegion(mask)
+        region.translate(round((self._canvas - logical.width()) / 2),
+                         round((self._canvas - logical.height()) / 2))
+        return region
+
+    def _include_frame(self, pixmap: QPixmap | None) -> None:
+        if pixmap is None or pixmap.isNull():
+            return
+        key = (pixmap.cacheKey(), self._canvas)
+        if key == self._frame_mask_key:
+            return
+        self._frame_mask_key = key
+        # 保留主轮廓和本组已显示轮廓，避免表情外缘被主图切掉或命中区反复缩小。
+        region = self._mask_region.united(self._visible_region(pixmap))
+        if region != self._mask_region:
+            self._mask_region = region
+            self.setMask(region)
+
     def present(self, pixmap: QPixmap | None, status: str, diagnostic: str = "") -> None:
+        self._include_frame(pixmap)
         if pixmap is self._pixmap and status == self._status and diagnostic == self._diagnostic:
             return
         self._pixmap, self._status, self._diagnostic = pixmap, status, diagnostic
@@ -148,10 +176,12 @@ class PetWindow(QWidget):
         painter = QPainter(self)
         try:
             painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-            if self._pixmap is not None:
-                size = self._pixmap.deviceIndependentSize()
-                painter.drawPixmap(QPoint(round((self._canvas - size.width()) / 2),
-                                          round((self._canvas - size.height()) / 2)), self._pixmap)
+            painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+            if self._pixmap is not None and not self._pixmap.isNull():
+                size = self._pixmap.size().scaled(self._canvas, self._canvas, Qt.AspectRatioMode.KeepAspectRatio)
+                target = QRectF(round((self._canvas - size.width()) / 2),
+                                round((self._canvas - size.height()) / 2), size.width(), size.height())
+                painter.drawPixmap(target, self._pixmap, QRectF(self._pixmap.rect()))
             else:
                 painter.setPen(Qt.GlobalColor.darkCyan)
                 painter.setBrush(Qt.GlobalColor.lightGray)

@@ -264,6 +264,8 @@ class ProactiveCoordinator:
                 enabled = db.execute("SELECT enabled FROM proactive_method WHERE name='fallback'").fetchone()[0]
             batch = self._meta('review_batch:' + identity)
             attention = json.loads(batch).get('attention_id') if batch else None
+            if identity.startswith('proactive-review:') and batch and not json.loads(batch).get('refs'):
+                return  # 旧“满八份”批次已撤销，不能在队列恢复时偷偷执行。
             if attention:
                 with self.store.read_connection() as db:
                     row = db.execute('SELECT * FROM attention WHERE id=?', (attention,)).fetchone()
@@ -280,6 +282,16 @@ class ProactiveCoordinator:
         pending = self._meta('pending_review')
         if pending:
             job = self.app.learning.store.job('review:' + pending)
+            frozen = self._meta('review_batch:' + pending)
+            if (frozen and not json.loads(frozen).get('refs')
+                    and (not job or job['status'] not in {'completed', 'failed', 'cancelled'})):
+                if job:
+                    self.app.learning.store.finish(job['id'], 'cancelled', 'obsolete_material_threshold')
+                with self.store.transaction() as db:
+                    db.execute('DELETE FROM proactive_meta WHERE key=?', ('review_batch:' + pending,))
+                    self._meta('pending_review', '')
+                    self._meta('last_review', now.isoformat())
+                return
             if job and job['status'] in {'completed', 'failed', 'cancelled'}:
                 self._meta('pending_review', '')
                 self._meta('last_review', now.isoformat())
@@ -289,17 +301,19 @@ class ProactiveCoordinator:
                 return
         refs = self.app.learning.review_candidates(now)
         if refs:
+            materials = self.app.learning.materials.select()
             identity = 'proactive-review:' + uuid4().hex
-            self.freeze_review(identity, refs)
+            self.freeze_review(identity, refs, materials=materials)
             self._meta('pending_review', identity)
             self._enqueue_review(identity)
         self._meta('last_review', now.isoformat())
 
-    def freeze_review(self, identity: str, refs: list[dict[str, Any]], *, attention: dict[str, Any] | None = None) -> None:
+    def freeze_review(self, identity: str, refs: list[dict[str, Any]], *, attention: dict[str, Any] | None = None,
+                      materials: list[dict[str, Any]] | None = None) -> None:
         """触发和执行读取同一份有界标识、修订及目标，不在执行时重新选批。"""
         value = dict(refs=refs,
             attention_id=attention['id'] if attention else None,
-            sources=json.loads(attention['refs']) if attention else [])
+            sources=json.loads(attention['refs']) if attention else [], materials=materials or [])
         with self.store.transaction() as db:
             db.execute('INSERT OR IGNORE INTO proactive_meta VALUES(?,?)', ('review_batch:' + identity, canonical(value)))
 

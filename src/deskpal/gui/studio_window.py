@@ -2,6 +2,7 @@
 
 import base64
 from collections.abc import Callable
+from importlib import resources
 import json
 from typing import Any
 
@@ -20,7 +21,11 @@ from .tool_results import operation_records
 
 PAGES = ("chat", "plans", "memory", "plugins", "settings")
 SETTINGS = ("role", "appearance", "notifications", "data", "model", "mobile")
-SLOTS = {"role": "character_avatar", "user": "user_avatar", "pet": "pet_main"}
+SLOTS = {"role": "character_avatar", "user": "user_avatar", "pet": "pet_main",
+         "pet_thinking": "pet_thinking", "pet_focused": "pet_focused",
+         "pet_pleased": "pet_pleased", "pet_alert": "pet_alert"}
+PET_EXPRESSIONS = {"pet": "neutral", "pet_thinking": "thinking", "pet_focused": "focused",
+                   "pet_pleased": "pleased", "pet_alert": "alert"}
 PREFERENCES = (
     "theme", "pet_visible", "pet_enabled", "pet_scale", "pet_on_top", "close_to_tray",
     "notifications_enabled", "user_display_name", "character_display_name",
@@ -455,7 +460,7 @@ class StudioChatSurface(StudioSurface):
             return
         if operation == "confirm":
             c.confirm(identity)
-        elif operation in {"cancel", "task_pause", "task_continue", "resume"}:
+        elif operation in {"cancel", "reject_tools", "task_pause", "task_continue", "resume"}:
             c.task_action(identity, operation)
 class StudioWindow(StudioChatSurface):
     close_requested = Signal()
@@ -485,6 +490,7 @@ class StudioWindow(StudioChatSurface):
         self._asset_pending: dict = {}
         self._appearance_read = False
         self._pet_preview_id: str | None = None
+        self._pet_preview_key = "pet"
         self._quiet_pending = False
         self._quiet_target: dict[str, Any] | None = None
         self._quiet_last = (22 * 60, 8 * 60)
@@ -648,6 +654,10 @@ class StudioWindow(StudioChatSurface):
             self._linked_action(action, args)
         elif action == "asset-pick":
             self._asset_pick(args.get("key"))
+        elif action == "pet-slot" and args.get("key") in PET_EXPRESSIONS:
+            self._asset_discard()
+            self._pet_preview_key = args["key"]
+            self._appearance_changed()
         elif action == "asset-reset":
             self._asset_reset(args.get("key"))
         elif action == "asset-save":
@@ -865,12 +875,20 @@ class StudioWindow(StudioChatSurface):
     def _appearance_changed(self) -> None:
         profiles = self.chat_coordinator.appearance.profiles
         self._data_result("appearance", {key: profiles.get(slot, {}) for key, slot in SLOTS.items()})
-        asset = profiles.get("pet_main", {}).get("effective_asset_id")
+        key = self._pet_preview_key
+        asset = profiles.get(SLOTS[key], {}).get("effective_asset_id")
         if asset:
             self._pet_preview_id = self._image_request({"asset_id": asset}, self._asset_generation)
         else:
             self._pet_preview_id = None
-            self.port.publish("image", {"key": "pet", "url": ""})
+            pixmap = QPixmap()
+            try:
+                raw = resources.files("deskpal.gui").joinpath("assets", "pet", PET_EXPRESSIONS[key] + ".png").read_bytes()
+                pixmap.loadFromData(raw, "PNG")
+            except OSError:
+                pass
+            self.port.publish("image", {"key": key, "url": pixmap_url(pixmap.scaled(
+                320, 320, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)) if not pixmap.isNull() else ""})
 
     def _image_request(self, params: dict, generation: int) -> str | None:
         try:
@@ -897,7 +915,7 @@ class StudioWindow(StudioChatSurface):
                 self.operations.send("asset_import_discard", {"token": token})
                 return
             self._asset_pending = {"token": token, "slot": slot, "generation": generation,
-                                   "display_mode": "contain" if key == "pet" else "circle",
+                                   "display_mode": "contain" if slot.startswith("pet_") else "circle",
                                    "crop": [0, 0, 1, 1]}
             self._asset_image = self._image_request({"token": token}, generation)
 
@@ -916,7 +934,7 @@ class StudioWindow(StudioChatSurface):
                 self._asset_discard()
             return
         if identity == self._pet_preview_id:
-            self.port.publish("image", {"key": "pet", "url": png_url(data)})
+            self.port.publish("image", {"key": self._pet_preview_key, "url": png_url(data)})
         elif envelope.get("generation") == self._asset_generation:
             self.port.publish("asset-preview", {"url": png_url(data)})
 

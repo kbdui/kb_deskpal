@@ -226,6 +226,11 @@ class TaskCard(QFrame):
         task = review.get("task", {})
         status = str(review.get("status", task.get("status", "")))
         steps = review.get("steps", [])
+        completed = review.get("execution_progress", {}).get("completed", [])
+        if completed:
+            self.layout_box.addWidget(text_label("已经完成：" + "、".join(str(item.get("display_name") or item.get("tool_name")) for item in completed)))
+        if completed or "cancel" in review.get("available_actions", []) or status == "Cancelled":
+            self.layout_box.addWidget(text_label(str(review.get("cancellation_notice") or "取消只停止后续步骤，不会撤销已经完成的操作。")))
         if self._suppressed and has_tool_details(review):
             self._suppressed = False
             self.show()
@@ -239,7 +244,8 @@ class TaskCard(QFrame):
                 self._suppressed = True; self.hide()
             return
         if status not in {"Waiting", "NeedsReview"} or review.get("confirmation_state") == "accepted":
-            self.layout_box.addWidget(text_label("确认已受理，正在排队执行。" if review.get("confirmation_state") == "accepted" and status in {"Waiting", "NeedsReview"}
+            self.layout_box.addWidget(text_label("已拒绝本轮操作，正在重新判断下一步。" if review.get("continuing_after_rejection") and review.get("confirmation_state") == "accepted" else
+                                                "确认已受理，正在排队执行。" if review.get("confirmation_state") == "accepted" and status in {"Waiting", "NeedsReview"}
                                                 else _STATUS_TEXT.get(status, "正在处理这项请求…")))
             if status == "AwaitingInput" and isinstance(task.get("result"), dict):
                 self.layout_box.addWidget(text_label(str(task["result"].get("response", ""))))
@@ -309,7 +315,7 @@ class TaskCard(QFrame):
             records_button = QPushButton('执行记录'); records_button.clicked.connect(self._show_results); row.addWidget(records_button)
         if waiting:
             if any(step.get("tool_name") == "memory_forget" for step in steps):
-                self.layout_box.addWidget(text_label("遗忘会清理这条记忆关联的聊天记录和任务正文，也可能中止当前请求。仅标记事情已完成时，请取消并要求更正记忆。"))
+                self.layout_box.addWidget(text_label("遗忘仅清理指定的提炼记忆，保留聊天记录、角色卡、执行记录和安排。事项完成应更正状态，不应遗忘。"))
             permissions = review.get("missing_permissions", {})
             ordinary = list(permissions.get("ordinary_tools", []))
             high = list(permissions.get("high_risk_tools", []))
@@ -331,7 +337,9 @@ class TaskCard(QFrame):
                 self.layout_box.addWidget(text_label("请分别审核并勾选这些高风险操作：" + "、".join(tool_names.get(tool, label(tool)) for tool in sorted(missing))))
             confirm.clicked.connect(lambda: self.coordinator.confirm(self.task_id))
             row.addWidget(confirm)
-        for action, title in (("resume", "重新审核"), ("cancel", "取消这个请求")):
+        if "reject_tools" in actions:
+            self.layout_box.addWidget(text_label("拒绝仅跳过本轮待授权操作，当前请求将继续处理；已完成操作保留。"))
+        for action, title in (("resume", "重新审核"), ("reject_tools", "拒绝该操作并继续"), ("cancel", "取消这个请求")):
             if action in actions:
                 button = QPushButton(title)
                 button.setEnabled(self.task_id not in self.coordinator.task_pending)

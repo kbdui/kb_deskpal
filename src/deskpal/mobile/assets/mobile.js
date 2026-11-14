@@ -3,7 +3,7 @@ const $ = selector => document.querySelector(selector);
 const esc = value => String(value ?? "").replace(/[&<>"']/g, c=>({"&":"&amp;","<":"&lt;",">":"&gt;","'":"&#39;",'"':"&quot;"}[c]));
 const statuses={Created:"排队中",Planning:"正在思考",Running:"正在处理",Waiting:"等待确认",NeedsReview:"需要复核",AwaitingInput:"等待补充",Paused:"已暂停",Completed:"已完成",Failed:"未完成",Cancelled:"已取消",Uncertain:"结果待核实"};
 const active = status=>["Created","Planning","Running","Waiting","AwaitingInput","Paused"].includes(status);
-const actions={confirm:"确认并继续",cancel:"取消请求",task_pause:"暂停",task_continue:"继续",task_answer:"补充信息",task_append_requirement:"追加要求"};
+const actions={confirm:"确认并继续",reject_tools:"拒绝该操作并继续",cancel:"终止整个请求",task_pause:"暂停",task_continue:"继续",task_answer:"补充信息",task_append_requirement:"追加要求"};
 const S={session:null,id:"",directory:[],cursor:null,items:[],epoch:null,privacy:null,timelineRevision:0,older:null,loaded:false,reviews:{},grants:{},busy:false,polling:false,pending:null,target:null,targetChosen:false,generation:0,signature:"",lastSession:0,lastDirectory:0};
 let toastTimer, composing=false;
 const dog='<path d="M7 6C3 6 2 12 4 15l3-1m10-8c4 0 5 6 3 9l-3-1M7 6q5-4 10 0v10q0 5-5 5t-5-5Zm2 6h.1m5.9 0h.1M10 16l2 1 2-1"/>';
@@ -131,10 +131,16 @@ function taskCard(item){
     const buttons=(r.available_actions || []).filter(action=>actions[action]);
     const confirming=buttons.includes("confirm"), high=r.missing_permissions?.high_risk_tools || [];
     const grants=S.grants[item.task_id] || [];
-    return '<article class="task"><h3>'+esc(r.title || "任务")+'</h3><span class="task-status">'+esc(statuses[r.status]||r.status)+'</span>'+
+    const completed=r.execution_progress?.completed || [];
+    const statusLabel=r.continuing_after_rejection&&r.confirmation_state==="accepted"?"正在重新判断":statuses[r.status]||r.status;
+    return '<article class="task"><h3>'+esc(r.title || "任务")+'</h3><span class="task-status">'+esc(statusLabel)+'</span>'+
+        (completed.length?'<p>已经完成：'+completed.map(step=>esc(step.display_name || step.tool_name)+(step.status==="unchanged"?'（无需修改）':'')).join('、')+'</p>':"")+
+        (r.rejected_operations?.length?'<p>此前拒绝的提议（当时未执行）：'+r.rejected_operations.map(step=>esc(step.summary || step.display_name || step.tool_name)).join('、')+'</p>':"")+
         (r.blocked_reason?'<p>'+esc(r.blocked_reason)+'</p>':"")+
-        (confirming?'<ol>'+(r.steps||[]).map(step=>'<li><strong>'+esc(step.display_name || step.tool_name)+'</strong>'+fields(step.arguments)+'</li>').join("")+'</ol>'+high.map(tool=>'<label><input type="checkbox" data-grant="'+esc(tool)+'" data-task="'+esc(item.task_id)+'" '+(grants.includes(tool)?"checked":"")+'>允许 '+esc((r.steps||[]).find(step=>step.tool_name===tool)?.display_name||tool)+'</label>').join(""):"")+
-        '<div class="buttons">'+buttons.map(action=>'<button data-task="'+esc(item.task_id)+'" data-action="'+action+'" '+(S.busy || S.pending || confirming&&action==="confirm"&&high.some(tool=>!grants.includes(tool))?"disabled":"")+'>'+actions[action]+'</button>').join("")+
+        (confirming?'<p>以下操作尚未执行，确认后才会继续。</p><ol>'+(r.steps||[]).map(step=>'<li><strong>'+esc(step.display_name || step.tool_name)+'</strong>'+fields(step.arguments)+'</li>').join("")+'</ol>'+high.map(tool=>'<label><input type="checkbox" data-grant="'+esc(tool)+'" data-task="'+esc(item.task_id)+'" '+(grants.includes(tool)?"checked":"")+'>允许 '+esc((r.steps||[]).find(step=>step.tool_name===tool)?.display_name||tool)+'</label>').join(""):"")+
+        (buttons.includes("cancel")||r.status==="Cancelled"?'<p>'+esc(r.cancellation_notice || "取消只停止后续步骤，不会撤销已经完成的操作。")+'</p>':"")+
+        (buttons.includes("reject_tools")?'<p>拒绝仅跳过本轮待授权操作，当前请求将继续处理；已完成操作保留。</p>':"")+
+        '<div class="buttons">'+buttons.map(action=>'<button data-task="'+esc(item.task_id)+'" data-action="'+action+'" '+(S.busy || S.pending || confirming&&action==="confirm"&&high.some(tool=>!grants.includes(tool))?"disabled":"")+'>'+(action==="cancel"&&completed.length?"取消后续步骤":actions[action])+'</button>').join("")+
         '<button data-detail="'+esc(item.task_id)+'">执行记录</button></div></article>';
 }
 function render(bottom=false){
@@ -247,7 +253,9 @@ $("#messages").addEventListener("click",async event=>{
             for(let page=0;page<16;page++){const data=await rpc("conversation_item",{id:S.id,item_id:full,offset,limit:65536});if(data.redacted_at||revision!==null&&revision!==data.revision)throw new Error("记录已经变化，请重新读取。");revision=data.revision;text+=data.body;offset+=data.body.length;if(!data.has_more)break;}
             if(generation!==S.generation)return;$("#detail-body").textContent=text;$("#detail").showModal();}
         if(action){const r=S.reviews[task];if(!r||(S.pending||S.busy))return;
-            const parameters={task_id:task};if(action==="confirm")Object.assign(parameters,{expected_revision:r.task_revision,plan_hash:r.plan_hash,ordinary_tools:r.missing_permissions.ordinary_tools,high_risk_tools:(S.grants[task]||[])});
+            const parameters={task_id:task};
+            if(action==="confirm"||action==="reject_tools")Object.assign(parameters,{expected_revision:r.task_revision,plan_hash:r.plan_hash});
+            if(action==="confirm")Object.assign(parameters,{ordinary_tools:r.missing_permissions.ordinary_tools,high_risk_tools:(S.grants[task]||[])});
             await perform(action,parameters);}
     }catch(error){errorMessage(error);}
 });

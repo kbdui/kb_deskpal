@@ -60,7 +60,7 @@ class Model:
             result = self.fn(data)
             return result if isinstance(result, LLMResponse) else LLMResponse(json.dumps(result, ensure_ascii=False))
         self.planning.append(messages)
-        return LLMResponse('这是实际生成的回答。')
+        return LLMResponse('{"action":"answer","reply":"这是实际生成的回答。","organize_memory":true}')
 
     def generate(self, prompt):
         raise AssertionError('Unused provider method')
@@ -544,7 +544,7 @@ def test_time_query_leaves_tool_ledger_without_automatic_life_episode(app_model)
     def chat(messages, *, tools=()):
         if messages[0].content.startswith('[PLANNING]'):
             count[0] += 1
-            return LLMResponse('', (ToolCall('time', {}, 'time-call'),)) if count[0] % 2 else LLMResponse('已查看实际时间。')
+            return LLMResponse('', (ToolCall('time', {}, 'time-call'),)) if count[0] % 2 else LLMResponse('{"action":"answer","reply":"已查看实际时间。","organize_memory":true}')
         return original(messages, tools=tools)
     model.chat = chat
     first = turn(app, '现在几点')

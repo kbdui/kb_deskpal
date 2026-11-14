@@ -18,6 +18,8 @@
 #deskpal-studio .ds-asset-pet{display:grid;place-items:center;width:56px;height:56px;border-radius:15px;background:var(--ds-soft);color:var(--ds-accent);flex-shrink:0;--ds-icon-size:30px}
 #deskpal-studio .ds-asset-actions{display:flex;flex-wrap:wrap;align-items:center;justify-content:flex-end;gap:5px 10px}
 #deskpal-studio .ds-asset-row .ds-grow{align-items:center}
+#deskpal-studio .ds-asset-pet img{object-fit:contain}
+#deskpal-studio .ds-pet-guide p{line-height:1.75}
 #deskpal-studio .ds-compose textarea{min-height:96px;max-height:240px;overflow-y:hidden;overscroll-behavior:contain;padding:5px 8px;overflow-anchor:none}
 #deskpal-studio .ds-thread,#deskpal-studio .ds-chat-layout,#deskpal-studio .ds-compose-wrap{overflow-anchor:none}
 #deskpal-studio[data-mode=pet] .ds-compose textarea{min-height:66px;max-height:150px}
@@ -58,6 +60,9 @@ background:rgba(255,255,255,.9);color:#171a21;z-index:3}
 #deskpal-studio .ds-task{padding:14px;border:1px solid var(--ds-line);border-radius:12px;background:var(--ds-bg)}
 #deskpal-studio .ds-task ol{padding-left:24px}
 #deskpal-studio .ds-task label{display:block;margin:8px 0}
+#deskpal-studio .ds-task-completed{margin:12px 0;padding:12px 14px;background:#eff5f1;border:1px solid #dce8df;border-radius:10px;font-size:12px;color:#526b5b}
+#deskpal-studio .ds-task-completed ul{margin:6px 0 0;padding-left:18px;line-height:1.8}
+#deskpal-studio .ds-task-cancellation{margin:12px 0;font-size:12px;line-height:1.7}
 #deskpal-studio .ds-error{color:#9c4145}
 #deskpal-studio .ds-field{display:grid;gap:6px;margin:12px 0}
 #deskpal-studio .ds-field .ds-input{width:100%}

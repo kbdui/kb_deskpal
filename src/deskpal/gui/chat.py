@@ -384,6 +384,10 @@ class ChatCoordinator(QObject):
         if before.get("task_revision") != value.get("task_revision") or before.get("plan_hash") != value.get("plan_hash"):
             self.grants.pop(task_id, None)
         self.reviews[task_id] = value; self.task_changed.emit(task_id); self._drain_reviews()
+        record = self.task_commands.get(task_id)
+        if record and record["action"] == "cancel" and (value.get("status") == "Cancelled" or value.get("task", {}).get("cancel_requested")):
+            # 兼容旧后台已取消却未保存回执的情况，以实际任务状态结束核查。
+            self._task_receipt(task_id, {"accepted": True, "task_id": task_id, "status": value.get("status")})
         if before.get("confirmation_state") == "accepted" and value.get("confirmation_state") != "accepted":
             self.notice.emit(str(value.get("blocked_reason") or {
                 "Completed": "操作已完成。", "Failed": "操作未完成，请查看执行记录。",
@@ -406,7 +410,13 @@ class ChatCoordinator(QObject):
 
     def task_action(self, task_id: str, action: str) -> None:
         if task_id not in self.task_pending:
-            self._task_send(task_id, action, {"task_id": task_id})
+            params: dict[str, Any] = {"task_id": task_id}
+            if action == "reject_tools":
+                review = self.reviews.get(task_id, {})
+                if action not in review.get("available_actions", []):
+                    return
+                params.update(plan_hash=review.get("plan_hash"), expected_revision=review.get("task_revision"))
+            self._task_send(task_id, action, params)
 
     def _task_send(self, task_id: str, action: str, params: dict[str, Any]) -> None:
         previous = self.task_commands.get(task_id)
@@ -419,12 +429,14 @@ class ChatCoordinator(QObject):
         record = previous or {"command_id": str(uuid4()), "action": action, "parameters": params, "at": monotonic()}
         record["retryable"] = False; record["at"] = monotonic(); self.task_commands[task_id] = record
         self.task_pending.add(task_id); self.task_changed.emit(task_id)
-        if self.channel.send(action, {**params, "command_id": record["command_id"]}, lambda data: self._task_receipt(task_id, data)) is None:
+        command_id = record["command_id"]
+        if self.channel.send(action, {**params, "command_id": command_id},
+                             lambda data: self._task_receipt(task_id, data, command_id=command_id)) is None:
             record["at"] = 0
 
-    def _task_receipt(self, task_id: str, data: dict[str, Any]) -> None:
+    def _task_receipt(self, task_id: str, data: dict[str, Any], *, command_id: str | None = None) -> None:
         record = self.task_commands.get(task_id)
-        if not record: return
+        if not record or (command_id is not None and record["command_id"] != command_id): return
         if "_error" in data:
             record["error"] = data["_error"]
             record["at"] = 0; self.notice.emit("操作返回错误，正在核查是否已受理。"); return
@@ -436,7 +448,9 @@ class ChatCoordinator(QObject):
                 review["confirmation_state"] = "accepted"
                 review["available_actions"] = [item for item in review.get("available_actions", []) if item != "confirm"]
             self.task_commands.pop(task_id, None); self.review(task_id); self.task_changed.emit(task_id)
-            self.notice.emit("操作已受理，正在更新状态。")
+            self.notice.emit("取消请求已受理；已完成的操作不会自动撤销。" if record["action"] == "cancel" else
+                             "已拒绝本轮操作，正在继续处理你的请求。" if record["action"] == "reject_tools" else
+                             "操作已受理，正在更新状态。")
         else:
             record["at"] = 0
             self.notice.emit("尚未取得明确受理回执，正在核查操作状态。")
@@ -456,15 +470,19 @@ class ChatCoordinator(QObject):
                     self.accepted.pop(task_id, None); self.review(task_id); self.task_changed.emit(task_id)
                     self.notice.emit(str(record["error"].get("message") or "操作未受理，请查看任务说明。"))
                     return
+                first_unknown = not record.get("retryable")
                 record["retryable"] = True; self.task_pending.discard(task_id); self.task_changed.emit(task_id)
-                self.notice.emit("后台尚无此命令回执，可点击原操作使用相同命令重试。")
+                if first_unknown:
+                    self.notice.emit("后台尚无此命令回执，可点击原操作使用相同命令重试。")
+                if record["action"] == "cancel":
+                    self.review(task_id)
         self._read("task-receipt:" + task_id, "command_status", {"command_id": record["command_id"]}, done)
 
     def poll(self) -> None:
         for job_id in tuple(self.cleanup_jobs):
             self._read("cleanup:" + job_id, "conversation_cleanup_status", {"job_id": job_id}, self._cleanup_receipt)
         for task_id, record in tuple(self.task_commands.items()):
-            if monotonic() - record["at"] > 8: self.reconcile_task(task_id)
+            if not record.get("retryable") and monotonic() - record["at"] > 8: self.reconcile_task(task_id)
         for identity in set(self._views.values()):
             self.load(identity)
         for command, item in tuple(self.submissions.items()):
