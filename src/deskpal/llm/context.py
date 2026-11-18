@@ -23,6 +23,16 @@ def role_aliases(role: Mapping[str, Any]) -> dict[str, str]:
         for index, row in enumerate(role.get(layer, []))}
 
 
+def feedback_role_view(role: Mapping[str, Any]) -> dict[str, Any]:
+    """明确长期约定省略形成理由；推断与当前处境仍保留解释背景。"""
+    result = role_view(role)
+    for layer in ('learned_habits', 'user_understanding', 'interaction_approach'):
+        result[layer] = [{key: value for key, value in row.items() if not
+                         (key == 'reason' and row.get('nature') == 'explicit' and row.get('scope') == 'persistent')}
+                         for row in result[layer]]
+    return result
+
+
 def summary_view(summary: Mapping[str, Any] | None) -> dict[str, Any] | None:
     if summary is None:
         return None

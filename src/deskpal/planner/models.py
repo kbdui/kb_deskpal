@@ -12,4 +12,5 @@ class Plan:
     context: dict[str, Any] | None = None
     # 兼容既有确定性规划器的构造；真实 LLM 结束协议必须显式提供布尔值，解析器不猜默认值。
     organize_memory: bool = True
+    memory_requests: tuple[dict[str, Any], ...] = ()
 

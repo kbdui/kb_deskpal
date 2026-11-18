@@ -2,7 +2,7 @@
 
 import pytest
 
-from deskpal.config import ConfigError, load_config
+from deskpal.config import ConfigError, MemoryConfig, load_config
 
 
 def test_memory_defaults_are_automatic_and_loading_has_no_storage_side_effect(tmp_path, monkeypatch):
@@ -13,7 +13,9 @@ def test_memory_defaults_are_automatic_and_loading_has_no_storage_side_effect(tm
     assert config.memory.model_cache_dir == tmp_path / "data" / "models" / "fastembed"
     assert (config.memory.max_context_bytes, config.memory.max_candidates) == (8000, 5)
     assert config.memory.semantic_threshold == .55
-    assert (config.memory.evaluation_timeout_seconds, config.memory.evaluation_max_output_tokens) == (40, 8192)
+    assert (config.memory.evaluation_timeout_seconds, config.memory.evaluation_max_output_tokens) == (120, 16384)
+    assert MemoryConfig().evaluation_timeout_seconds == 120
+    assert MemoryConfig().evaluation_max_output_tokens == 16384
     assert not list(tmp_path.iterdir())
 
 
@@ -43,8 +45,8 @@ def test_memory_environment_overrides_toml_with_relative_model_cache(tmp_path):
     ("DESKPAL_MEMORY_MAX_CANDIDATES", "21"), ("DESKPAL_MEMORY_MAX_CANDIDATES", "1.5"),
     ("DESKPAL_MEMORY_SEMANTIC_THRESHOLD", "1.001"), ("DESKPAL_MEMORY_SEMANTIC_THRESHOLD", "nan"),
     ("DESKPAL_MEMORY_SEMANTIC_THRESHOLD", "0"), ("DESKPAL_MEMORY_SEMANTIC_THRESHOLD", "-0.1"),
-    ("DESKPAL_MEMORY_EVALUATION_TIMEOUT_SECONDS", "60.001"), ("DESKPAL_MEMORY_EVALUATION_TIMEOUT_SECONDS", "inf"),
-    ("DESKPAL_MEMORY_EVALUATION_MAX_OUTPUT_TOKENS", "8193"), ("DESKPAL_MEMORY_EVALUATION_MAX_OUTPUT_TOKENS", "0"),
+    ("DESKPAL_MEMORY_EVALUATION_TIMEOUT_SECONDS", "120.001"), ("DESKPAL_MEMORY_EVALUATION_TIMEOUT_SECONDS", "inf"),
+    ("DESKPAL_MEMORY_EVALUATION_MAX_OUTPUT_TOKENS", "16385"), ("DESKPAL_MEMORY_EVALUATION_MAX_OUTPUT_TOKENS", "0"),
 ])
 def test_invalid_memory_settings_are_rejected(name, value):
     with pytest.raises(ConfigError):
@@ -58,3 +60,17 @@ def test_toml_boolean_is_never_a_numeric_memory_limit(tmp_path, key):
     config_file.write_text(f"[memory]\n{key}=true\n", encoding="utf-8")
     with pytest.raises(ConfigError):
         load_config(config_file, environ={})
+
+
+def test_two_minute_memory_timeout_can_be_set_explicitly(tmp_path):
+    config_file = tmp_path / "settings.toml"
+    config_file.write_text('[memory]\nevaluation_timeout_seconds=120\n', encoding="utf-8")
+    assert load_config(config_file, environ={}).memory.evaluation_timeout_seconds == 120
+    assert load_config(environ={"DESKPAL_MEMORY_EVALUATION_TIMEOUT_SECONDS": "120"}).memory.evaluation_timeout_seconds == 120
+
+
+def test_larger_memory_output_budget_can_be_set_explicitly(tmp_path):
+    config_file = tmp_path / "settings.toml"
+    config_file.write_text('[memory]\nevaluation_max_output_tokens=16384\n', encoding="utf-8")
+    assert load_config(config_file, environ={}).memory.evaluation_max_output_tokens == 16384
+    assert load_config(environ={"DESKPAL_MEMORY_EVALUATION_MAX_OUTPUT_TOKENS": "16384"}).memory.evaluation_max_output_tokens == 16384

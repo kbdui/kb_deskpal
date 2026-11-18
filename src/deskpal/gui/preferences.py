@@ -28,6 +28,7 @@ class GuiPreferences(QObject):
         "pet_scale": "pet/scale",
         "user_display_name": "gui/user_display_name",
         "character_display_name": "gui/character_display_name",
+        "execution_width": "gui/execution_width",
     }
 
     def __init__(self, settings: QSettings | None = None, parent: QObject | None = None):
@@ -50,6 +51,21 @@ class GuiPreferences(QObject):
     def set_theme(self, value: str) -> bool:
         if value not in ('auto', 'light', 'dark'): return False
         self._set('theme', value)
+        return True
+
+    @property
+    def execution_width(self) -> int:
+        value = self._value('execution_width', 420)
+        try:
+            width = int(value) if isinstance(value, (int, str)) and not isinstance(value, bool) else 420
+        except ValueError:
+            return 420
+        return width if 340 <= width <= 720 else 420
+
+    def set_execution_width(self, value: int) -> bool:
+        if type(value) is not int or not 340 <= value <= 720:
+            return False
+        self._set('execution_width', value)
         return True
 
     @property

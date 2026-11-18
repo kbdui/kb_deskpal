@@ -44,8 +44,8 @@ model_cache_dir = "data/models/fastembed"
 max_context_bytes = 8000
 max_candidates = 5
 semantic_threshold = 0.55
-evaluation_timeout_seconds = 40.0
-evaluation_max_output_tokens = 8192
+evaluation_timeout_seconds = 120.0
+evaluation_max_output_tokens = 16384
 
 [workflow]
 # Positive limits: queue <=10000; payloads <=16 MiB; shutdown <=60 seconds.

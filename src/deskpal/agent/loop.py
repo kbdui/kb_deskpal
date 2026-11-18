@@ -9,6 +9,7 @@ from deskpal.sandbox.errors import PermissionDenied
 from deskpal.tasks.models import TaskStatus
 from deskpal.tools.models import PermissionLevel, ToolContext, ToolResult
 from deskpal.workflow.models import WorkflowBlocked
+from deskpal.plugins.execution import ChannelDenied
 
 READ_ONLY_TOOLS = frozenset({"time", "echo", "read_text", "document_search", "document_classify",
     "calendar_list", "calendar_events", "timer_list", "timer_events", "memory_search", "role_read", "task_list", "notification_status"})
@@ -18,6 +19,8 @@ def execute_rounds(core: Any, task_id: str, request: str, plan: Plan, prepared: 
                    memories: Any, authorization: frozenset[str], high_risk: frozenset[str],
                    results: list[ToolResult], warnings: list[str], *, resuming: bool = False) -> Plan | AgentResult:
     journal = core._journal
+    channel = core._channels.context(task_id) if core._channels else None
+    read_only = READ_ONLY_TOOLS | (getattr(core._channels.runtime(channel), 'read_only_tools', frozenset()) if channel else frozenset())
     attempts = journal.attempts(task_id) if journal else ()
     if any(item.status not in {"Succeeded", "Failed"} for item in attempts):
         raise WorkflowBlocked("Unresolved operation cannot be replayed")
@@ -42,7 +45,7 @@ def execute_rounds(core: Any, task_id: str, request: str, plan: Plan, prepared: 
             if notice not in warnings:
                 warnings.append(notice)
         if not group and not awaiting_reply:
-            return Plan(plan.reply, (), plan.action, organize_memory=plan.organize_memory)
+            return Plan(plan.reply, (), plan.action, organize_memory=plan.organize_memory, memory_requests=plan.memory_requests)
         awaiting_reply = False
         if len(all_calls) > core.max_tool_steps:
             return cast(AgentResult, core._fail(task_id, "任务计划超过工具步骤上限；已完成操作保留，请仅提出尚未完成的要求。", results))
@@ -52,12 +55,19 @@ def execute_rounds(core: Any, task_id: str, request: str, plan: Plan, prepared: 
         group_seen: set[tuple[str, str]] = set()
         high: list[str] = []
         details: list[AuthorizationRequest] = []
+        channel_denials: dict[str, str] = {}
         for call in group:
+            if core._channels:
+                try:
+                    core._channels.policy.check(task_id, call)
+                except ChannelDenied as error:
+                    channel_denials[call.call_id] = str(error)
+                    continue
             if journal and journal.origin(task_id)['kind'] == 'proactive' and call.name not in {spec.name for spec in core._planning_tools(task_id)}:
                 raise WorkflowBlocked('主动任务不能代替用户发起这项内部管理操作。')
             core._boundary(task_id)
             fingerprint = (call.name, _canonical(call.arguments))
-            if call.name not in READ_ONLY_TOOLS and (fingerprint in seen or fingerprint in group_seen):
+            if call.name not in read_only and (fingerprint in seen or fingerprint in group_seen):
                 return cast(AgentResult, core._fail(task_id,
                     "模型重复提出已经处理的操作，已阻止重复执行。已完成操作保留；请仅提出尚未完成的要求。", results))
             group_seen.add(fingerprint)
@@ -91,7 +101,11 @@ def execute_rounds(core: Any, task_id: str, request: str, plan: Plan, prepared: 
                 raise WorkflowBlocked('主动任务不能代替用户发起这项内部管理操作。')
             core._boundary(task_id)
             attempt = journal.start_step(task_id, completed) if journal else None
-            raw = core.tools.execute(call, context)
+            try:
+                raw = (ToolResult(False, error=channel_denials[call.call_id]) if call.call_id in channel_denials
+                       else core.tools.execute(call, context))
+            except ChannelDenied as error:
+                raw = ToolResult(False, error=str(error))  # 预检查后撤销权限也明确记为未执行。
             if not isinstance(raw, ToolResult) or type(raw.success) is not bool:
                 raise ValueError("Invalid tool result")
             result = ToolResult(raw.success, raw.output, raw.error, call.name, call.call_id, raw.outcome)
@@ -104,20 +118,6 @@ def execute_rounds(core: Any, task_id: str, request: str, plan: Plan, prepared: 
                 prepared = core._interaction.refresh_role(task_id, result.output["revision"])
                 if journal:
                     journal.save_round(task_id, Plan("角色已更正，尚未完成判断。", (), "continue"),
-                        tuple(core.tools.list_tools()), str(core.workspace_dir), core._task_dependencies.get(task_id, ()))
-            if call.name == "memory_correct" and result.success and core._interaction:
-                identity, revision = result.output["previous_id"], result.output["revision"]
-                replacement_id = result.output["id"]
-                core._task_dependencies[task_id] = tuple((replacement_id if name == identity else name, revision if name == identity else version)
-                    for name, version in core._task_dependencies.get(task_id, ()))
-                prepared = core._interaction.refresh_memory(task_id, identity, revision, replacement_id)
-                if journal:
-                    journal.save_round(task_id, Plan("来源已更正，尚未完成判断。", (), "continue"),
-                        tuple(core.tools.list_tools()), str(core.workspace_dir), core._task_dependencies[task_id])
-            if call.name == 'memory_forget' and result.success and core._interaction:
-                prepared = core._interaction.current_turn(task_id)
-                if journal:
-                    journal.save_round(task_id, Plan('指定记忆已遗忘，按实际结果继续回答。', (), 'continue'),
                         tuple(core.tools.list_tools()), str(core.workspace_dir), core._task_dependencies.get(task_id, ()))
             seen.add((call.name, _canonical(call.arguments)))
             completed += 1
@@ -176,7 +176,8 @@ def execute_rounds(core: Any, task_id: str, request: str, plan: Plan, prepared: 
             all_calls.extend(next_plan.steps)
             plan = Plan(next_plan.reply, tuple(all_calls), organize_memory=next_plan.organize_memory)
         if not next_plan.steps:
-            return Plan(next_plan.reply, (), next_plan.action, organize_memory=next_plan.organize_memory)
+            return Plan(next_plan.reply, (), next_plan.action, organize_memory=next_plan.organize_memory,
+                        memory_requests=plan.memory_requests)
 
 
 def _canonical(value: Any) -> str:

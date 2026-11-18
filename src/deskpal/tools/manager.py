@@ -1,6 +1,6 @@
 """Registration, audit, permission gating and dispatch of trusted tools."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from collections.abc import Callable
 from typing import Any, Mapping
 
@@ -64,6 +64,12 @@ class BuiltinToolManager:
         self._tools: dict[str, _Registered] = {}
         self._plugins: dict[str, PluginManifest] = {}
         self._result_observer: Callable[[str, ToolResult], None] | None = None
+        self._channel_policy: Callable[[str, ToolCall], bool | None] | None = None
+
+    def set_channel_policy(self, policy: Callable[[str, ToolCall], bool | None]) -> None:
+        if self._channel_policy is not None:
+            raise ValueError('Channel tool policy already attached')
+        self._channel_policy = policy
 
     def set_result_observer(self, observer: Callable[[str, ToolResult], None]) -> None:
         """Application-owned projection hook; never authorizes or retries tools."""
@@ -153,6 +159,8 @@ class BuiltinToolManager:
         return entry
 
     def _permission(self, entry: _Registered, call: ToolCall, context: ToolContext) -> None:
+        if self._channel_policy is not None and self._channel_policy(context.task_id, call) is True:
+            return  # 可信渠道已逐次核对当前预授权；不等待桌面审批。
         try:
             self._sandbox.check_permission(_copy_spec(entry.spec), context)
         except (PermissionDenied, PathViolation) as exc:
@@ -188,7 +196,7 @@ class BuiltinToolManager:
         self._log.record("tool_started", context.task_id,
                          {"tool_name": entry.spec.name, "call_id": call.call_id, "arguments": snapshot_json(arguments)})
         try:
-            result = entry.tool.execute(arguments, context)
+            result = entry.tool.execute(arguments, replace(context, call_id=call.call_id))
             if not isinstance(result, ToolResult) or type(result.success) is not bool:
                 raise ArgumentError("Tool returned an invalid result")
             if result.outcome not in {"known", "unknown"}:

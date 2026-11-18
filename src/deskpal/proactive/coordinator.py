@@ -93,7 +93,7 @@ class ProactiveCoordinator:
         if not isinstance(key, str) or not 1 <= len(key) <= 200:
             raise ValueError('Invalid attention source key')
         for ref in refs:
-            if (set(ref) != {'kind', 'id', 'revision'} or ref['kind'] not in {'proposal', 'memory', 'dialogue_turn', 'reflection'}
+            if (set(ref) != {'kind', 'id', 'revision'} or ref['kind'] not in {'proposal', 'memory', 'dialogue_turn', 'reflection', 'plugin_experience'}
                     or not isinstance(ref['id'], str) or not 1 <= len(ref['id']) <= 200
                     or type(ref['revision']) is not int or ref['revision'] < 1):
                 raise ValueError('Invalid attention reference')
@@ -219,6 +219,10 @@ class ProactiveCoordinator:
                 if ref['kind'] == 'reflection':
                     from .reflection import read
                     if read(self.app, ref['id']) is None:
+                        return False
+                if ref['kind'] == 'plugin_experience':
+                    from deskpal.plugins.experiences import read as read_experience
+                    if read_experience(self.app, ref['id']) is None:
                         return False
                 if policy is None or (policy == 'local_only' and self.app.config.llm.is_cloud):
                     return False
@@ -426,6 +430,10 @@ class ProactiveCoordinator:
             elif ref['kind'] == 'reflection':
                 from .reflection import read
                 body = read(self.app, ref['id'])
+                source_policy = body['use_policy'] if body else None
+            elif ref['kind'] == 'plugin_experience':
+                from deskpal.plugins.experiences import read as read_experience
+                body = read_experience(self.app, ref['id'])
                 source_policy = body['use_policy'] if body else None
             else:
                 source_policy = self.app._humanization.reference_policy(ref['kind'], ref['id'], ref['revision'])

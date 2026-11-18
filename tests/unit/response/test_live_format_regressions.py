@@ -72,9 +72,9 @@ def test_planning_and_learning_agree_forgetting_preserves_chat_and_personality()
     assert '不清除聊天、其他记忆或人格' in PLANNING_INSTRUCTION
     assert '不删除聊天或其他人格资料' in INSTRUCTIONS
     assert 'clears related chat' not in PLANNING_INSTRUCTION
-    description = next(tool.spec.description for tool in management_tools(None) if tool.spec.name == 'memory_forget')
-    assert '保留聊天、其他记忆、人格、执行记录和安排' in description
-    assert '会清理相关聊天' not in description
+    names = {tool.spec.name for tool in management_tools(None)}
+    assert 'memory_search' in names
+    assert not names.intersection({'memory_remember', 'memory_correct', 'memory_forget'})
 
 
 def test_planner_corrects_json_call_proposal_without_executing_text_tools():

@@ -96,6 +96,18 @@ def _bounded(text: str) -> str:
     return text if len(text) <= _TEXT_LIMIT else text[:_TEXT_LIMIT] + "\n…本段显示已截短，完整原值可在技术记录中查看/复制。"
 
 
+def studio_operation_records(review: dict[str, Any]) -> list[dict[str, Any]]:
+    """给新版侧栏补齐已完成步骤的显示名；原始事实及关联规则保持不变。"""
+    from deskpal.application.tool_catalog import display_name
+    records = operation_records(review)
+    for record in records:
+        step, result, attempt = (record.get(key) or {} for key in ('step', 'result', 'attempt'))
+        name = str(step.get('tool_name') or result.get('tool_name') or attempt.get('tool_name') or '')
+        record['display_name'] = step.get('display_name') or display_name(name) or '工具执行'
+        record['summary'] = tool_result_text(result) if result else ''
+    return records
+
+
 def _parameters(step: dict[str, Any], workspace: str) -> str:
     """Readable parameter context, with exact JSON reserved for diagnostics."""
     names = {str(field.get("name")): str(field.get("label") or field.get("name"))

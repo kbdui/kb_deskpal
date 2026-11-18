@@ -23,4 +23,7 @@ workspace/
 *.sqlite3-shm
 *.sqlite3-wal
 *.jsonl
+/NapCat/
+/napcat/
+/onebot11_*.json
 

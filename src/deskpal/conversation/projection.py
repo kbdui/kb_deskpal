@@ -40,7 +40,12 @@ def publish_task_state(store: WorkflowStore, conn: sqlite3.Connection, task_id: 
         text = "已保存这条记忆。"
     if not text:
         return
-    conn.execute("UPDATE conversation_item SET body=?,revision=revision+1 WHERE task_id=? AND kind='assistant_message' AND redacted_at IS NULL", (text, task_id))
+    if status == 'AwaitingInput':
+        from .exchanges import question
+        question(conn, task_id, text)
+        conn.execute("UPDATE conversation_item SET body='',revision=revision+1 WHERE id=?", (task_id + ':assistant_message',))
+    else:
+        conn.execute("UPDATE conversation_item SET body=?,revision=revision+1 WHERE task_id=? AND kind='assistant_message' AND redacted_at IS NULL", (text, task_id))
     refs: dict[tuple[str, str], dict[str, Any]] = {}
     for row in conn.execute("SELECT kind,object_id,revision FROM dependency WHERE task_id=? UNION SELECT kind,object_id,revision FROM context_dependency WHERE task_id=?", (task_id, task_id)):
         version = conn.execute("SELECT use_policy FROM dependency_version WHERE kind=? AND object_id=? AND revision=? AND active=1", (row["kind"], row["object_id"], row["revision"])).fetchone()

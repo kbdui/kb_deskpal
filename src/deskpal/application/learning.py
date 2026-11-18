@@ -83,6 +83,12 @@ class FeedbackLearning:
                 if (ref['revision'] != 1 or value is None
                         or (value['use_policy'] == 'local_only' and not self.app._interaction.allow_restricted)):
                     raise WorkflowBlocked('Internal reflection is no longer available')
+            elif ref['kind'] == 'plugin_experience':
+                from deskpal.plugins.experiences import read
+                value = read(self.app, ref['id'])
+                if (ref['revision'] != 1 or value is None or
+                        (value['use_policy'] == 'local_only' and not self.app._interaction.allow_restricted)):
+                    raise WorkflowBlocked('Plugin experience is no longer available')
 
     def recover(self) -> None:
         """只投递已提交的角色调整，绝不重新运行来源任务或盲目覆盖新角色。"""
@@ -90,10 +96,13 @@ class FeedbackLearning:
         companion = self.app.core.companion_runtime
         apply = getattr(companion, 'apply_learning')
         for row in self.store.pending_effects():
+            body = json.loads(row['payload'])
+            changes = body.pop('memory_changes', {})
+            forgotten = body.pop('forgotten', [])
+            self._settle_memory_changes(row['task_id'], changes, forgotten)
             try:
                 with self.app._privacy.publication(row['privacy_epoch']):
                     self._source_valid(json.loads(row['refs']))
-                    body = json.loads(row['payload'])
                     followups = body.pop('followups', [])
                     if body['source'].get('memory_epoch') != self.memory.epoch:
                         raise WorkflowBlocked('Learning sources changed before role delivery')
@@ -172,11 +181,22 @@ class FeedbackLearning:
         refs: list[dict[str, Any]] = []
         now = self.app.proactive.clock()
         source_task = self.app.tasks.get(task_id)
+        snapshot = self.app.journal.get_plan(task_id)
+        management = list(snapshot.plan.memory_requests) if snapshot else []
         created_at = source_task.created_at.isoformat() if source_task else now.isoformat()
         current_ref = dict(kind='dialogue_turn', id=task_id + ':user', revision=max(1, context.sequence),
                            conversation_id=context.conversation_id, available=True, use_policy=context.use_policy)
         user_speaker = dict(speaker_id='local:user', speaker_name='用户', speaker_kind='person', channel='deskpal')
         character_speaker = dict(speaker_id='character:' + context.role_id, speaker_name='当前角色', speaker_kind='character', channel='deskpal')
+        if context.origin == 'user':
+            from deskpal.conversation.exchanges import user_text
+            with self.app.store.read_connection() as db:
+                request = user_text(db, task_id, request)
+                additions = [row[0] for row in db.execute('SELECT content FROM task_amendment WHERE task_id=? ORDER BY sequence', (task_id,))]
+            if additions:
+                request += '\n\n' + '\n\n'.join(additions)
+        if management and (context.origin != 'user' or any(row['quote'] not in request for row in management)):
+            raise WorkflowBlocked('Memory management requires actual current user words')
         catalog['user'] = dict(content=request, role='user', origin='user_message', refs=[current_ref], use_policy=context.use_policy, created_at=created_at, **user_speaker)
         refs.append(current_ref)
         if context.origin == 'proactive':
@@ -261,6 +281,13 @@ class FeedbackLearning:
                 if item is None or item.revision != ref['revision']:
                     raise WorkflowBlocked('Frozen review target changed or became unavailable')
                 selected.append(item)
+        # 显式管理目标不参与普通相关性淘汰；仍只接收真实、可用的现行记忆。
+        if management:
+            required_ids = {key for row in management for key in row['targets']}
+            eligible = {item.id: item for item in self.memory.list_items() if item.status in
+                (MemoryStatus.CANDIDATE, MemoryStatus.DISPUTED, MemoryStatus.ACCEPTED, MemoryStatus.ARCHIVED)
+                and (self.app._interaction.allow_restricted or item.source.use_policy == UsePolicy.CLOUD_ALLOWED)}
+            selected = [eligible[key] for key in sorted(required_ids) if key in eligible] + [item for item in selected if item.id not in required_ids]
         items = {item.id: item for item in selected}
         understandings: list[dict[str, Any]] = []
         for index, item in enumerate(selected):
@@ -276,6 +303,7 @@ class FeedbackLearning:
             catalog[f'memory{index}'] = dict(content=evidence if available else '', role='evidence',
                 origin=item.source.origin, refs=[ref], available=available, use_policy=item.source.use_policy.value)
             catalog[f'memory{index}']['created_at'] = item.source.created_at.isoformat()
+            catalog[f'memory{index}'].update(source_task_id=item.source.task_id, source_session_id=item.source.session_id)
             catalog[f'memory{index}'].update({key: getattr(item.source, key) for key in
                 ('speaker_id', 'speaker_name', 'speaker_kind', 'channel')})
             understandings.append(dict(id=item.id, revision=item.revision, status=item.status.value,
@@ -284,6 +312,7 @@ class FeedbackLearning:
                 reason=item.draft.reason, uncertainty=item.draft.uncertainty,
                 quote=item.draft.quote,
                 review_after=item.draft.review_after.isoformat() if item.draft.review_after else None,
+                archive_after=item.draft.archive_after.isoformat() if item.draft.archive_after else None,
                 valid_from=item.draft.valid_from.isoformat() if item.draft.valid_from else None,
                 valid_to=item.draft.valid_to.isoformat() if item.draft.valid_to else None,
                 original_source_key=f'memory{index}', source_refs=original_refs))
@@ -295,6 +324,8 @@ class FeedbackLearning:
                 use_policy=ref.get('use_policy', context.use_policy)) for ref in previous['refs'])
         payload = dict(catalog=catalog, understandings=understandings, role=json.loads(context.role_json),
             previous_summary=previous, now=now.isoformat())
+        if management:
+            payload['memory_requests'] = management
         rejections = self.app.journal.rejected_authorizations(task_id)
         if rejections:
             payload['authorization_rejections'] = list(rejections)
@@ -310,6 +341,16 @@ class FeedbackLearning:
             if emotion:
                 source_refs.extend(emotion['source'].get('refs', []))
         for ref in source_refs[:64]:
+            if ref['kind'] == 'plugin_experience' and ref.get('available', True):
+                from deskpal.plugins.experiences import read as read_experience
+                experience = read_experience(self.app, ref['id'])
+                if experience and (experience['use_policy'] != 'local_only' or self.app._interaction.allow_restricted):
+                    catalog['source:plugin:' + ref['id']] = dict(experience, origin='plugin_experience',
+                        role='assistant', available=True, refs=[ref], published=False, previously_organized=True,
+                        source_task_id=ref['id'], source_session_id='plugin:' + experience['plugin_id'] + ':' + experience['account_id'] + ':' + experience['source_conversation'],
+                        experience_metadata={key: experience[key] for key in ('plugin_id', 'account_id', 'source_conversation', 'events')})
+                    refs.append(ref)
+                continue
             if ref['kind'] == 'reflection' and ref.get('available', True):
                 from deskpal.proactive.reflection import read
                 thought = read(self.app, ref['id'])
@@ -343,6 +384,8 @@ class FeedbackLearning:
             refs.append(ref)
         # 整个历史单元按预算省略；不截断原话或否定词。
         while len(json.dumps(payload, ensure_ascii=False).encode('utf-8')) > 90000 and understandings:
+            if management and any(understandings[-1]['id'] in row['targets'] for row in management):
+                raise WorkflowBlocked('Memory management context exceeds budget')
             removed = understandings.pop()
             catalog.pop(removed['original_source_key'])
             items.pop(removed['id'])
@@ -417,7 +460,7 @@ class FeedbackLearning:
                 snapshot = self.app.journal.get_plan(task.id)
                 if (isinstance(task.result, dict) and
                         (task.result.get('organize_memory') is False or task.result.get('learning_receipt', {}).get('status') == 'skipped')
-                        or snapshot is not None and not snapshot.plan.organize_memory):
+                        or snapshot is not None and not snapshot.plan.organize_memory) and not (snapshot and snapshot.plan.memory_requests):
                     self.store.finish(job['id'], 'cancelled', 'model_deferred')
                     continue
                 turn = self.app._interaction.prepare(task.id, task.request, RetrievalBundle(epoch=self.memory.epoch))
@@ -440,9 +483,9 @@ class FeedbackLearning:
 
     def _draft(self, row: dict[str, Any], catalog: dict[str, Any], context: PreparedTurn,
                *, fresh: bool = False) -> tuple[MemorySource, MemoryDraft]:
-        permitted = {'observed_event': {'tool_result'}, 'user_report': {'user_message', 'user_confirmation'},
-            'external_claim': {'user_message', 'user_confirmation', 'imported_document'},
-            'hypothesis': {'user_message', 'user_confirmation', 'tool_result', 'imported_document', 'assistant_output', 'character_reflection'}}
+        permitted = {'observed_event': {'tool_result', 'plugin_experience'}, 'user_report': {'user_message', 'user_confirmation'},
+            'external_claim': {'user_message', 'user_confirmation', 'imported_document', 'plugin_experience'},
+            'hypothesis': {'user_message', 'user_confirmation', 'tool_result', 'imported_document', 'assistant_output', 'character_reflection', 'plugin_experience'}}
         evidence = next((catalog[key] for key in row['sources'] if catalog[key].get('origin') in permitted[row['claim_type']]
             and catalog[key].get('available', True) and row['quote'] in catalog[key]['content']
             and (catalog[key]['origin'] != 'assistant_output' or bool(catalog[key].get('refs')))
@@ -454,14 +497,16 @@ class FeedbackLearning:
         _content(row['quote'])
         policy = ('local_only' if context.use_policy == 'local_only' or any(catalog[key].get('use_policy') == 'local_only'
                   for key in row['sources']) else 'cloud_allowed')
-        source = MemorySource(row['quote'], id=uuid4().hex, origin=evidence['origin'], task_id=context.task_id,
-            session_id=context.conversation_id, use_policy=UsePolicy(policy), created_at=datetime.fromisoformat(evidence['created_at']),
+        source = MemorySource(row['quote'], id=uuid4().hex, origin=evidence['origin'],
+            task_id=evidence.get('source_task_id', context.task_id), session_id=evidence.get('source_session_id', context.conversation_id),
+            use_policy=UsePolicy(policy), created_at=datetime.fromisoformat(evidence['created_at']),
             **{key: evidence.get(key, '') for key in ('speaker_id', 'speaker_name', 'speaker_kind', 'channel')})
         draft = MemoryDraft(row['content'], row['quote'], claim_type=ClaimType(row['claim_type']),
             kind=MemoryKind.EPISODIC if row['destination'] == 'episode' else MemoryKind.SEMANTIC,
             subject=row.get('subject') or (source.speaker_id if source.speaker_id not in ('', 'local:user') else 'user'),
             destination=row['destination'], reason=row['reason'], uncertainty=row['uncertainty'],
-            review_after=moment(row['review_after']), valid_from=moment(row['valid_from']), valid_to=moment(row['valid_to']))
+            review_after=moment(row['review_after']), archive_after=moment(row['archive_after']),
+            valid_from=moment(row['valid_from']), valid_to=moment(row['valid_to']))
         return source, draft
 
     def finish(self, *, task_id: str, request: str, response: str,
@@ -491,6 +536,9 @@ class FeedbackLearning:
     def _job_receipt(self, identity: str) -> dict[str, Any]:
         job = self.store.job(identity)
         saved: list[dict[str, Any]] = []
+        with self.repository._lock:
+            has_management = self.repository._db.execute(
+                "SELECT 1 FROM learning_record WHERE job_id=? AND action='management' LIMIT 1", (identity,)).fetchone() is not None
         if job and job['status'] == 'completed':
             with self.store.memory._lock:
                 rows = self.store.memory._db.execute(
@@ -499,8 +547,55 @@ class FeedbackLearning:
                 for row in rows:
                     item = self.memory.repository.get(row['memory_id'])
                     if item is not None:
-                        saved.append(dict(id=item.id, status=item.status.value, action=row['action']))
-        return dict(status=job['status'] if job else 'not_run', saved_understandings=saved)
+                        saved.append(dict(id=item.id, status=item.status.value, action=row['action'],
+                            **({'content': item.draft.content} if has_management and item.status != MemoryStatus.DELETED else {})))
+        reports = []
+        with self.repository._lock:
+            for row in self.repository._db.execute(
+                    "SELECT understanding FROM learning_record WHERE job_id=? AND action='management' ORDER BY rowid", (identity,)):
+                reports.append(json.loads(row[0]))
+            delivery = self.repository._db.execute('SELECT status FROM learning_role_outbox WHERE job_id=?', (identity,)).fetchone()
+        status = job['status'] if job else 'not_run'
+        if status == 'completed' and delivery and delivery[0] == 'pending':
+            status = 'delivery_pending'
+        return dict(status=status, saved_understandings=saved, **({'management': reports} if reports else {}))
+
+    def _settle_memory_changes(self, task_id: str, changes: dict[str, Any], forgotten: list[str]) -> None:
+        """可重放的跨库投递；本库修改已完成，不再调用模型或重新写记忆。"""
+        if not changes:
+            return
+        ids = set(changes)
+        if task_id in self.app._interaction._prepared:
+            self.app._interaction.settle_learning(task_id, ids, drop_summary=bool(forgotten))
+        else:
+            snapshot_context = self.app._humanization.context(task_id, 'planning')
+            if snapshot_context:
+                from .interaction import _refs
+                items = tuple(item for item in snapshot_context['items']
+                    if not (forgotten and item.get('kind') == 'conversation_summary')
+                    and not any(kind == 'memory' and name in ids for kind, name, _ in _refs(item.get('refs', ()))))
+                self.app._humanization.renew_memory(task_id, '', 0, items)
+        self.app.core._task_dependencies[task_id] = tuple(ref for ref in
+            self.app.core._task_dependencies.get(task_id, ()) if ref[0] not in ids)
+        # 先撤下依赖，再持久化后续快照；删除不能擦除实际聊天正文。
+        with self.app.store.transaction() as db:
+            for identity in ids:
+                db.execute("DELETE FROM dependency WHERE task_id=? AND kind='memory' AND object_id=?", (task_id, identity))
+                db.execute("DELETE FROM context_dependency WHERE task_id=? AND kind='memory' AND object_id=?", (task_id, identity))
+        snapshot = self.app.journal.get_plan(task_id)
+        task = self.app.tasks.get(task_id)
+        if snapshot and any(ref[0] in ids for ref in snapshot.memory_refs) and task and task.status in (TaskStatus.RUNNING, TaskStatus.PLANNING):
+            from deskpal.planner.models import Plan
+            self.app.journal.save_round(task_id, Plan(snapshot.plan.reply, action=snapshot.plan.action,
+                organize_memory=snapshot.plan.organize_memory, memory_requests=snapshot.plan.memory_requests),
+                tuple(self.app.tools.list_tools()), str(self.app.core.workspace_dir),
+                tuple(ref for ref in snapshot.memory_refs if ref[0] not in ids))
+        for identity in ids:
+            self.app._conversation_repository.invalidate_memory_summaries(identity)
+        for identity in forgotten:
+            affected = self.app.journal.scrub_memory(identity, keep_task=task_id)
+            self.app.core.revoke_pending(affected)
+            self.app._dispatcher.clear_cached(affected)
 
     def review(self, command_id: str, context: PreparedTurn, batch: dict[str, Any] | None = None) -> tuple[str, ...]:
         """P5/独立整理复用同一协议；不发布聊天、不调用来源工具。"""
@@ -635,6 +730,8 @@ class FeedbackLearning:
                 learning_understanding_count=len(payload.get('understandings', [])))
             try:
                 guard()
+                # 证据保持原批次；只刷新事实时钟，避免等待/重试后仍按旧 now 安排复查。
+                payload['now'] = self.app.proactive.clock().isoformat()
                 payload['history_lookup_available'] = can_lookup and not lookup_used and attempt < 3
                 provider = (self.app._interaction.calls(task_id, 'memory_evaluation') if kind == 'turn' else
                             self.app._interaction.gateway.bind(task_id, 'memory_evaluation', guard))
@@ -661,8 +758,8 @@ class FeedbackLearning:
             except RetryableLLMError as error:
                 stage, outcome = 'model', 'provider_failure'
                 self.store.finish(identity, 'failed', 'temporary_model_failure')
-                correction_code, correction_field = '', ''
-                correction_diagnostics = {}
+                # 超时没有产生新提议，不能清掉此前已确认的字段/时间错误。
+                # 后续仍带同一份纠错诊断；新校验错误或补查换入资料时再更新它。
                 delay = min(1.0, .25 * 2 ** (attempt - 1)) if attempt < 3 else 0.0
                 self.app._interaction.gateway.annotate(task_id, 'memory_evaluation',
                     {'processing_code': error.code, 'retry_delay_ms': int(delay * 1000)})
@@ -726,10 +823,18 @@ class FeedbackLearning:
         if status in (MemoryStatus.CANDIDATE, MemoryStatus.DISPUTED) and (
                 draft.review_after is None or draft.review_after <= self.app.proactive.clock()):
             raise FeedbackValidationError('time_invalid', 'feedback.review_after', processing_rule='review_schedule')
+        if status in (MemoryStatus.CANDIDATE, MemoryStatus.DISPUTED) and (
+                draft.archive_after is None or draft.archive_after <= self.app.proactive.clock()
+                or (draft.review_after is not None and draft.review_after > draft.archive_after)):
+            raise FeedbackValidationError('time_invalid', 'feedback.archive_after', processing_rule='archive_schedule')
 
     def _commit(self, identity: str, result: dict[str, Any], payload: dict[str, Any],
                 items: dict[str, MemoryItem], context: PreparedTurn, guard: Any) -> None:
+        from deskpal.memory.management import validate_result
+        reports = validate_result(result, payload)
+        items = dict(items)
         catalog = payload['catalog']
+        forgotten = [row['id'] for row in result['reviews'] if row['decision'] == 'forget']
         changed: dict[str, tuple[str, int]] = {}
         role_habits: list[dict[str, Any]] = []
         followups: list[dict[str, Any]] = []
@@ -746,7 +851,7 @@ class FeedbackLearning:
                         parent = db.execute('SELECT refs FROM attention WHERE task_id=?', (context.task_id,)).fetchone()
                     if parent:
                         actual.extend(json.loads(parent['refs']))
-            actual = [ref for ref in actual if ref['kind'] in {'memory', 'dialogue_turn', 'reflection'} and ref.get('available', True)]
+            actual = [ref for ref in actual if ref['kind'] in {'memory', 'dialogue_turn', 'reflection', 'plugin_experience'} and ref.get('available', True)]
             actual = list({(ref['kind'], ref['id'], ref['revision']): ref for ref in actual}.values())
             if not actual or not any(catalog[key]['origin'] != 'assistant_output' and catalog[key].get('available', True) for key in row['sources']):
                 raise ValueError('Follow-up requires actual available evidence')
@@ -791,9 +896,13 @@ class FeedbackLearning:
                     raise ValueError('Unknown or repeated review target')
                 used.add(row['id'])
                 decision = row['decision']
+                if decision == 'forget':
+                    # 删除最后执行，避免清理学习副本影响本事务的其他操作。
+                    continue
                 if decision in ('retain', 'archive') and previous.source.content == '[原消息已清除]':
                     source, draft = previous.source, replace(previous.draft, reason=row['reason'],
-                        uncertainty=row['uncertainty'], review_after=moment(row['review_after']))
+                        uncertainty=row['uncertainty'], review_after=moment(row['review_after']),
+                        archive_after=moment(row['archive_after']))
                 else:
                     source, draft = self._draft(row, catalog, context)
                     if not row['temporal'] and draft.valid_from is None:
@@ -841,7 +950,7 @@ class FeedbackLearning:
                 self.store.record(identity, None, 'emotion', emotion['description_intensity'], emotion['reason_sources'], emotion['uncertainty'])
             # 输入候选不等于学习依据。只保存实际选用的来源，避免无关资料被遗忘时连带删习惯。
             selected_refs: list[dict[str, Any]] = []
-            for row in [*result['memories'], *result['reviews'], *role_habits]:
+            for row in [*result['memories'], *[row for row in result['reviews'] if row['decision'] != 'forget'], *role_habits]:
                 selected_refs.extend(self._references(row, catalog))
             if emotion is not None:
                 selected_refs.extend(self._references(emotion, catalog))
@@ -850,9 +959,19 @@ class FeedbackLearning:
             def committed(values: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 return [dict(ref, id=changed[ref['id']][0], revision=changed[ref['id']][1])
                     if ref['kind'] == 'memory' and ref['id'] in changed else ref for ref in values]
-            committed_refs = committed(selected_refs)
+            committed_refs = [ref for ref in committed(selected_refs) if not (ref['kind'] == 'memory' and ref['id'] in forgotten)]
             self.repository._db.execute('UPDATE learning_job SET refs=? WHERE id=?', (json.dumps(committed_refs), identity))
-            if role_habits or emotion is not None or followups:
+            for memory_id in forgotten:
+                receipt = self.repository.forget(memory_id, items[memory_id].revision)
+                changed[memory_id] = (memory_id, receipt.revision)
+                self.store.record(identity, memory_id, 'forget', '', '', '')
+            for report in reports:
+                request = payload['memory_requests'][report['request']]
+                value = dict(report, action=request['action'], targets=request['targets'])
+                if request['action'] == 'forget' and report['status'] == 'applied':
+                    value['reason'] = '已遗忘指定提炼记忆，聊天原文保留。'
+                self.store.record(identity, None, 'management', json.dumps(value, ensure_ascii=False), '', '')
+            if role_habits or emotion is not None or followups or changed:
                 for habit in role_habits:
                     habit['host_refs'] = committed(self._references(habit, catalog))
                 if emotion is not None:
@@ -867,7 +986,8 @@ class FeedbackLearning:
                         conversation_epoch=context.conversation_epoch, refs=committed_refs, memory_epoch=self.memory.epoch,
                         learning_at=self.app.proactive.clock().timestamp()),
                     habits=role_habits, emotion=emotion, use_policy=role_policy,
-                    followups=[dict(row, refs=committed(row['refs'])) for row in followups]))
+                    followups=[dict(row, refs=committed(row['refs'])) for row in followups],
+                    memory_changes=changed, forgotten=forgotten))
             summary = result['summary']
             if summary is not None and not changed and not context.conversation_id.startswith('single:'):
                 sources = [ref for key, entry in catalog.items() if key == 'user' or key.startswith('history')
@@ -885,8 +1005,19 @@ class FeedbackLearning:
             # 草稿无真实消息引用，不会获得最终正文覆盖回执；后台也只标实际读过的正文。
             self.store.mark_messages(messages)
             self.store.mark_messages({self.materials.key(ref): entry['content'] for entry in catalog.values()
-                for ref in entry.get('refs', []) if ref['kind'] == 'reflection'})
+                for ref in entry.get('refs', []) if ref['kind'] in {'reflection', 'plugin_experience'}})
         # SQLite 事务已提交；跨库靠幂等回执恢复，不把网络或另一个库放进本库事务。
+        if changed and context.task_id in self.app._interaction._prepared:
+            self.app._interaction.settle_learning(context.task_id, set(changed), drop_summary=bool(forgotten))
+            self.app.core._task_dependencies[context.task_id] = tuple(ref for ref in
+                self.app.core._task_dependencies.get(context.task_id, ()) if ref[0] not in changed)
+            snapshot = self.app.journal.get_plan(context.task_id)
+            if snapshot and any(ref[0] in changed for ref in snapshot.memory_refs):
+                from deskpal.planner.models import Plan
+                self.app.journal.save_round(context.task_id, Plan(snapshot.plan.reply, action=snapshot.plan.action,
+                    organize_memory=snapshot.plan.organize_memory, memory_requests=snapshot.plan.memory_requests),
+                    tuple(self.app.tools.list_tools()), str(self.app.core.workspace_dir),
+                    tuple(ref for ref in snapshot.memory_refs if ref[0] not in changed))
         delivery_failed = False
         try:
             self.recover()
@@ -896,18 +1027,5 @@ class FeedbackLearning:
             role = getattr(self.app.core.companion_runtime, 'context')(context.conversation_id, context.conversation_epoch,
                 context.task_id, allow_restricted=self.app._interaction.allow_restricted)
             self.app._interaction.refresh_role(context.task_id, role['revision'])
-        if changed and context.task_id in self.app._interaction._prepared:
-            self.app._interaction.settle_learning(context.task_id, set(changed))
-            self.app.core._task_dependencies[context.task_id] = tuple(ref for ref in
-                self.app.core._task_dependencies.get(context.task_id, ()) if ref[0] not in changed)
-            from deskpal.planner.models import Plan
-            snapshot = self.app.journal.get_plan(context.task_id)
-            if snapshot is not None:
-                remaining = tuple(ref for ref in snapshot.memory_refs if ref[0] not in changed)
-                self.app.journal.save_round(context.task_id, Plan(snapshot.plan.reply, action=snapshot.plan.action,
-                    organize_memory=snapshot.plan.organize_memory),
-                    tuple(self.app.tools.list_tools()), str(self.app.core.workspace_dir), remaining)
-            for old_id in changed:
-                self.app._conversation_repository.invalidate_memory_summaries(old_id)
         if delivery_failed:
             raise OSError('Committed learning delivery awaits recovery')

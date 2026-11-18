@@ -6,6 +6,7 @@ import json
 import pytest
 
 from deskpal.llm.errors import LLMError
+from deskpal.config import MemoryConfig
 from deskpal.llm.providers import OpenAILLMProvider
 
 
@@ -15,7 +16,9 @@ def test_invalid_generation_budget_is_rejected(budget):
         OpenAILLMProvider(model="test", api_key="test-only", max_output_tokens=budget)
 
 
-def test_generation_budget_and_timeout_reach_transport():
+@pytest.mark.parametrize("timeout_seconds", [7, 120])
+@pytest.mark.parametrize("output_tokens", [256, MemoryConfig().evaluation_max_output_tokens])
+def test_generation_budget_and_timeout_reach_transport(timeout_seconds, output_tokens):
     captured = []
 
     def transport(request, *, timeout):
@@ -24,8 +27,8 @@ def test_generation_budget_and_timeout_reach_transport():
             "content": [{"type": "output_text", "text": "ok"}]}]}).encode())
 
     provider = OpenAILLMProvider(model="test", api_key="test-only", transport=transport,
-                                 timeout_seconds=7, max_output_tokens=256)
+                                 timeout_seconds=timeout_seconds, max_output_tokens=output_tokens)
     assert provider.generate("synthetic") == "ok"
-    assert captured[0][0]["max_output_tokens"] == 256
+    assert captured[0][0]["max_output_tokens"] == output_tokens
     assert captured[0][0]["store"] is False
-    assert captured[0][1] == 7
+    assert captured[0][1] == timeout_seconds

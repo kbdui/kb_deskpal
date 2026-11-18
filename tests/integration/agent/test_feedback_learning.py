@@ -26,7 +26,8 @@ def empty():
 def draft(content, quote, *, destination='facts', sources=None, **kwargs):
     return dict(content=content, quote=quote, destination=destination, claim_type='user_report',
         reason='来自实际交流，目前不推广到其他情境', uncertainty='仍需后续核对，适用于所述时间',
-        sources=sources or ['user'], review_after=(datetime.now(timezone.utc) + timedelta(days=1)).isoformat(), valid_from=None, valid_to=None, **kwargs)
+        sources=sources or ['user'], review_after=(datetime.now(timezone.utc) + timedelta(days=1)).isoformat(),
+        archive_after=(datetime.now(timezone.utc) + timedelta(days=7)).isoformat(), valid_from=None, valid_to=None, **kwargs)
 
 
 def review(payload, *, decision='adopt', content=None, quote=None, sources=None, destination=None):
@@ -35,7 +36,8 @@ def review(payload, *, decision='adopt', content=None, quote=None, sources=None,
     raw = payload['catalog'][key]['content']
     return dict(draft(content or item['content'], quote or raw, destination=destination or item['destination'],
         sources=sources or [key]), id=item['id'], revision=item['revision'], decision=decision, target=None, temporal=False,
-        review_after=(datetime.fromisoformat(payload['now']) + timedelta(days=1)).isoformat() if decision in ('retain', 'update') else None)
+        review_after=(datetime.fromisoformat(payload['now']) + timedelta(days=1)).isoformat() if decision in ('retain', 'update') else None,
+        archive_after=item.get('archive_after') or (datetime.fromisoformat(payload['now']) + timedelta(days=7)).isoformat())
 
 
 class Model:
@@ -744,7 +746,7 @@ def test_retained_candidate_reappears_when_due_then_can_archive(app_model):
     app.proactive.clock = lambda: now
     item = app.memory.repository.ingest(MemorySource('未决计划'), MemoryDraft('可能有计划', '未决计划'))
     model.fn = lambda data: dict(reviews=[dict(id=item.id, decision='retain', reason='暂时保留',
-        review_after=(now + timedelta(hours=2)).isoformat())])
+        review_after=(now + timedelta(hours=2)).isoformat(), archive_after=(now + timedelta(days=7)).isoformat())])
     app.learning.run_review('schedule-retain')
     assert app.learning.store.job('review:schedule-retain')['status'] == 'completed'
     assert not app.learning.review_candidates(now + timedelta(hours=1))

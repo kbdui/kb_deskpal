@@ -63,6 +63,7 @@ class ChatCoordinator(QObject):
     ready_changed = Signal()
     expand_requested = Signal(str, str)
     appearance_changed = Signal()
+    message_accepted = Signal(str, str, int)
 
     def __init__(self, bridge: Any, parent: QObject | None = None, *, preferences: Any = None) -> None:
         super().__init__(parent)
@@ -258,7 +259,7 @@ class ChatCoordinator(QObject):
             self.timeline_changed.emit(identity)
         self._read("body:" + item_id, "conversation_item", {"id": identity, "item_id": item_id, "offset": offset, "limit": 32768}, done)
 
-    def submit(self, identity: str) -> None:
+    def submit(self, identity: str, *, target_task: str = '', target_revision: int | None = None) -> None:
         if not self.available:
             self.notice.emit("后台尚未就绪，暂不能发送消息。")
             return
@@ -281,7 +282,15 @@ class ChatCoordinator(QObject):
         record: dict[str, Any] = {"command_id": command, "conversation_id": identity, "draft_revision": draft.revision, "request": draft.text, "at": monotonic(), "state": "正在发送"}
         self.submissions[command] = record
         record["parameters"] = {"request": draft.text, "conversation_id": identity, "expected_context_epoch": conversation.get("context_epoch", conversation.get("epoch")), "command_id": command}
-        self.channel.send("submit", record["parameters"], lambda data: self._submitted(command, data))
+        record['operation'] = 'task_answer' if target_task else 'submit'
+        if target_task:
+            if len(draft.text.encode('utf-8')) > 8192:
+                self.submissions.pop(command, None)
+                self.notice.emit('补充回答最多 8 KiB，请拆分后发送。'); return
+            record['parameters'] = dict(task_id=target_task, content=draft.text, command_id=command,
+                conversation_id=identity, expected_context_epoch=conversation.get('context_epoch', conversation.get('epoch')),
+                expected_revision=target_revision)
+        self.channel.send(record['operation'], record["parameters"], lambda data: self._submitted(command, data))
         self.timeline_changed.emit(identity)
 
     def retry_submission(self, command: str) -> None:
@@ -291,7 +300,7 @@ class ChatCoordinator(QObject):
             if conversation.get("archived_at") or conversation.get("archived"):
                 self.notice.emit("这段会话已归档，恢复后可以重试；原消息与命令已保留。"); return
             record["retryable"] = False; record["at"] = monotonic(); record["state"] = "使用原命令重试受理"
-            self.channel.send("submit", record["parameters"], lambda data: self._submitted(command, data))
+            self.channel.send(record.get('operation', 'submit'), record["parameters"], lambda data: self._submitted(command, data))
             self.timeline_changed.emit(record["conversation_id"])
         else:
             self.poll()
@@ -302,13 +311,24 @@ class ChatCoordinator(QObject):
             return
         identity = item["conversation_id"]
         if "_error" in data:
+            if data['_error'].get('code') in {'Blocked', 'Conflict', 'NotFound', 'Rejected'}:
+                self.submissions.pop(command, None)
+                self.load(identity); self.timeline_changed.emit(identity)
+                self.notice.emit(str(data['_error'].get('message') or '任务状态已变化，草稿已保留。'))
+                return
             item["state"] = "受理结果未确认，正在核查"; item["at"] = 0
             self.timeline_changed.emit(identity); return
         if data.get("accepted") or data.get("task_id"):
+            if data.get('accepted') is False:
+                self.submissions.pop(command, None)
+                self.notice.emit(str(data.get('reason') or '消息未受理，草稿已保留。'))
+                self.load(identity); self.timeline_changed.emit(identity); return
             draft = self.draft(identity)
             if draft.revision == item["draft_revision"] and draft.text == item["request"]:
                 self.edit_draft(identity, "")
             self.submissions.pop(command, None); self.load(identity)
+            self.message_accepted.emit(identity, str(item['parameters'].get('task_id', '')),
+                                       int(item['parameters'].get('expected_revision') or 0))
             self.notice.emit("")
             if data.get("task_id"):
                 self.review(str(data["task_id"]))

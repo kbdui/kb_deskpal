@@ -90,6 +90,8 @@ class MemoryDraft:
     reason: str = ""
     uncertainty: str = ""
     review_after: datetime | None = None
+    # 仅限制待确认状态的保留期限，采用后清除；到期归档而非遗忘。
+    archive_after: datetime | None = None
 
 
 @dataclass(frozen=True)

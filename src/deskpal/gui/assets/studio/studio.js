@@ -33,15 +33,17 @@ const statusNames = {
     Created:"排队中", Planning:"正在规划", Running:"进行中", Waiting:"待确认",
     NeedsReview:"待复核", AwaitingInput:"待补充", Paused:"已暂停", Completed:"已完成",
     Failed:"未完成", Cancelled:"已取消", Uncertain:"结果待核实", Succeeded:"已完成",
+    Started:"执行中", Prepared:"待执行", archived:"已归档", deleted:"已遗忘",
     due:"已到期", upcoming:"即将到来", pending:"等待中", scheduled:"已安排",
     accepted:"已采用", candidate:"待确认", disputed:"待确认"
 };
-const origins = {user_message:"来自聊天", tool_result:"来自执行结果", manual:"手动保存", conversation:"来自聊天"};
+const origins = {user_message:"来自聊天", tool_result:"来自执行结果", manual:"手动保存", conversation:"来自聊天", character_reflection:"角色自主思考", plugin_experience:"插件分享的角色经历"};
 const state = {
     mode:"main", page:"chat", setting:"role", planTab:"upcoming", memoryTab:"facts", pluginTab:"catalog",
     planIndex:0, memoryIndex:0, pluginIndex:0, group:"all", offsets:{plans:0,memory:0,tools:0},
     query:"", openGroups:new Set(), execution:false, task:"", menu:false, chat:{},
-    prefs:{}, images:{}, data:{}, draftCard:null, lifecycle:"Initializing"
+    prefs:{}, images:{}, data:{}, draftCard:null, lifecycle:"Initializing",
+    executionWidth:420, executionExpanded:false, executionDetails:new Map()
 };
 const $ = selector => root.querySelector(selector);
 const btn = (text, action, primary=false, symbol="") =>
@@ -78,6 +80,27 @@ let toastTimer;
 let searchTimer;
 let composing=false;
 let queuedRender=null;
+let executionDrag=null;
+const replyTargets = new Map();
+
+function replyTarget() {
+    const choices=state.chat.awaitingInput || [];
+    let selection=replyTargets.get(state.chat.id);
+    if(!selection){selection={target:null,handled:""};replyTargets.set(state.chat.id,selection);}
+    const available=choices.filter(row=>row.task_id+":"+row.revision!==selection.handled);
+    if(selection.target && !choices.some(row=>row.task_id===selection.target.task_id && row.revision===selection.target.revision)) selection.stale=true;
+    if(selection.target===null && available.length===1) selection.target={...available[0]};
+    return {selection,choices,available};
+}
+
+function selectReplyTarget(id) {
+    const {selection,choices}=replyTarget();
+    if(id && !choices.some(row=>row.task_id===id)){toast('当前任务状态尚未更新，请稍后重新选择。');return;}
+    selection.target=id?{...choices.find(row=>row.task_id===id)}:"";
+    selection.stale=false;
+    render();
+    $('[data-form="message"] textarea')?.focus();
+}
 
 function send(name, args={}) {
     if (port) port.send(name, JSON.stringify(args));
@@ -147,10 +170,15 @@ function sessionMenu() {
 
 function composer() {
     const chat = state.chat;
-    return '<div class="ds-compose-wrap"><form class="ds-compose" data-form="message"><textarea rows="2" maxlength="20000" name="text" aria-label="聊天消息" placeholder="'+
-        (chat.working?"正在处理，可补充你的要求。":"想到什么，就说给我听。")+'" '+(chat.available?"":"disabled")+'>'+esc(chat.draft)+
+    const {selection,choices,available}=replyTarget(), target=selection.target;
+    const targetBar=target?'<span class="ds-grow">'+esc(selection.stale?'原任务状态已变化，请重新选择发送目标。':'正在回答：'+(target.question || target.title))+'</span>':
+        '<span class="ds-grow">'+(selection.target===""?'新话题':available.length>1?'有多项待补充任务，请选择回答哪一项。':'')+'</span>';
+    const picker=choices.length&&(choices.length>1||!target||selection.stale)?'<select id="ds-reply-target" aria-label="选择补充任务">'+(target===null?'<option value="__choose" selected disabled>选择发送目标</option>':'')+'<option value=""'+(target===''?' selected':'')+'>新话题</option>'+choices.map(row=>option(row.task_id,row.title,row.task_id===target?.task_id)).join('')+'</select>':'';
+    const banner=(choices.length || target)?'<div class="ds-reply-target">'+targetBar+picker+'<button type="button" class="ds-link" data-action="new-topic">× 新话题</button></div>':'';
+    return '<div class="ds-compose-wrap">'+banner+'<form class="ds-compose" data-form="message"><textarea rows="2" maxlength="20000" name="text" aria-label="聊天消息" placeholder="'+
+        (target?'补充你的回答，继续原任务。':"想到什么，就说给我听。")+'" '+(chat.available?"":"disabled")+'>'+esc(chat.draft)+
         '</textarea><div class="ds-compose-meta"><span>Enter 发送 · Shift + Enter 换行</span><button class="ds-send" type="submit" aria-label="发送消息" '+
-        (chat.canSend?"":"disabled")+'>'+icon("arrow-up")+'</button></div></form></div>';
+        (chat.canSend&&!selection.stale&&!(target===null&&available.length>1)?"":"disabled")+'>'+icon("arrow-up")+'</button></div></form></div>';
 }
 
 const actions = {confirm:"确认并继续",reject_tools:"拒绝该操作并继续",cancel:"终止整个请求",task_pause:"暂停",task_continue:"继续",resume:"继续执行",
@@ -193,24 +221,75 @@ function taskCard(id) {
         (operationButtons || state.mode!=="pet"&&steps.length ? buttonRow(operationButtons+(state.mode==="pet"||!steps.length?"":'<button type="button" class="ds-btn" data-record="'+attr(id)+'">执行记录</button>')):"")+'</div>';
 }
 
+function executionFold(key,title,body,opened=false,classes="") {
+    const identity=state.task+":"+key;
+    const active=state.executionDetails.has(identity)?state.executionDetails.get(identity):opened;
+    return '<details class="'+attr(classes)+'" data-execution-key="'+attr(identity)+'"'+(active?' open':'')+'><summary>'+title+'</summary>'+body+'</details>';
+}
+
+function executionMemory(output,key) {
+    const rows=Array.isArray(output?.items)?output.items:[];
+    return '<p class="ds-execution-note">'+(rows.length?'找到 '+rows.length+' 条相关记忆。':'本次检索没有找到相关记忆。')+'</p>'+
+        rows.slice(0,20).map((row,index)=>{
+            let item=row;
+            if(typeof row?.content==="string" && row.content.length<=100000) {
+                try {const parsed=JSON.parse(row.content);if(parsed?.type==="memory_evidence" && typeof parsed.content==="string")item=parsed;} catch (_) {}
+            }
+            const text=typeof item?.content==="string"?item.content:"这条记录没有可展示的正文。";
+            const meta=[item?.status?statusText(item.status):"",origins[item?.source_origin],friendly(item?.source_time)].filter(Boolean).join(" · ");
+            const excerpt=text.length>140?text.slice(0,140)+"…":text;
+            return executionFold(key+":memory:"+(row?.id || index),'<span class="ds-memory-excerpt">'+esc(excerpt)+'</span>'+
+                (meta?'<span class="ds-execution-note">'+esc(meta)+'</span>':""),
+                '<div class="ds-execution-prose">'+esc(text)+'</div>'+
+                (item?.reason?'<p class="ds-execution-note">依据：'+esc(item.reason)+'</p>':"")+
+                (item?.uncertainty?'<p class="ds-execution-note">不确定之处：'+esc(item.uncertainty)+'</p>':""),false,'ds-execution-memory');
+        }).join("")+(rows.length>20?'<p class="ds-execution-note">其余内容见技术详情。</p>':"");
+}
+
+function executionOutput(name,result,key,summary) {
+    const output=result?.output;
+    if(output==null)return "";
+    if(name==="memory_search" && result.success===true && Array.isArray(output.items))return executionMemory(output,key);
+    if(name==="reflection_record" && result.success===true && typeof output?.content==="string")return '<h3>'+esc(output.topic || '思考成果')+'</h3>'+
+        '<div class="ds-execution-prose">'+esc(output.content)+'</div>'+
+        (output.reason?'<p class="ds-execution-note">依据与不确定性：'+esc(output.reason)+'</p>':"");
+    return '<div class="ds-execution-prose">'+esc(summary || (typeof output==="string"?output:'结果已记录，可在技术详情中查看。'))+'</div>';
+}
+
 function execution() {
     if (!state.execution || state.mode==="pet") return "";
     const r = state.chat.reviews?.[state.task]?.review;
     const records = state.chat.reviews?.[state.task]?.records || [];
-    const steps = records.map(({step,result,attempt}) => {
-        const name = step?.display_name || step?.tool_name || result?.tool_name || "执行记录";
-        const outcome = result ? (result.success ? "已完成" : "未完成") :
+    const reflected=records.some(row=>row.result?.success===true && row.result?.tool_name==="reflection_record");
+    const steps = records.map(({step,result,attempt,display_name,summary},index) => {
+        const tool=step?.tool_name || result?.tool_name || attempt?.tool_name || "";
+        const proposed=display_name || step?.display_name || ({memory_search:'检索记忆',reflection_record:'记录自主思考'})[tool];
+        const name=proposed && (proposed!==tool || !/^[a-z0-9_]+$/i.test(tool))?proposed:'工具执行';
+        const outcome = result?.outcome==="unknown"?'结果待核实':result ? (result.success ? "已完成" : "未完成") :
             attempt ? statusText(attempt.status) : "尚无执行结果";
-        return '<div class="ds-step"><h3>'+esc(name)+'</h3><p>'+esc(outcome)+'</p>'+
+        const key='step:'+(step?.call_id || result?.call_id || index);
+        const brief=tool==="memory_search" && result?.success===true && Array.isArray(result.output?.items)?
+            '找到 '+result.output.items.length+' 条相关记忆':tool==="reflection_record" && result?.success===true?'思考成果已保存':"";
+        return executionFold(key,'<span class="ds-step-heading"><strong>'+esc(name)+'</strong>'+tag(outcome,result?.success && result.outcome!=='unknown'?'success':'warn')+'</span>'+
+            (brief?'<span class="ds-execution-note">'+esc(brief)+'</span>':""),
             (result?.error?'<p class="ds-error">'+esc(result.error)+'</p>':"")+
-            (result?.output!=null?'<div class="ds-muted">'+structured(result.output)+'</div>':"")+'</div>';
+            executionOutput(tool,result,key,summary)+executionFold(key+':raw','原始参数与结果',
+                '<pre class="ds-execution-raw">'+esc(JSON.stringify({parameters:step?.arguments,result,attempt},null,2))+'</pre>'),
+            result?.success===false || tool==='reflection_record','ds-execution-step');
     }).join("");
-    return '<aside class="ds-execution" aria-label="执行记录"><div class="ds-row ds-between ds-execution-title"><h3>执行记录</h3>'+
-        '<button type="button" class="ds-icon" data-action="execution" aria-label="关闭执行记录">'+icon("x")+'</button></div>'+
-        (r ? tag(statusText(r.status),r.status==="Completed"?"success":"accent")+'<h3 style="margin:15px 0 20px">'+esc(r.title)+'</h3>'+
+    const title=String(r?.title || '当前任务');
+    return '<button type="button" class="ds-execution-scrim" data-action="execution" aria-label="关闭执行记录"></button>'+
+        '<aside class="ds-execution" aria-label="执行记录"><div id="ds-execution-resize" class="ds-execution-resize" data-execution-resize role="separator" tabindex="0" aria-label="调整执行记录宽度" aria-orientation="vertical" aria-valuemin="340" aria-valuemax="720" aria-valuenow="'+state.executionWidth+'"></div>'+
+        '<div class="ds-execution-header"><h3>执行记录</h3><div class="ds-row">'+
+        '<button type="button" class="ds-btn" data-action="execution-expand">'+(state.executionExpanded?'还原侧栏':'展开查看')+'</button>'+
+        '<button type="button" class="ds-icon" data-action="execution" aria-label="关闭执行记录">'+icon("x")+'</button></div></div><div class="ds-execution-body">'+
+        (r ? tag(r.status==='Failed' && reflected?'思考已保存 · 收尾未完成':statusText(r.status),r.status==="Completed"?"success":"accent")+
+            '<h3 class="ds-execution-task-title">'+esc(title.length>60?title.slice(0,60)+'…':title)+'</h3>'+
+            (title.length>60?executionFold('title','查看完整任务','<div class="ds-execution-prose">'+esc(title)+'</div>'):"")+
+            (r.status==='Failed' && reflected?'<p class="ds-execution-notice">思考成果已保存；后续处理未正常完成，不代表已整理进长期记忆。</p>':"")+
             (steps || empty("这项任务没有工具步骤。"))+
-            '<details><summary>技术详情</summary><div class="ds-technical">'+structured(r.task?.result)+'</div></details>' :
-            empty(state.task?"正在读取执行记录…":"这段会话还没有执行记录。"))+'</aside>';
+            executionFold('technical','任务技术详情','<pre class="ds-execution-raw">'+esc(JSON.stringify({error:r.task?.error,result:r.task?.result},null,2))+'</pre>') :
+            empty(state.task?"正在读取执行记录…":"这段会话还没有执行记录。"))+'</div></aside>';
 }
 
 function scheduleCard(event) {
@@ -299,6 +378,7 @@ function memoryPage() {
         esc(body(selected))+'</p>'+(selected.draft?.reason?'<blockquote>'+esc(selected.draft.reason)+'</blockquote>':"")+
         (selected.draft?.uncertainty?pair("尚待确认",selected.draft.uncertainty):"")+
         pair("来源",origins[selected.source?.origin] || "学习记录")+pair("最近更新",friendly(selected.recorded_at))+
+        (state.memoryTab==="buffer" && selected.draft?.archive_after?pair("最晚归档",longTime(selected.draft.archive_after)):"")+
         buttonRow(selected.source?.session_id || selected.draft?.quote || selected.source?.content ? btn("查看交流来源","memory-source",false,"messages-square"):"") :
         empty(result._error?"读取记忆失败。":state.loading==="memory"?"正在查找…":state.query?"没有匹配的记忆。":"这里还没有记忆。");
     return header("记忆","浏览事实、偏好和共同经历。需要补充、更正或遗忘时，在聊天中提出。")+
@@ -488,12 +568,15 @@ function settingsPage() {
 }
 
 function render(options={}) {
+    if(executionDrag && !options.reset){queuedRender=options;return;}
+    if(executionDrag){executionDrag=null;queuedRender=null;root.classList.remove('ds-execution-dragging');}
     if(composing && state.page==="chat" && !options.reset) {queuedRender=options;return;}
     const thread = $("#ds-thread");
+    const executionScroll=$(".ds-execution-body")?.scrollTop || 0;
     const view = {top:thread?.scrollTop || 0, height:thread?.scrollHeight || 0, scroll:main.scrollTop,
         stick:!thread || thread.scrollHeight-thread.clientHeight-thread.scrollTop<96};
     const active = document.activeElement;
-    const editable = active && main.contains(active) && active.matches("input, textarea");
+    const editable = active && main.contains(active) && active.matches("input, textarea, [data-execution-resize]");
     const focus = editable ? {id:active.id,name:active.name,key:active.dataset.preference,start:active.selectionStart,end:active.selectionEnd,
         scrollTop:active.scrollTop} : null;
     main.classList.toggle("ds-chat-page",state.page==="chat" && ["main","pet"].includes(state.mode));
@@ -527,7 +610,66 @@ function render(options={}) {
         if (options.locate) [...updated.querySelectorAll("[data-task-card]")].find(row=>row.dataset.taskCard===options.locate)?.scrollIntoView({block:"nearest"});
     }
     resizeComposer($( '[data-form="message"] textarea' ));
+    const executionBody=$(".ds-execution-body");
+    if(executionBody && !options.reset && !options.executionReset)executionBody.scrollTop=executionScroll;
+    applyExecutionLayout();
 }
+
+function executionLimits() {
+    const available=$(".ds-chat-layout")?.clientWidth || main.clientWidth;
+    const drawer=available<820;
+    return {available,drawer,max:drawer?720:Math.max(340,Math.min(720,available-480))};
+}
+
+function applyExecutionLayout() {
+    const {available,drawer,max}=executionLimits();
+    root.dataset.executionOverlay=String(drawer);
+    root.dataset.executionExpanded=String(state.executionExpanded);
+    const width=drawer?Math.min(available,Math.max(420,state.executionWidth)):Math.min(state.executionWidth,max);
+    root.style.setProperty('--ds-execution-width',Math.max(0,Math.round(width))+'px');
+    const handle=$('[data-execution-resize]');
+    if(handle){handle.setAttribute('aria-valuenow',String(Math.min(state.executionWidth,max)));handle.setAttribute('aria-valuemax',String(max));}
+}
+
+function saveExecutionWidth(value) {
+    const width=Math.round(Math.max(340,Math.min(720,value)));
+    state.executionWidth=width;
+    state.prefs.execution_width=width;
+    applyExecutionLayout();
+    send('preference',{key:'execution_width',value:width});
+}
+
+root.addEventListener('pointerdown',event=>{
+    const handle=event.target.closest('[data-execution-resize]');
+    if(!handle || event.button!==0 || executionLimits().drawer || state.executionExpanded)return;
+    event.preventDefault();
+    handle.focus({preventScroll:true});
+    executionDrag={pointer:event.pointerId,start:event.clientX,width:$('.ds-execution').getBoundingClientRect().width,original:state.executionWidth};
+    handle.setPointerCapture(event.pointerId);
+    root.classList.add('ds-execution-dragging');
+});
+root.addEventListener('pointermove',event=>{
+    if(!executionDrag || event.pointerId!==executionDrag.pointer)return;
+    const {max}=executionLimits();
+    state.executionWidth=Math.round(Math.max(340,Math.min(max,executionDrag.width+executionDrag.start-event.clientX)));
+    applyExecutionLayout();
+});
+function endExecutionDrag(event) {
+    if(!executionDrag || event.pointerId!==executionDrag.pointer)return;
+    const value=event.type==='pointercancel'?executionDrag.original:state.executionWidth;
+    executionDrag=null;
+    root.classList.remove('ds-execution-dragging');
+    if(event.type==='pointercancel'){state.executionWidth=value;applyExecutionLayout();}
+    else saveExecutionWidth(value);
+    if(queuedRender){const pending=queuedRender;queuedRender=null;render(pending);}
+}
+root.addEventListener('pointerup',endExecutionDrag);
+root.addEventListener('pointercancel',endExecutionDrag);
+root.addEventListener('lostpointercapture',event=>{
+    if(executionDrag && event.pointerId===executionDrag.pointer)endExecutionDrag({pointerId:event.pointerId,type:'pointercancel'});
+});
+root.addEventListener('dblclick',event=>{if(event.target.closest('[data-execution-resize]'))saveExecutionWidth(420);});
+new ResizeObserver(applyExecutionLayout).observe(main);
 
 function resizeComposer(input) {
     if(!input) return;
@@ -572,7 +714,7 @@ function navigate(page,setting) {
     state.page=page;
     if (settings[setting]) state.setting=setting;
     state.menu=false;
-    if (page!=="chat") state.execution=false;
+    if (page!=="chat") {state.execution=false;state.executionExpanded=false;}
     closeModal();
     send("route",{page,setting:state.setting});
     render({reset:true});
@@ -592,6 +734,7 @@ function providerSelected() {
     return rows[state.pluginIndex] || rows[0];
 }
 function pluginModal(data) {
+    if(data.content?.kind==="qq_chat") return qqPluginModal(data);
     modal(data.title || providerSelected()?.page_title || "插件页面",'<div class="ds-section-label">最近到期记录</div>'+
         (data.switches || []).map(control=>'<label class="ds-setting-row ds-plugin-filter"><span>'+esc(control.label)+
             '</span><input type="checkbox" class="ds-switch" data-option="'+attr(control.key)+'" data-plugin="'+attr(data.plugin_id)+
@@ -600,8 +743,59 @@ function pluginModal(data) {
         empty("还没有符合条件的记录。"))+'</div>');
 }
 
+function qqPluginModal(data) {
+    const page=data.content, c=page.config;
+    state.qqRevision=page.revision; state.qqPaused=c.paused;
+    const check=(name,label,value)=>'<label class="ds-setting-row"><span>'+esc(label)+'</span><input class="ds-switch" type="checkbox" name="'+name+'" '+(value?'checked':'')+'></label>';
+    const fields='<input type="hidden" name="expected_revision" value="'+attr(page.revision)+'">'+
+        check("enabled","启用 QQ 私聊与群聊",c.enabled)+
+        check("allow_proactive","允许角色主动跟进已授权会话（不添加好友或群）",c.allow_proactive)+
+        check('direct_call_cooldown','同群被 @ / 引用回复时，至少间隔10秒再启动新任务',c.direct_call_cooldown !== false)+
+        field("endpoint","NapCat HTTP API",c.endpoint,"url",'required')+
+        field("account_id","绑定 QQ 号码（首次可留空，连接后显示实际账号）",c.account_id)+
+        field("token","OneBot Token（留空保留）","","password",'autocomplete="new-password"')+
+        field("event_port","本机事件回调端口（1024–65535）",c.event_port,"text",'inputmode="numeric" pattern="[0-9]{4,5}" maxlength="5" required')+
+        field("event_secret","事件签名密钥（填入 NapCat HTTP 客户端 Token；至少16字符，留空保留）","","password",'autocomplete="new-password"')+
+        field("private_ids","允许私聊的 QQ 号，逗号分隔；* 明确允许全部来信",c.private_ids.join(","))+
+        field("group_ids","允许群聊的群号，逗号分隔；* 明确允许全部群",c.group_ids.join(","))+
+        '<label class="ds-field">群聊何时交给模型<select name="group_mode" class="ds-input"><option value="mention" '+(c.group_mode==="mention"?'selected':'')+'>被 @ 或引用回复角色时</option><option value="all" '+(c.group_mode==="all"?'selected':'')+'>全部文字消息（会增加模型调用）</option></select></label>'+
+        '<label class="ds-field">普通群聊思考间隔<select name="group_interval_seconds" class="ds-input">'+[[30,'30 秒'],[60,'1 分钟'],[180,'3 分钟']].map(([seconds,label])=>option(seconds,label,seconds===(c.group_interval_seconds || 60))).join('')+'</select></label>'+
+        '<p class="ds-muted">普通消息先合并10秒，再遵守群聊间隔；被 @ 或引用回复先合并2秒，可突破普通冷却。关闭直接呼叫限频后仍保留2秒合并。无新消息不调用模型，是否发言由模型决定。间隔限制任务启动，不限制任务内的工具和整理调用。</p>';
+    const status=!c.enabled?'未启用':!page.connected?'未连接':c.paused?'已暂停':'事件接收已开启（账号已核对）';
+    const controls=buttonRow(btn(c.paused?'恢复 QQ':'暂停 QQ','qq-toggle')+btn('刷新记录','qq-refresh'));
+    const records=(page.records || []).map(item=>row((item.direction==='out'?'已发送 · ':'收到 · ')+item.speaker_name+
+        (String(item.speaker_id || '').startsWith('qq:anonymous:')?'':'（'+String(item.speaker_id || '').replace(/^qq:/,'')+'）'),
+        item.content,'<span class="ds-muted">'+esc(item.thread)+' · '+esc(friendly(item.created_at))+'</span>')).join('');
+    const blocked=(page.blocked || []).map(item=>row(item.state==='unknown'?'发送结果未知，已停止重发':'发送未完成',
+        item.content+' · '+item.error,'')).join('');
+    const work=(page.work || []).map(item=>row(({queued:'排队中',running:'处理中',completed:'已处理',blocked:'未继续执行'})[item.state] || '状态待核对',
+        item.error || '', '<span class="ds-muted">'+esc(friendly(item.created_at))+'</span>')).join('');
+    const memories=(page.memories || []).map(item=>row(({fact:'人物信息',impression:'角色印象',episode:'共同经历',agreement:'相处约定'})[item.kind] || '社交记忆',
+        item.content+' · '+(item.status==='pending'?'待确认':'已采用'),
+        '<span class="ds-muted">'+esc(item.uncertainty || item.reason || '')+'</span>')).join('');
+    const experiences=(page.experiences || []).map(item=>row(item.state==='received'?'角色经历已交给主体':'角色经历等待交给主体',
+        item.state==='received'?'接收成功；是否形成长期记忆由主体后续学习决定。':item.error || '材料已保存，后台将继续投递。','')).join('');
+    const followups=(page.followups || []).map(item=>row(item.mode==='chat'?'后续聊天':'内部复查',item.goal,
+        '<span class="ds-muted">'+esc(friendly(item.due_at))+' · '+(item.state==='running'?'处理中':'等待检查')+'</span>')).join('');
+    modal('QQ 聊天', '<p><strong>'+esc(status)+'</strong> '+esc(c.nickname || '')+' '+esc(c.account_id || '')+'</p>'+
+        (data.command_error || page.error?'<p class="ds-notice">'+esc(data.command_error || page.error)+'</p>':'')+
+        controls+'<details '+(!c.enabled || !page.connected?'open':'')+'><summary>连接与授权范围</summary>'+form('qq-config',fields,'保存并应用')+'</details>'+
+        (!page.model_ready?'<p class="ds-notice">当前真实模型尚未就绪，来信会保留，但暂不触发模型处理。请先在设置中配置模型。</p>':'')+
+        '<div class="ds-section-label">NapCat 配置说明</div><p class="ds-muted">'+esc(page.instructions)+'</p>'+row('事件上报 URL',page.callback,'')+
+        '<p class="ds-muted">角色可以读取主体相关记忆和人格，是否适合对当前联系人透露由模型判断。人物约定保留在插件，重要经历以角色视角交给主体学习。主动聊天需要上方单独许可，不处理好友/入群申请。凭据不进入聊天备份。</p>'+
+        (memories?'<div class="ds-section-label">人物认知与相处约定</div><div class="ds-list">'+memories+'</div>':'')+
+        (experiences?'<div class="ds-section-label">分享给主体的角色经历</div><div class="ds-list">'+experiences+'</div>':'')+
+        (followups?'<div class="ds-section-label">后续跟进</div><div class="ds-list">'+followups+'</div>':'')+
+        (blocked?'<div class="ds-section-label">需要核对的发送</div><div class="ds-list">'+blocked+'</div>':'')+
+        (work?'<div class="ds-section-label">最近处理</div><div class="ds-list">'+work+'</div>':'')+
+        '<div class="ds-section-label">最近文字记录</div><div class="ds-list">'+(records || empty('还没有已授权会话的记录。'))+'</div>');
+}
+
 function dispatchAction(action) {
     switch(action) {
+    case 'new-topic': selectReplyTarget('');return;
+    case "qq-refresh": send('plugin-page',{id:'qq'}); return;
+    case "qq-toggle": send('plugin-command',{id:'qq',operation:'pause',parameters:{paused:!state.qqPaused,expected_revision:state.qqRevision}}); return;
     case "mobile-pair": send("mobile",{operation:"mobile_pair"}); return;
     case "mobile-disable": send("mobile",{operation:"mobile_disable"}); return;
     case "close-modal": closeModal(); return;
@@ -626,8 +820,9 @@ function dispatchAction(action) {
     case "execution":
         state.execution=!state.execution;
         if (state.execution) send("records");
-        else { state.task=""; send("close-records"); }
+        else { executionDrag=null;queuedRender=null;root.classList.remove('ds-execution-dragging');state.task="";state.executionExpanded=false;state.executionDetails.clear();send("close-records"); }
         render(); return;
+    case "execution-expand": state.executionExpanded=!state.executionExpanded;render();return;
     case "plan-chat": {
         const row=planSelected();
         if(row) send("plan-chat",{id:row.id, tab:state.planTab});
@@ -636,10 +831,12 @@ function dispatchAction(action) {
     case "memory-source": {
         const item=memorySelected();
         if(item) modal("交流来源",'<div class="ds-muted">'+esc(friendly(item.source?.created_at || item.recorded_at))+'</div>'+
-            '<div style="margin-top:22px">'+message("user",item.draft?.quote || item.source?.content || "没有保留原文摘录。")+'</div>'+
-            (item.source?.session_id?buttonRow(btn("前往会话","memory-chat",true)):""));
+            '<div style="margin-top:22px">'+message(item.source?.speaker_kind==='character'?'assistant':'user',item.draft?.quote || item.source?.content || "没有保留原文摘录。")+'</div>'+
+            (item.source?.origin==='plugin_experience' && item.source?.channel==='qq'?'<p class="ds-muted">这是角色在 QQ 中的经历概括，不是桌面聊天原文。</p>'+buttonRow(btn("查看 QQ 插件","memory-qq",true)):
+             item.source?.session_id && !String(item.source.session_id).startsWith('plugin:')?buttonRow(btn("前往会话","memory-chat",true)):""));
         return;
     }
+    case "memory-qq": send("plugin-page",{id:'qq'}); return;
     case "memory-chat": {
         const item=memorySelected();
         if(item) send("memory-chat",{id:item.id});
@@ -715,6 +912,7 @@ root.addEventListener("click",event=>{
     if(d.image) return send("asset-pick",{key:d.image});
     if(d.resetImage) return send("asset-reset",{key:d.resetImage});
     if(d.taskAction) {
+        if(d.taskAction==='task_answer') {selectReplyTarget(d.task);return;}
         if(["review_uncertain","task_answer","task_append_requirement"].includes(d.taskAction)) {
             modal(actions[d.taskAction],form("task-input",'<input name="id" type="hidden" value="'+attr(d.task)+'">'+
                 '<input name="action" type="hidden" value="'+attr(d.taskAction)+'">'+
@@ -736,12 +934,24 @@ root.addEventListener("submit",event=>{
     event.preventDefault();
     const data=Object.fromEntries(new FormData(form));
     const name=form.dataset.form;
+    if(name==='qq-config') {
+        data.enabled=!!form.querySelector('[name="enabled"]')?.checked;
+        data.allow_proactive=!!form.querySelector('[name="allow_proactive"]')?.checked;
+        data.direct_call_cooldown=!!form.querySelector('[name="direct_call_cooldown"]')?.checked;
+        data.group_interval_seconds=Number(data.group_interval_seconds);
+        data.expected_revision=Number(data.expected_revision); data.event_port=Number(data.event_port);
+        send('plugin-command',{id:'qq',operation:'configure',parameters:data});
+        form.querySelector('[name="token"]').value=''; form.querySelector('[name="event_secret"]').value='';
+        return;
+    }
     if(name==="mobile-config") {
         send("mobile",{operation:"mobile_enable",parameters:{bind:data.bind,port:Number(data.port),public_origin:data.public_origin.trim()}});
         return;
     }
     if(name==="message") {
-        if(data.text?.trim()) send("submit",{text:data.text,id:state.chat.id});
+        const {selection,available}=replyTarget();
+        if(selection.stale || selection.target===null&&available.length>1) {toast('请先选择要回答的任务，或选择新话题。');return;}
+        if(data.text?.trim()) send("submit",{text:data.text,id:state.chat.id,target:selection.target?.task_id || '',revision:selection.target?.revision});
     } else {
         if(name==="task-input") data.revision=Number(data.revision);
         send(name,data);
@@ -749,6 +959,10 @@ root.addEventListener("submit",event=>{
         if(name==="save-connection") form.querySelector("[name=secret]").value="";
     }
 });
+root.addEventListener('wheel',event=>{
+    const control=event.target;
+    if(control instanceof HTMLSelectElement && control.closest('[data-form="qq-config"]')) control.blur();
+},{passive:true});
 root.addEventListener("compositionstart",event=>{
     if(event.target.matches('[data-form="message"] textarea')) composing=true;
 });
@@ -757,9 +971,18 @@ root.addEventListener("compositionend",()=>{
     if(queuedRender){const pending=queuedRender;queuedRender=null;requestAnimationFrame(()=>render(pending));}
 });
 root.addEventListener("keydown",event=>{
+    if(event.target.matches('[data-execution-resize]') && ['ArrowLeft','ArrowRight','Home','End'].includes(event.key)) {
+        event.preventDefault();
+        const {max,drawer}=executionLimits();
+        const current=$('.ds-execution')?.getBoundingClientRect().width || state.executionWidth;
+        if(!drawer && !state.executionExpanded)saveExecutionWidth(event.key==='Home'?340:event.key==='End'?max:
+            Math.min(max,current+(event.key==='ArrowLeft'?20:-20)));
+        return;
+    }
     if(event.key==="Escape") {
         if(!overlay.hidden) closeModal();
         else if(state.menu) {state.menu=false; $(".ds-menu").hidden=true;}
+        else if(state.execution){dispatchAction('execution');}
         else if(state.mode==="pet") send("hide");
     }
     if(event.target.matches('[data-form="message"] textarea')&&event.key==="Enter"&&!event.shiftKey&&!event.isComposing&&event.keyCode!==229) {
@@ -786,6 +1009,7 @@ root.addEventListener("input",event=>{
 });
 root.addEventListener("change",event=>{
     const el=event.target;
+    if(el.id==='ds-reply-target'){selectReplyTarget(el.value);return;}
     if(el.id==="ds-pet-slot") {
         state.petSlot=el.value;
         send("pet-slot",{key:el.value});
@@ -806,6 +1030,9 @@ root.addEventListener("change",event=>{
     }
 });
 root.addEventListener("toggle",event=>{
+    if(event.target.isConnected && event.target.dataset.executionKey) {
+        state.executionDetails.set(event.target.dataset.executionKey,event.target.open);
+    }
     if(event.target.isConnected && event.target.dataset.group) {
         if(event.target.open) state.openGroups.add(event.target.dataset.group);
         else state.openGroups.delete(event.target.dataset.group);
@@ -819,16 +1046,19 @@ function receive(kind,data) {
         state.lifecycle=data.lifecycle || "Ready";
         if (data.mode==="maintenance" || data.mode==="profiles") {state.page="settings"; state.setting=data.mode==="maintenance"?"model":"data";}
         state.prefs=data.prefs || {};
+        state.executionWidth=Number.isInteger(state.prefs.execution_width)?Math.max(340,Math.min(720,state.prefs.execution_width)):420;
         render({reset:true}); readPage(); return;
     case "route": navigate(data.page,data.setting); return;
     case "state": state.lifecycle=data.state; state.status=data.text; render(); return;
     case "clear":
+        replyTargets.clear();
         state.chat={};state.images={};state.data={};state.query="";state.draftCard=null;
+        state.execution=false;state.task="";state.executionExpanded=false;state.executionDetails.clear();
         closeModal();render({reset:true});return;
     case "chat": {
         const changed=state.chat.id!==data.id;
         state.chat=data;
-        if(changed) {state.execution=false;state.task="";}
+        if(changed) {state.execution=false;state.task="";state.executionExpanded=false;state.executionDetails.clear();}
         if(data.locate) state.menu=false;
         render({reset:changed,prepend:data.prepend,locate:data.locate});
         return;
@@ -840,6 +1070,14 @@ function receive(kind,data) {
             if(input && !composing && input.value!==data.text) {input.value=data.text;resizeComposer(input);}
         }
         return;
+    case 'message-accepted': {
+        const selection=replyTargets.get(data.id);
+        if(selection && data.task && selection.target?.task_id===data.task && selection.target.revision===data.revision) {
+            selection.handled=data.task+':'+data.revision;selection.target=null;selection.stale=false;
+        }
+        if(state.chat.id===data.id) render();
+        return;
+    }
     case "data":
         if(data.request && revisions[data.key]!==data.request) return;
         if(data.key==="mobile"&&data.mobileOperation==="mobile_enable"&&!data.value?._error)state.mobileDraft=null;
@@ -849,20 +1087,29 @@ function receive(kind,data) {
         if(state.page==="settings" || state.page==="plans"&&data.key==="plans" ||
             state.page==="memory"&&data.key==="memory" || state.page==="plugins"&&["plugins","tools"].includes(data.key)) render();
         return;
-    case "prefs": state.prefs=data; render(); return;
+    case "prefs":
+        state.prefs=data;
+        if(!executionDrag && Number.isInteger(data.execution_width))state.executionWidth=Math.max(340,Math.min(720,data.execution_width));
+        render();return;
     case "image": state.images[data.key]=data.url; render(); return;
     case "asset-preview":
         modal("预览图片",'<img class="ds-preview-image" src="'+attr(safeImage(data.url))+'" alt="图片预览">'+
             buttonRow(btn("取消预览","asset-discard")+btn("保存应用","asset-save",true)));
         return;
-    case "record": state.task=data.id; render(); return;
+    case "record": {
+        const changed=state.task!==data.id;
+        if(changed)state.executionDetails.clear();
+        state.task=data.id;render({executionReset:changed});return;
+    }
     case "schedule-detail":
         modal(data.title || "安排",pair("时间",friendly(data.start_at || data.due_at))+
             (data.end_at?pair("结束时间",friendly(data.end_at)):"")+
             (data.reminder_at?pair("提醒时间",friendly(data.reminder_at)):""));
         return;
     case "plugin":
-        if(data._error) toast("插件页面读取失败。"); else pluginModal(data);
+        if(data._error) toast("插件页面读取失败。");
+        else if(data.command_error) toast(data.command_error);
+        else pluginModal(data);
         return;
     case "tool":
         modal(data.display_name || data.name || "工具详情",'<p>'+esc(data.summary || data.description || "")+'</p>'+

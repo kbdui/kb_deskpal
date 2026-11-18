@@ -32,6 +32,10 @@ def install(model, *, understanding=None, planner=None):
         else:
             seen['planning'].append(messages)
             response = planner(messages) if planner else original(messages, tools=tools)
+            if not response.tool_calls:
+                envelope = json.loads(response.content)
+                envelope.setdefault('organize_memory', envelope.get('action') != 'clarify')
+                response = LLMResponse(json.dumps(envelope, ensure_ascii=False))
             if '[FIRST_DECISION]' in system:
                 items = references(messages)
                 data = dict(history=[item for item in items if item['kind'] in {'user_reference', 'assistant_reference'}],
@@ -187,7 +191,8 @@ def test_clarifications_and_final_answer_are_each_composed_once_without_early_le
         assert result.response == '请告诉我缺少的那一项。'
         assert seen['feedback'] == []
         assert seen['expression'][-1]['response_intent'] == 'clarify'
-        assert seen['expression'][-1]['learning_receipt']['status'] == 'not_run'
+        assert seen['expression'][-1]['learning_receipt']['status'] == 'skipped'
+        assert seen['expression'][-1]['learning_receipt']['reason'] == 'model_deferred'
         app.answer_task(task.id, f'第{index + 1}次补充', f'answer-{index}')
     result = app.wait(task.id, 10)
     assert result.status == TaskStatus.COMPLETED and result.response == '总算解决了。'

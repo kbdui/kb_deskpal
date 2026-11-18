@@ -370,6 +370,9 @@ class ProfileService:
     def _delete(registry: ProfileRegistry, row: Mapping[str, Any], settings: AppConfig) -> None:
         directory = registry.directory(row)
         _write(directory / ".profile-deleting", {"version": 1})
+        if (directory / 'plugin_qq.sqlite3').is_file():
+            from deskpal.plugins.qq.secrets import QqSecrets
+            QqSecrets(directory).erase()
         # The marker survives a partial deletion and blocks backend startup.
         ProfileService._delete_paths(directory, settings, [path for path in directory.iterdir()
                                      if path.name not in {".instance.lock", ".profile-deleting"}])

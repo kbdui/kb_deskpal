@@ -11,6 +11,12 @@ from deskpal.workflow.store import canonical
 
 # Presentation only. Presence comes exclusively from list_tools(), not this map.
 _DISPLAY = {
+    'qq_send': ('回复 QQ 会话', 'qq', '仅向当前预先授权的 QQ 会话发送文字，支持分条回执'),
+    'qq_history': ('查看 QQ 会话记录', 'qq', '只读取当前 QQ 私聊或群聊的实际记录'),
+    'qq_memory_search': ('查询 QQ 人物与约定', 'qq', '读取插件内有来源的长期人物认知和相处约定'),
+    'qq_host_memory_search': ('查询角色主体记忆', 'qq', '按相关性读取同一角色的私人记忆，由模型判断当前场景的披露'),
+    'qq_schedule_followup': ('安排 QQ 后续跟进', 'qq', '登记当前会话的内部复查或预先授权的主动聊天'),
+    'qq_cancel_followup': ('取消 QQ 后续跟进', 'qq', '取消当前会话的后续工作，保留已发送的消息'),
     'task_list': ('查看任务', 'agent', '查找实际任务与暂停状态'),
     'task_pause': ('暂停任务', 'agent', '在下一次模型判断前暂停指定任务'),
     'task_continue': ('继续任务', 'agent', '继续同一任务，保留已完成操作'),

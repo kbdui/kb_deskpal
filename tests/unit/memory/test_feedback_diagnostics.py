@@ -64,6 +64,30 @@ def test_correction_prompt_contains_safe_exact_field_difference_and_rule():
     assert 'buffer_id' in messages[0].content and '同时输出 habits' in messages[0].content
 
 
+def test_review_schedule_prompt_uses_current_input_clock_without_assigning_a_default_deadline():
+    messages = []
+    data = payload() | {'now': '2031-06-09T12:00:00+00:00'}
+    provider = SimpleNamespace(chat=lambda sent, **kwargs: (messages.extend(sent), LLMResponse('{}'))[1])
+    result = evaluate(provider, data, correction=True, correction_code='time_invalid',
+        correction_field='memories[0].review_after', correction_diagnostics={'processing_rule': 'review_schedule'})
+    assert json.loads(messages[-1].content)['now'] == data['now']
+    system = messages[0].content
+    assert '不以历史消息日期' in system and '按本次 now 重新选择未来' in system
+    assert 'review_after不能用null代替' in system.replace(' ', '')
+    assert result['memories'] == []  # 主机不因提示需要复查而自造记忆或默认日期。
+
+
+def test_prompt_distinguishes_full_memory_update_from_role_habit_changes():
+    messages = []
+    provider = SimpleNamespace(chat=lambda sent, **kwargs: (messages.extend(sent), LLMResponse('{}'))[1])
+    evaluate(provider, payload(), correction=True, correction_code='proposal_invalid',
+        correction_field='feedback', correction_diagnostics={'processing_rule': 'review_target'})
+    system = messages[0].content
+    assert 'id,decision,reason,content,destination,claim_type,quote,sources' in system
+    assert 'role 中的习惯编号只用于 habits.id' in system
+    assert 'explicit=true' in system and '不为同一明确要求额外新建 habit 记忆缓冲' in system
+
+
 def test_minimal_retention_remains_valid_and_input_only_fields_are_reported():
     row = {'id': 'synthetic', 'decision': 'retain', 'reason': '仍有意义'}
     assert evaluate_result({'reviews': [row]})['reviews'][0]['content'] == '合成理解'
@@ -107,7 +131,8 @@ def test_new_pending_requires_future_aware_review_time(deadline):
 @pytest.mark.parametrize('decision', ['retain', 'update'])
 def test_pending_review_must_renew_deadline_instead_of_inheriting_old_date(decision):
     data = payload() | {'now': '2026-11-12T12:00:00+00:00'}
-    data['understandings'][0].update(status='candidate', review_after='2026-11-11T12:00:00+00:00')
+    data['understandings'][0].update(status='candidate', review_after='2026-11-11T12:00:00+00:00',
+                                   archive_after='2026-11-20T12:00:00+00:00')
     row = dict(id='synthetic', decision=decision, reason='仍不确定', content='合成理解',
         destination='facts', claim_type='user_report', quote='合成原话', sources=['memory0'])
     provider = SimpleNamespace(chat=lambda *a, **k: LLMResponse(json.dumps({'reviews': [row]})))
@@ -130,6 +155,7 @@ def test_terminal_review_drops_old_deadline_without_requesting_a_new_one(decisio
 def test_merge_into_pending_memory_must_also_keep_a_future_review():
     data = payload() | {'now': '2026-11-12T12:00:00+00:00'}
     data['understandings'].append(dict(data['understandings'][0], id='pending-target', status='candidate'))
+    data['understandings'][-1]['archive_after'] = '2026-11-20T12:00:00+00:00'
     row = dict(id='synthetic', decision='merge', target='pending-target', reason='合并理解',
         content='合成理解', destination='facts', claim_type='user_report', quote='合成原话', sources=['memory0'])
     provider = SimpleNamespace(chat=lambda *a, **k: LLMResponse(json.dumps({'reviews': [row]})))

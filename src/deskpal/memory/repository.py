@@ -24,7 +24,7 @@ from .models import MemoryKind
 
 _VERSION = 4
 _ORIGINS = frozenset(("user_message", "user_confirmation", "tool_result", "imported_document",
-                      "assistant_output", "character_reflection", "legacy"))
+                      "assistant_output", "character_reflection", "plugin_experience", "legacy"))
 
 
 def _text(value: object, name: str, maximum: int, *, empty: bool = False) -> str:
@@ -115,7 +115,8 @@ def _draft_data(draft: MemoryDraft) -> dict[str, object]:
             "valid_from": _stamp(draft.valid_from), "valid_to": _stamp(draft.valid_to),
             "expires_at": _stamp(draft.expires_at), "pinned": draft.pinned,
             "half_life_days": draft.half_life_days, "destination": draft.destination,
-            "reason": draft.reason, "uncertainty": draft.uncertainty, "review_after": _stamp(draft.review_after)}
+            "reason": draft.reason, "uncertainty": draft.uncertainty, "review_after": _stamp(draft.review_after),
+            **({"archive_after": _stamp(draft.archive_after)} if draft.archive_after is not None else {})}
 
 
 def _source_from(data: dict[str, object]) -> MemorySource:
@@ -142,6 +143,7 @@ def _draft_from(data: dict[str, object]) -> MemoryDraft:
         half_life_days=_finite(data["half_life_days"], "Stored half life", positive=True),
         destination=str(data.get("destination", "facts")), reason=str(data.get("reason", "")),
         uncertainty=str(data.get("uncertainty", "")), review_after=_load_time(data.get("review_after")),
+        archive_after=_load_time(data.get("archive_after")),
     )
 
 
@@ -183,9 +185,9 @@ def _normalize_draft(source: MemorySource, draft: MemoryDraft, now: datetime,
         raise MemoryError("Memory pinned must be a boolean")
     permitted = {
         ClaimType.USER_REPORT: ("user_message", "user_confirmation"),
-        ClaimType.OBSERVED_EVENT: ("tool_result",),
-        ClaimType.EXTERNAL_CLAIM: ("imported_document", "user_message", "user_confirmation"),
-        ClaimType.HYPOTHESIS: ("assistant_output", "character_reflection", "user_message", "user_confirmation", "tool_result", "imported_document"),
+        ClaimType.OBSERVED_EVENT: ("tool_result", "plugin_experience"),
+        ClaimType.EXTERNAL_CLAIM: ("imported_document", "user_message", "user_confirmation", "plugin_experience"),
+        ClaimType.HYPOTHESIS: ("assistant_output", "character_reflection", "user_message", "user_confirmation", "tool_result", "imported_document", "plugin_experience"),
         ClaimType.LEGACY: ("legacy",),
     }
     if source.origin not in permitted[draft.claim_type]:
@@ -198,11 +200,15 @@ def _normalize_draft(source: MemorySource, draft: MemoryDraft, now: datetime,
     character_idea = (source.speaker_kind == 'character' and bool(source.speaker_id)
                       and draft.subject == source.speaker_id and draft.claim_type == ClaimType.HYPOTHESIS)
     if accepted and (draft.claim_type == ClaimType.LEGACY
-                     or (source.origin in ("assistant_output", "character_reflection") and not character_idea)):
+                     or (source.origin in ("assistant_output", "character_reflection", "plugin_experience")
+                         and draft.claim_type == ClaimType.HYPOTHESIS and not character_idea)):
         raise MemoryError("This source cannot be automatically accepted")
     begin = _optional_utc(draft.valid_from, "valid_from")
     end = _optional_utc(draft.valid_to, "valid_to")
     expiry = _optional_utc(draft.expires_at, "expires_at")
+    archive_after = None if accepted else _optional_utc(draft.archive_after, 'archive_after')
+    if archive_after is not None and archive_after <= now:
+        raise MemoryError('Pending archive deadline has already passed')
     if begin is not None and end is not None and begin >= end:
         raise MemoryError("Memory validity must be a non-empty half-open interval")
     if expiry is not None and expiry <= now:
@@ -215,6 +221,7 @@ def _normalize_draft(source: MemorySource, draft: MemoryDraft, now: datetime,
     return replace(
         draft, valid_from=begin, valid_to=end,
         expires_at=expiry, review_after=_optional_utc(draft.review_after, 'review_after'),
+        archive_after=archive_after,
         importance=_finite(draft.importance, "importance", bounded=True),
         extraction_confidence=_finite(draft.extraction_confidence, "extraction_confidence", bounded=True),
         half_life_days=_finite(draft.half_life_days, "half_life_days", positive=True),
@@ -641,9 +648,15 @@ class SQLiteMemoryRepository:
         if status not in (MemoryStatus.CANDIDATE, MemoryStatus.ACCEPTED, MemoryStatus.ARCHIVED):
             raise MemoryError('Invalid understanding state')
         with self.batch():
+            self._expire_candidates(self._now())
             previous = self._current(memory_id, expected_revision)
             if previous.status not in (MemoryStatus.CANDIDATE, MemoryStatus.DISPUTED, MemoryStatus.ACCEPTED):
                 raise MemoryError('Understanding is no longer available')
+            if status == MemoryStatus.CANDIDATE and previous.draft.archive_after is not None:
+                if draft.archive_after is None:
+                    draft = replace(draft, archive_after=previous.draft.archive_after)
+                elif _utc(draft.archive_after, 'archive_after') > previous.draft.archive_after:
+                    raise MemoryError('Pending archive deadline cannot be extended')
             source = _normalize_source(source)
             normalized, _ = _normalize_draft(source, draft, self._now(), accepted=status == MemoryStatus.ACCEPTED)
             source = self._store_source(source)
@@ -754,6 +767,7 @@ class SQLiteMemoryRepository:
         return epoch, ()
 
     def _expire_candidates(self, now: datetime) -> None:
+        self._archive_due_candidates(now)
         # Stored timestamps are normalized to UTC by ingestion. Filter expiry
         # in SQLite and materialize identifiers only; querying an epoch/page
         # must not decode every live candidate before returning its bounded page.
@@ -765,6 +779,33 @@ class SQLiteMemoryRepository:
         if expired:
             with self._transaction():
                 self._delete_ids(expired, now)
+
+    def archive_due_candidates(self) -> int:
+        """现有周期维护及读取入口共用；无需模型，保留正文、来源和历史修订。"""
+        with self._lock:
+            self._open()
+            return self._archive_due_candidates(self._now())
+
+    def _archive_due_candidates(self, now: datetime) -> int:
+        # SQLite筛选到期项，不为了检查期限反序列化全库。
+        query = ("SELECT r.id FROM memory_revisions r JOIN memory_heads h "
+            "ON r.id=h.id AND r.revision=h.revision WHERE r.status IN ('candidate','disputed') "
+            "AND json_extract(r.draft,'$.archive_after') IS NOT NULL "
+            "AND json_extract(r.draft,'$.archive_after')<=?")
+        if self._db.execute(query + ' LIMIT 1', (_stamp(now),)).fetchone() is None:
+            return 0
+        with self._transaction():
+            rows = self._db.execute(query, (_stamp(now),)).fetchall()
+            for row in rows:
+                previous = self._get(str(row['id']))
+                assert previous is not None
+                self._append(replace(previous, revision=previous.revision + 1,
+                    status=MemoryStatus.ARCHIVED, recorded_at=now,
+                    draft=replace(previous.draft, review_after=None), change_reason='pending_archive_deadline'))
+                self._db.execute('DELETE FROM memory_embeddings WHERE memory_id=?', (previous.id,))
+            if rows:
+                self._bump()
+            return len(rows)
 
     def forget(self, memory_id: str, expected_revision: int) -> DeletionReceipt:
         with self._lock:

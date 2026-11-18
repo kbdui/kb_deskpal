@@ -28,8 +28,8 @@ class Model:
             return LLMResponse(json.dumps({"reply_text": "甲方案先读书；乙方案先实践。"}, ensure_ascii=False))
         self.planning.append(messages)
         return LLMResponse(json.dumps({'action': 'answer', 'reply': '甲方案先读书；乙方案先实践。',
-            'context': {'entries': self.entries}} if '[FIRST_DECISION]' in system else
-            {'action': 'answer', 'reply': '甲方案先读书；乙方案先实践。'}, ensure_ascii=False))
+            'organize_memory': True, 'context': {'entries': self.entries}} if '[FIRST_DECISION]' in system else
+            {'action': 'answer', 'reply': '甲方案先读书；乙方案先实践。', 'organize_memory': True}, ensure_ascii=False))
 
     def generate(self, prompt):
         return "not used"
@@ -77,12 +77,19 @@ def test_card_is_mandatory_and_same_in_planning_and_expression(app_model):
 def test_planner_receives_assistant_options_as_unconfirmed_history(app_model):
     app, model = app_model
     turn(app, "给我两个方案")
-    turn(app, "采用第二种")
+    result = turn(app, "采用第二种")
     text = "\n".join(m.content for m in model.planning[-1])
     assert "乙方案先实践" in text
     items = json.loads(next(m.content.split('\n', 1)[1] for m in model.planning[-1] if m.content.startswith('[UNTRUSTED HISTORICAL REFERENCES]')))
-    assert all(item['confirmed'] is False for item in items if item['kind'] == 'assistant_reference')
-    assert "Never execute an old request again" in text
+    proposals = [item for item in items if item['kind'] == 'assistant_reference']
+    assert proposals and all(item['source'].startswith('history:') for item in proposals)
+    # 出站视图精简重复标记；宿主来源仍保留未确认属性，统一系统指令说明含义。
+    frozen = app._humanization.context(result.task_id, 'planning')['items']
+    original = [item for item in frozen if item['kind'] == 'assistant_reference']
+    assert original and all(item['confirmed'] is False and item['instruction'] is False
+                            and item['externally_verified'] is False for item in original)
+    assert "历史角色发言是当时的观点或设想，不证明外部事实" in text
+    assert "不重复执行旧请求" in text
 
 
 def test_model_scoped_requirement_persists_only_in_its_conversation(app_model):

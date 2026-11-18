@@ -87,7 +87,7 @@ def test_budget_overflow_does_not_persist_unexecutable_plan_or_stop_worker(app_m
     assert app.wait(following.id, timeout=10).status == TaskStatus.COMPLETED
 
 
-def test_forget_requires_confirmation_before_any_chat_is_erased(app_model):
+def test_retired_memory_write_cannot_execute_or_request_confirmation(app_model):
     app, model, probe = app_model
     original = model.chat
     def chat(messages, *, tools=()):
@@ -97,11 +97,10 @@ def test_forget_requires_confirmation_before_any_chat_is_erased(app_model):
     model.chat = chat
     task = app.submit('一件事情已经完成了')
     result = app.wait(task.id, timeout=10)
-    assert result.status == TaskStatus.WAITING
-    assert result.required_authorizations == ('memory_forget',)
+    assert result.status == TaskStatus.NEEDS_REVIEW
+    assert result.required_authorizations == ()
     assert not app.journal.attempts(task.id)
     assert app.tasks.get(task.id).request == '一件事情已经完成了'
-    app.cancel_task(task.id)
 
 
 def test_forget_is_not_offered_during_proactive_work(app_model):
@@ -128,7 +127,7 @@ def test_legacy_overflow_plan_cannot_be_confirmed_or_stop_worker(app_model):
         if messages[0].content.startswith('[PLANNING]'):
             model.rounds += 1
             if model.rounds == 1:
-                return LLMResponse('', (ToolCall('memory_forget', {'memory_id': 'synthetic', 'expected_revision': 1}, 'erase'),))
+                return LLMResponse('', (ToolCall('role_update', {'text': '合成角色卡', 'expected_revision': app.interaction_snapshot()['revision']}, 'edit'),))
             return LLMResponse('其他请求继续运行。')
         return original(messages, tools=tools)
     model.chat = chat
@@ -141,7 +140,7 @@ def test_legacy_overflow_plan_cannot_be_confirmed_or_stop_worker(app_model):
     assert 'confirm' not in review['available_actions']
     assert '上限' in review['blocked_reason']
     with pytest.raises(WorkflowBlocked):
-        app.confirm_task(task.id, plan_hash=review['plan_hash'], authorized_tools=('memory_forget',))
+        app.confirm_task(task.id, plan_hash=review['plan_hash'], authorized_tools=('role_update',))
     following = app.submit('新的普通请求')
     assert app.wait(following.id, timeout=10).status == TaskStatus.COMPLETED
 
@@ -186,15 +185,18 @@ def test_memory_request_is_model_planned_and_really_saved(app_model):
     def chat(messages, *, tools=()):
         if messages[0].content.startswith("[PLANNING]"):
             model.rounds += 1
-            if model.rounds == 1:
-                return LLMResponse("", (ToolCall("memory_remember", {"content": "喜欢绿茶"}, "save"),))
-            return LLMResponse("已根据保存结果记录。")
+            return LLMResponse(json.dumps(dict(action='answer', reply='准备记录。', organize_memory=True,
+                memory_requests=[dict(action='remember', quote='记住：喜欢绿茶', targets=[])]), ensure_ascii=False))
+        if messages[0].content.startswith('[MEMORY_FEEDBACK]'):
+            from tests.integration.agent.test_feedback_learning import draft
+            return LLMResponse(json.dumps(dict(memories=[draft('喜欢绿茶', '喜欢绿茶')],
+                management=[dict(request=0, status='applied', reason='明确要求')]), ensure_ascii=False))
         return original(messages, tools=tools)
     model.chat = chat
     task = app.submit("记住：喜欢绿茶")
     result = app.wait(task.id, timeout=10)
     assert result.status == TaskStatus.COMPLETED, result
-    assert model.rounds == 2
+    assert model.rounds == 1
     assert any(item.draft.content == "喜欢绿茶" for item in app.core.memory_runtime.repository.list_items())
 
 
@@ -436,24 +438,25 @@ def test_memory_correction_renews_context_and_keeps_old_snapshot(app_model):
     def chat(messages, *, tools=()):
         if messages[0].content.startswith("[PLANNING]"):
             model.rounds += 1
-            if model.rounds == 1:
-                return LLMResponse("", (ToolCall("memory_correct", {"memory_id": old.id,
-                    "expected_revision": old.revision, "content": "项目收件地址为杭州"}, "correction"),))
-            assert "项目收件地址为杭州" in str(messages)
-            return LLMResponse("已依据实际更正结果处理。")
+            return LLMResponse(json.dumps(dict(action='answer', reply='准备更正。', organize_memory=True,
+                memory_requests=[dict(action='correct', quote='更正项目收件地址为杭州', targets=[old.id])]), ensure_ascii=False))
+        if messages[0].content.startswith('[MEMORY_FEEDBACK]'):
+            from tests.integration.agent.test_feedback_learning import draft
+            row = dict(draft('项目收件地址为杭州', '项目收件地址为杭州'), id=old.id, decision='update')
+            return LLMResponse(json.dumps(dict(reviews=[row], management=[dict(request=0, status='applied', reason='明确更正')]), ensure_ascii=False))
         return original(messages, tools=tools)
     model.chat = chat
-    task = app.submit("更正刚才那条地址记忆")
+    task = app.submit("更正项目收件地址为杭州")
     result = app.wait(task.id, timeout=10)
     assert result.status == TaskStatus.COMPLETED, result
-    replacement_id = result.tool_results[0].output["id"]
+    replacement_id = old.id
     item = app.core.memory_runtime.repository.get(replacement_id)
     assert item.draft.content == "项目收件地址为杭州"
     assert not app.core.memory_runtime.valid(((old.id, old.revision),))
     with app.store.read_connection() as connection:
         history_count = connection.execute("SELECT COUNT(*) FROM context_history WHERE task_id=?", (task.id,)).fetchone()[0]
         assert history_count >= 2
-    assert app.journal.get_plan(task.id).memory_refs == ((replacement_id, item.revision),)
+    assert app.journal.get_plan(task.id).memory_refs == ()
     # 遗忘只失效仍在运行的相关上下文，不能连带清理已完成任务的记录。
     assert task.id not in app.journal.scrub_memory(old.id)
     with app.store.read_connection() as connection:
@@ -598,7 +601,7 @@ def test_amendment_does_not_interrupt_already_decided_independent_group(app_mode
     assert app.wait(task.id, timeout=10).status == TaskStatus.COMPLETED
 
 
-def test_forget_tool_completes_and_preserves_source_conversation(app_model):
+def test_unified_forget_completes_and_preserves_source_conversation(app_model):
     from deskpal.memory.contracts import MemoryStatus
     app, model, probe = app_model
     conversation = app.conversation_ensure_default()
@@ -617,11 +620,11 @@ def test_forget_tool_completes_and_preserves_source_conversation(app_model):
     def chat(messages, *, tools=()):
         if messages[0].content.startswith("[PLANNING]"):
             model.rounds += 1
-            if model.rounds == 1:
-                return LLMResponse("", (ToolCall("memory_forget", {"memory_id": old.id,
-                    "expected_revision": old.revision}, "forget"),))
-            assert any("memory_forget" in message.content for message in messages)
-            return LLMResponse("已遗忘指定的记忆。")
+            return LLMResponse(json.dumps(dict(action='answer', reply='准备遗忘指定记忆。', organize_memory=True,
+                memory_requests=[dict(action='forget', quote='请遗忘指定的旧资料', targets=[old.id])]), ensure_ascii=False))
+        if messages[0].content.startswith('[MEMORY_FEEDBACK]'):
+            return LLMResponse(json.dumps(dict(reviews=[dict(id=old.id, decision='forget', reason='明确要求')],
+                management=[dict(request=0, status='applied', reason='指定记录')]), ensure_ascii=False))
         if messages[0].content.startswith("[EXPRESSION]"):
             return LLMResponse("已遗忘指定的记忆。")
         return original(messages, tools=tools)
@@ -629,15 +632,10 @@ def test_forget_tool_completes_and_preserves_source_conversation(app_model):
     model.chat = chat
     task = app.submit("请遗忘指定的旧资料", conversation_id=conversation['id'],
                         expected_context_epoch=conversation['context_epoch'])
-    assert app.wait(task.id, timeout=10).status == TaskStatus.WAITING
-    assert app.memory.repository.get(old.id).status != MemoryStatus.DELETED
-    review = app.task_review(task.id)
-    app.enqueue_confirmation(task.id, authorized_tools=('memory_forget',),
-        plan_hash=review['plan_hash'], command_id='explicit-erase-confirmation')
     result = app.wait(task.id, timeout=10)
     assert result.status == TaskStatus.COMPLETED, result
     assert result.response == "已遗忘指定的记忆。"
-    assert result.tool_results[0].output["status"] == "Completed"
+    assert result.tool_results == ()
     assert app.memory.repository.get(old.id).status == MemoryStatus.DELETED
     assert app.memory.repository.get(unrelated.id).status != MemoryStatus.DELETED
     assert any(item.get('body') == "原始聊天应保留"

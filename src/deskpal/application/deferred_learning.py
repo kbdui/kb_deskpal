@@ -19,14 +19,25 @@ class DeferredLearningSources:
 
     @staticmethod
     def key(ref: dict[str, Any]) -> str:
-        return 'reflection:' + ref['id'] if ref['kind'] == 'reflection' else ref['id']
+        return ref['kind'] + ':' + ref['id'] if ref['kind'] in {'reflection', 'plugin_experience'} else ref['id']
 
     def _entry(self, ref: dict[str, Any]) -> dict[str, Any] | None:
-        task_id = ref['id'] if ref['kind'] == 'reflection' else ref['id'].rsplit(':', 1)[0]
+        task_id = ref['id'] if ref['kind'] in {'reflection', 'plugin_experience'} else ref['id'].rsplit(':', 1)[0]
         task = self.app.tasks.get(task_id)
         if task is None or task.status != TaskStatus.COMPLETED:
             return None
-        if ref['kind'] == 'reflection':
+        if ref['kind'] == 'plugin_experience':
+            from deskpal.plugins.experiences import read
+            value = read(self.app, task_id)
+            if value is None or ref['revision'] != 1:
+                return None
+            content, policy = value['content'], value['use_policy']
+            entry = {**{key: value[key] for key in ('speaker_id', 'speaker_name', 'speaker_kind', 'channel', 'created_at')},
+                'origin': 'plugin_experience', 'role': 'assistant', 'published': False,
+                'source_task_id': task_id,
+                'source_session_id': 'plugin:' + value['plugin_id'] + ':' + value['account_id'] + ':' + value['source_conversation'],
+                'experience_metadata': {key: value[key] for key in ('plugin_id', 'account_id', 'source_conversation', 'events')}}
+        elif ref['kind'] == 'reflection':
             from deskpal.proactive.reflection import read
             value = read(self.app, task_id)
             if value is None or ref['revision'] != 1:
@@ -48,6 +59,10 @@ class DeferredLearningSources:
             if row is None or row['sequence'] != ref['revision'] or not row['body']:
                 return None
             content, policy = row['body'], row['use_policy']
+            if side == 'user':
+                from deskpal.conversation.exchanges import user_text
+                with self.app.store.read_connection() as db:
+                    content = user_text(db, task_id, content)
             entry = dict(role=side, origin='user_message' if side == 'user' else 'assistant_output',
                          published=True, created_at=row['created_at'])
         if self.app._humanization.reference_policy(ref['kind'], ref['id'], ref['revision']) is None:
@@ -68,13 +83,15 @@ class DeferredLearningSources:
             self.app.store.check_privacy(db)
             rows = db.execute("""SELECT t.id,t.updated_at FROM task t
                 WHERE t.status='Completed' AND t.scrubbed=0 AND (t.updated_at,t.id)>(?,?)
-                AND (EXISTS(SELECT 1 FROM context_snapshot s WHERE s.task_id=t.id AND s.purpose='reflection')
+                AND (EXISTS(SELECT 1 FROM context_snapshot s WHERE s.task_id=t.id AND s.purpose IN ('reflection','plugin_experiences'))
                     OR EXISTS(SELECT 1 FROM conversation_turn p WHERE p.task_id=t.id AND p.published=1))
                 ORDER BY t.updated_at,t.id LIMIT ?""", (*cursor, self.PAGE_SIZE)).fetchall()
             refs = []
             for row in rows:
                 if db.execute("SELECT 1 FROM context_snapshot WHERE task_id=? AND purpose='reflection'", (row['id'],)).fetchone():
                     refs.append(dict(kind='reflection', id=row['id'], revision=1, available=True))
+                if db.execute("SELECT 1 FROM context_snapshot WHERE task_id=? AND purpose='plugin_experiences'", (row['id'],)).fetchone():
+                    refs.append(dict(kind='plugin_experience', id=row['id'], revision=1, available=True))
                 turn = db.execute('SELECT conversation_id,sequence FROM turn_ref WHERE task_id=?', (row['id'],)).fetchone()
                 if turn:
                     refs.extend(dict(kind='dialogue_turn', id=row['id'] + ':' + side, revision=turn['sequence'],

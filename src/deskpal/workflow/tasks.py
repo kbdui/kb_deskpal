@@ -282,11 +282,14 @@ class PersistentTaskManager:
                     "task_id": row["id"], "revision": row["revision"]}
 
     def claim_next(self) -> Task | None:
+        priority_sql = ("SELECT s.task_id FROM submission s WHERE s.status='Queued' ORDER BY "
+            "EXISTS(SELECT 1 FROM context_snapshot c WHERE c.task_id=s.task_id AND c.purpose='plugin_execution'),s.sequence LIMIT 1")
         while True:
             with self.store.transaction() as conn:
                 if conn.execute("SELECT 1 FROM submission WHERE status='Claimed'").fetchone():
                     return None
-                row = conn.execute("SELECT task_id FROM submission WHERE status='Queued' ORDER BY sequence LIMIT 1").fetchone()
+                # 本机用户请求优先于尚未开始的插件工作；不抢占已运行任务。
+                row = conn.execute(priority_sql).fetchone()
                 if row is None:
                     return None
                 task_id = row[0]
@@ -299,6 +302,9 @@ class PersistentTaskManager:
             with self.store.transaction() as conn:
                 if conn.execute("SELECT 1 FROM submission WHERE status='Claimed'").fetchone():
                     return None
+                next_row = conn.execute(priority_sql).fetchone()
+                if next_row is None or next_row[0] != task_id:
+                    continue
                 try:
                     self.store.check_dependencies(conn, task_id)
                 except WorkflowBlocked:
@@ -400,6 +406,7 @@ class PersistentTaskManager:
             now = utc_now().isoformat()
             conversations = tuple(row[0] for row in conn.execute("SELECT DISTINCT conversation_id FROM conversation_item WHERE task_id=?", (task_id,)))
             conn.execute("UPDATE conversation_item SET body='',redacted_at=?,revision=revision+1 WHERE task_id=? AND redacted_at IS NULL", (now, task_id))
+            conn.execute("UPDATE conversation_exchange SET body='',redacted_at=?,revision=revision+1 WHERE task_id=? AND redacted_at IS NULL", (now, task_id))
             conn.execute("DELETE FROM conversation_item_source WHERE item_id IN (SELECT id FROM conversation_item WHERE task_id=?)", (task_id,))
             conn.execute("UPDATE conversation_turn SET refs='[]',facts='[]',published=0 WHERE task_id=?", (task_id,))
             conn.execute("UPDATE desktop_reminder_inbox SET label='',delivery_state='redacted' WHERE task_id=?", (task_id,))

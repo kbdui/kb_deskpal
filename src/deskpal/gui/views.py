@@ -516,7 +516,7 @@ class PagedView(QWidget):
                 body = f"此任务记录了 {len(execution)} 次工具调用。展开左侧任务可查看每次调用摘要。"
             elif self._is_tool_result_origin(item):
                 body = "这条工具执行记录的摘要格式无法识别，请展开原始技术字段查看。"
-            origins = {"user_message": "用户明确输入", "tool_result": "工具执行记录", "execution": "任务执行记录", "legacy": "历史导入"}
+            origins = {"user_message": "用户明确输入", "tool_result": "工具执行记录", "execution": "任务执行记录", "legacy": "历史导入", "plugin_experience": "插件分享的角色经历", "character_reflection": "角色自主思考"}
             origin = str(source.get("origin") or "")
             fields.append(("来源", origins.get(origin, origin)))
             kinds = {"semantic": "语义记忆", "episodic": "经历记录", "working": "工作记忆",
@@ -532,6 +532,7 @@ class PagedView(QWidget):
             if draft.get('reason'): context.append('理解依据\n' + str(draft['reason']))
             if draft.get('uncertainty'): context.append('不确定性与适用范围\n' + str(draft['uncertainty']))
             if draft.get('review_after'): fields.append(('后续复查', friendly_time(draft['review_after'], timezone=self.display_timezone)))
+            if draft.get('archive_after'): fields.append(('最晚归档', friendly_time(draft['archive_after'], timezone=self.display_timezone)))
             stamp = source.get("created_at") or item.get("recorded_at")
             if stamp:
                 fields.append(("日期", friendly_time(stamp, timezone=self.display_timezone)))

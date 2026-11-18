@@ -11,6 +11,10 @@ from deskpal.workflow.store import WorkflowStore, canonical
 from .manifest import PluginManifest, valid_id
 
 
+class PluginCommandError(ValueError):
+    """插件明确允许显示给本机用户的固定业务说明，不携带原始外部异常。"""
+
+
 class PluginData:
     """A single plugin's data namespace in the selected profile."""
 
@@ -125,12 +129,30 @@ class PageSwitch:
 class PageSpec:
     switches: tuple[PageSwitch, ...]
     rows: Callable[[PluginData, Mapping[str, bool]], list[dict[str, str]]]
+    detail: Callable[[], dict[str, Any]] | None = None
+    action: Callable[[str, dict[str, Any]], dict[str, Any]] | None = None
 
 
 class PluginRuntime:
     def __init__(self, store: WorkflowStore, manifests: Iterable[PluginManifest]) -> None:
         self._data = {manifest.id: PluginData(store, manifest) for manifest in manifests}
         self._pages: dict[str, PageSpec] = {}
+        self._ticks: dict[str, Callable[[], None]] = {}
+
+    def register_tick(self, plugin_id: str, tick: Callable[[], None]) -> None:
+        """轻量本地检查入口；仅投递工作，不在检查线程调用模型。"""
+        self.data(plugin_id)
+        if plugin_id in self._ticks or not callable(tick):
+            raise ValueError('Invalid plugin tick registration')
+        self._ticks[plugin_id] = tick
+
+    @property
+    def has_ticks(self) -> bool:
+        return bool(self._ticks)
+
+    def tick(self) -> None:
+        for tick in self._ticks.values():
+            tick()
 
     def data(self, plugin_id: str) -> PluginData:
         if not valid_id(plugin_id) or plugin_id not in self._data:
@@ -163,7 +185,19 @@ class PluginRuntime:
                                  or any(not isinstance(value, str) or len(value) > 500 for value in row.values())
                                  for row in rows):
             raise ValueError("Invalid plugin page rows")
-        return dict(plugin_id=plugin_id, title=data.manifest.page_title, switches=controls, rows=rows)
+        result: dict[str, Any] = dict(plugin_id=plugin_id, title=data.manifest.page_title, switches=controls, rows=rows)
+        if spec.detail:
+            content = spec.detail()
+            if not isinstance(content, dict) or len(canonical(content).encode()) > 65536:
+                raise ValueError('Plugin page exceeds supported content limit')
+            result['content'] = content
+        return result
+
+    def command(self, plugin_id: str, action: str, parameters: dict[str, Any]) -> dict[str, Any]:
+        _, spec = self._page(plugin_id)
+        if not spec.action or not isinstance(action, str) or not isinstance(parameters, dict) or len(canonical(parameters).encode()) > 16384:
+            raise ValueError('Unsupported plugin page command')
+        return spec.action(action, parameters)
 
     def set_option(self, plugin_id: str, key: str, value: bool, expected_revision: int) -> dict[str, Any]:
         data, spec = self._page(plugin_id)

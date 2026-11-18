@@ -17,6 +17,7 @@ from deskpal.memory.models import MemoryKind, MemoryRecord
 from deskpal.memory.ports import MemoryManager
 from deskpal.memory.contracts import MemoryRuntime, RetrievalBundle, DeletionReceipt, UsePolicy
 from deskpal.planner.models import Plan
+from deskpal.planner.output import PlanningOutputError
 from deskpal.planner.ports import Planner
 from deskpal.response.composer import ResponseComposer
 from deskpal.response.templates import terminal_response, tool_response_fallback
@@ -105,6 +106,7 @@ class AgentCore:
         self._proactive_publication: Any = None
         self._publication_control: Any = None
         self._feedback: TurnFeedback | None = None
+        self._channels: Any = None
 
     def attach_feedback(self, feedback: TurnFeedback) -> None:
         with self._lock:
@@ -538,16 +540,25 @@ class AgentCore:
                 raise ValueError("Duplicate planned call_id")
             ids.add(call.call_id)
             calls.append(_call_copy(call))
+        from deskpal.memory.management import requests
+        memory_requests = requests(plan.memory_requests)
         return Plan(plan.reply, tuple(calls), plan.action, _json_copy(plan.context) if plan.context is not None else None,
-                    plan.organize_memory)
+                    plan.organize_memory or bool(memory_requests), memory_requests)
 
     def _planning_tools(self, task_id: str) -> tuple[Any, ...]:
         from .loop import READ_ONLY_TOOLS
-        tools = tuple(self.tools.list_tools())
+        tools = tuple(spec for spec in self.tools.list_tools()
+                      if spec.name not in {'memory_remember', 'memory_correct', 'memory_forget'})
+        context = self._channels.context(task_id) if self._channels else None
+        if context:
+            runtime = self._channels.runtime(context)
+            from deskpal.tools.models import ToolCall
+            return tuple(spec for spec in tools if runtime.allowed(context, ToolCall(spec.name)))
         if self._journal and self._journal.origin(task_id)['kind'] == 'proactive':
             return tuple(spec for spec in tools if spec.name not in {'memory_forget', 'role_update'} and
                 (spec.name in READ_ONLY_TOOLS | {'attention_schedule', 'attention_end', 'reflection_record'} or int(spec.permission_level) > 0))
-        return tuple(spec for spec in tools if spec.name != 'reflection_record')
+        channel_only = self._channels.channel_tools() if self._channels else frozenset()
+        return tuple(spec for spec in tools if spec.name != 'reflection_record' and spec.name not in channel_only)
 
     def _learning_references(self, task_id: str, references: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """在原有规划中提供有界未整理资料，不另起一次判断或据数量自动整理。"""
@@ -657,7 +668,8 @@ class AgentCore:
                 self._boundary(task_id)
                 if self._journal is not None:
                     plan = Plan(plan.reply, tuple(ToolCall(call.name, _json_copy(call.arguments), f"round-0-step-{index}")
-                        for index, call in enumerate(plan.steps)), plan.action, organize_memory=plan.organize_memory)
+                        for index, call in enumerate(plan.steps)), plan.action, organize_memory=plan.organize_memory,
+                        memory_requests=plan.memory_requests)
                     snapshot = self._journal.save_plan(task_id, plan, tuple(self.tools.list_tools()),
                         str(self.workspace_dir), self._task_dependencies.get(task_id, ()))
                     plan = snapshot.plan
@@ -684,7 +696,9 @@ class AgentCore:
             plan = loop_result
             if self._interaction is not None:
                 prepared = self._interaction.current_turn(task_id)
-            if plan.action == "quiet" and (prepared is None or prepared.origin != "proactive"):
+            channel = self._channels.context(task_id) if self._channels else None
+            tool_delivery = channel is not None and channel.delivery == 'tools'
+            if plan.action == "quiet" and (prepared is None or prepared.origin != "proactive") and channel is None:
                 raise ValueError("Only proactive tasks may end quietly")
             clarifying = plan.action == "clarify"
             current = self.tasks.get(task_id)
@@ -692,7 +706,7 @@ class AgentCore:
                 self._transition(task_id, TaskStatus.RUNNING)
             phase = "memory"
             # P4：只有统一反馈入口负责学习；工具明细保留在执行账本。
-            skip_learning = not plan.organize_memory
+            skip_learning = not (plan.organize_memory or plan.memory_requests)
             self._event('memory_learning_decided', task_id,
                         {'organize_memory': plan.organize_memory, 'final_action': plan.action})
             if skip_learning:
@@ -727,7 +741,7 @@ class AgentCore:
             response = plan.reply
             style = prepared.style if prepared is not None else self._companion_style(
                 request, companion_generation, warnings)
-            if plan.action != "quiet" and (results or style or (prepared is not None and (prepared.history or prepared.role_json))):
+            if not tool_delivery and plan.action != "quiet" and (results or style or (prepared is not None and (prepared.history or prepared.role_json))):
                 try:
                     self._boundary(task_id)
                     client = self._interaction.calls(task_id, "expression") if self._interaction else self.llm
@@ -793,7 +807,7 @@ class AgentCore:
                         response_signals = {}
                 if self._journal is not None and self._journal.unconsumed_amendments(task_id):
                     warnings.append("有追加要求未赶上最后一次模型判断，未纳入本次执行；请继续发起续办。")
-                if plan.action == 'quiet' or (prepared is not None and prepared.origin == 'proactive' and self._proactive_publication is not None and not self._proactive_publication(task_id)):
+                if tool_delivery or plan.action == 'quiet' or (prepared is not None and prepared.origin == 'proactive' and self._proactive_publication is not None and not self._proactive_publication(task_id)):
                     response = ''
                 payload = {"response": response, "tool_results": [_result_data(item) for item in results],
                            "warnings": list(warnings), "memory_effects": memory_effects,
@@ -837,6 +851,7 @@ class AgentCore:
             return AgentResult(task_id, TaskStatus.NEEDS_REVIEW,
                 response, tuple(results))
         except Exception as exc:
+            failure_code = 'planning_output_invalid' if isinstance(exc, PlanningOutputError) else ''
             if isinstance(exc, ToolNotFound):
                 error = "Unknown tool in plan"
             elif isinstance(exc, PermissionDenied):
@@ -845,14 +860,16 @@ class AgentCore:
                 error = "File path violates the workspace policy"
             elif isinstance(exc, LLMError):
                 error = str(exc)
+            elif isinstance(exc, PlanningOutputError):
+                error = str(exc)
             elif isinstance(exc, ValueError):
                 error = f"Invalid data during {phase}"
             else:
                 error = f"Request failed during {phase} ({type(exc).__name__})"
             from deskpal.llm.errors import RetryableLLMError
-            return self._fail(task_id, error, results, retryable=isinstance(exc, RetryableLLMError))
+            return self._fail(task_id, error, results, retryable=isinstance(exc, RetryableLLMError), failure_code=failure_code)
 
-    def _fail(self, task_id: str, error: str, results: list[ToolResult], *, retryable: bool = False) -> AgentResult:
+    def _fail(self, task_id: str, error: str, results: list[ToolResult], *, retryable: bool = False, failure_code: str = '') -> AgentResult:
         """将请求收敛到失败或不确定状态，避免重放可能已发生的外部副作用。"""
         with self._lock:
             self._pending.pop(task_id, None)
@@ -882,12 +899,20 @@ class AgentCore:
         except Exception:
             error += "; failure audit could not be written"
         response = terminal_response("failed", tuple(_result_data(item) for item in results))
+        if failure_code == 'planning_output_invalid':
+            response = '模型返回的答复格式不正确，自动纠正后仍未成功，请重新发送这条消息。'
+            if results:
+                succeeded = sum(item.success for item in results)
+                response = ('模型未能正确组织后续答复，自动纠正后仍未成功。'
+                    f'本轮已有 {succeeded} 项操作成功，已执行的操作和结果仍然保留。'
+                    '请先在执行记录中查看，再决定是否继续尚未完成的部分。')
         try:
             latest = self.tasks.get(task_id)
             if latest is not None and latest.status == TaskStatus.CANCELLED:
                 return self._cancelled_result(task_id, results)
             self.tasks.update_status(task_id, TaskStatus.FAILED,
-                                     result={"response": response, "tool_results": [_result_data(item) for item in results], "retryable_model_failure": retryable}, error=error)
+                                     result={"response": response, "tool_results": [_result_data(item) for item in results], "retryable_model_failure": retryable,
+                                             **({'failure_code': failure_code} if failure_code else {})}, error=error)
         except Exception:
             error += "; Failed task state could not be persisted"
         return AgentResult(task_id, TaskStatus.FAILED, response, tuple(results), error=error)

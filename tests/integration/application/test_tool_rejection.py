@@ -96,22 +96,22 @@ def test_previous_effects_survive_and_other_allowed_tools_can_run(recorded):
     def decide():
         index = len(model.planning_inputs)
         if index == 1:
-            return LLMResponse("", (ToolCall("memory_remember", {"content": "合成偏好：喜欢茶"}, "remember"),))
+            return LLMResponse("", (ToolCall("time", {}, "first-time"),))
         if index == 2:
             return change(app, "不应保存的角色身份")
         if index == 3:
             return LLMResponse("", (ToolCall("time", {}, "allowed-time"),))
-        return LLMResponse("已保留记忆，并且没有修改角色卡。")
+        return LLMResponse("查询已完成，没有修改角色卡。")
     model.decide = decide
     before = app.interaction_snapshot()["character_card"]
-    task = app.submit("记住偏好并考虑调整角色")
+    task = app.submit("查询时间并考虑调整角色")
     assert app.wait(task.id, 10).status == TaskStatus.WAITING
     reject(app, task.id)
     assert app.wait(task.id, 10).status == TaskStatus.COMPLETED
     attempts = app.journal.attempts(task.id)
-    assert [a.result.tool_name for a in attempts] == ["memory_remember", "time"]
+    assert [a.result.tool_name for a in attempts] == ["time", "time"]
     assert all(a.status == "Succeeded" for a in attempts)
-    assert app.core.memory_runtime.repository.get(attempts[0].result.output["id"]) is not None
+    assert attempts[0].result.success
     assert app.interaction_snapshot()["character_card"] == before
     assert captured["learning"] and captured["expression"]
 

@@ -23,7 +23,7 @@ FIELDS = {
     "task_pause": {"task_id", "command_id"},
     "task_continue": {"task_id", "command_id"},
     "task_append_requirement": {"task_id", "content", "command_id"},
-    "task_answer": {"task_id", "content", "command_id"},
+    "task_answer": {"task_id", "content", "command_id", "conversation_id", "expected_context_epoch", "expected_revision"},
     "cancel": {"task_id", "command_id"},
     "reject_tools": {"task_id", "command_id", "plan_hash", "expected_revision"},
 }

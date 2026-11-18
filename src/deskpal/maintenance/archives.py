@@ -1,4 +1,4 @@
-"""Offline four-store snapshots and guarded, resumable restore to a new directory.
+"""Offline store/managed-plugin snapshots and guarded restore to a new directory.
 
 Hashes detect corruption, not authenticity. Archives contain private application
 records, not workspace files/configuration/credentials or a complete machine image.
@@ -27,6 +27,7 @@ from .errors import MaintenanceError
 
 
 DATABASES = ("workflow.sqlite3", "memory.sqlite3", "scheduling.sqlite3", "companion.sqlite3")
+PLUGIN_DATABASES = ('plugin_qq.sqlite3',)
 MARKER = ".restore-in-progress.json"
 STAGE = ".restore-stage"
 MAX_DATABASE_BYTES = 512 * 1024 * 1024
@@ -35,14 +36,17 @@ MAX_MANIFEST_BYTES = 65536
 CHUNK = 1024 * 1024
 SCOPE = "four_sqlite_stores_only"
 ASSET_SCOPE = "four_sqlite_stores_and_managed_assets"
+PLUGIN_SCOPE = 'sqlite_stores_managed_assets_and_plugin_data'
 EXCLUSIONS = ["workspace_files", "configuration", ".env", "credentials", "model_cache", "logs"]
 # Frozen, recognized on-disk versions. Reading these never performs a migration.
-VERSIONS = {DATABASES[0]: {1, 2, 3, 4, 5, 6, 7, 8}, DATABASES[1]: {1, 2, 3, 4}, DATABASES[2]: {1}, DATABASES[3]: {1, 2, 3, 4}}
+VERSIONS = {DATABASES[0]: {1, 2, 3, 4, 5, 6, 7, 8, 9}, DATABASES[1]: {1, 2, 3, 4}, DATABASES[2]: {1}, DATABASES[3]: {1, 2, 3, 4}}
+VERSIONS[PLUGIN_DATABASES[0]] = {1, 2, 3}
 _TABLES = {
     DATABASES[0]: {"schema_version", "task", "submission", "immutableplan", "attempt", "audit_outbox", "deletionjob", "memory_block"},
     DATABASES[1]: {"memory_meta", "memory_sources", "memory_revisions", "memory_heads", "memory_tombstones"},
     DATABASES[2]: {"calendar", "timers", "events", "scheduling_identity"},
     DATABASES[3]: {"state", "persona_versions", "receipts", "budget"},
+    PLUGIN_DATABASES[0]: {'qq_message', 'qq_work', 'qq_send_batch', 'qq_send_command', 'qq_summary', 'qq_learning'},
 }
 
 
@@ -199,9 +203,15 @@ def _schema(connection: sqlite3.Connection, name: str) -> int:
             if version >= 8:
                 from deskpal.workflow.schema_v8 import validate as validate_v8
                 validate_v8(connection)
+            if version >= 9:
+                from deskpal.workflow.schema_v9 import validate as validate_v9
+                validate_v9(connection)
         if name == DATABASES[3] and version == 4:
             from deskpal.companion.schema import validate as validate_character
             validate_character(connection)
+        if name == PLUGIN_DATABASES[0]:
+            from deskpal.plugins.qq.store import validate as validate_qq
+            validate_qq(connection)
     except (ValueError, sqlite3.Error):
         raise MaintenanceError("archive_schema_unsupported") from None
     return int(version)
@@ -222,23 +232,28 @@ def _manifest(entries: list[dict[str, Any]], assets: list[dict[str, Any]] | None
             "rollback_may_restore_forgotten_data": True}
     if assets is not None:
         result.update(format_version=2, scope=ASSET_SCOPE, assets=assets)
+    if any(entry['name'] in PLUGIN_DATABASES for entry in entries):
+        result.update(format_version=3, scope=PLUGIN_SCOPE, assets=assets or [])
     return result
 
 
 def _validate_manifest(value: Any) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise MaintenanceError("archive_invalid")
-    fixed = _manifest([], [] if value.get("format_version") == 2 else None)
+    fixed = _manifest([], [] if value.get("format_version") in {2, 3} else None)
+    if value.get('format_version') == 3:
+        fixed.update(format_version=3, scope=PLUGIN_SCOPE)
     if set(value) != set(fixed):
         raise MaintenanceError("archive_invalid")
     for key in fixed.keys() - {"databases", "assets"}:
         if type(value[key]) is not type(fixed[key]) or value[key] != fixed[key]:
             raise MaintenanceError("archive_invalid")
     entries = value["databases"]
-    if not isinstance(entries, list) or len(entries) != 4:
+    database_names = (*DATABASES, *PLUGIN_DATABASES) if value.get('format_version') == 3 else DATABASES
+    if not isinstance(entries, list) or len(entries) != len(database_names):
         raise MaintenanceError("archive_invalid")
     total = 0
-    for name, entry in zip(DATABASES, entries):
+    for name, entry in zip(database_names, entries):
         if not isinstance(entry, dict) or set(entry) != {"name", "present", "bytes", "sha256", "schema_version"} or entry["name"] != name or type(entry["present"]) is not bool:
             raise MaintenanceError("archive_invalid")
         if not entry["present"]:
@@ -402,15 +417,15 @@ def _inspect(archive: Path, stage: Path) -> dict[str, Any]:
     if offset < 0 or len(tail) - offset < 22:
         raise MaintenanceError("archive_invalid")
     _, disk, directory_disk, disk_count, count, directory_bytes, _, comment_bytes = struct.unpack("<4s4H2LH", tail[offset:offset + 22])
-    if disk or directory_disk or disk_count != count or count > MAX_ASSETS + 5 or directory_bytes > MAX_MANIFEST_BYTES or len(tail) - offset != 22 + comment_bytes:
+    if disk or directory_disk or disk_count != count or count > MAX_ASSETS + len(DATABASES) + len(PLUGIN_DATABASES) + 1 or directory_bytes > MAX_MANIFEST_BYTES or len(tail) - offset != 22 + comment_bytes:
         raise MaintenanceError("archive_invalid")
     digest = _digest(archive)
     with zipfile.ZipFile(archive) as bundle:
         infos = bundle.infolist()
         names = [entry.filename for entry in infos]
-        if len(infos) > MAX_ASSETS + 5 or len({name.casefold() for name in names}) != len(names):
+        if len(infos) > MAX_ASSETS + len(DATABASES) + len(PLUGIN_DATABASES) + 1 or len({name.casefold() for name in names}) != len(names):
             raise MaintenanceError("archive_invalid")
-        if "manifest.json" not in names or any(name not in {"manifest.json", *DATABASES} and not _asset_name(name) for name in names):
+        if "manifest.json" not in names or any(name not in {"manifest.json", *DATABASES, *PLUGIN_DATABASES} and not _asset_name(name) for name in names):
             raise MaintenanceError("archive_invalid")
         for info in infos:
             mode = (info.external_attr >> 16) & 0xFFFF
@@ -461,7 +476,7 @@ def assert_restore_ready(data_dir: Path) -> None:
 
 
 def create_backup(data_dir: Path, destination: Path, *, acknowledge_sensitive_data: bool = False) -> dict[str, Any]:
-    """Snapshot four stores while holding the same exclusive lock as CLI/GUI."""
+    """Snapshot owned stores/plugin data under the same exclusive application lock."""
     if acknowledge_sensitive_data is not True:
         raise MaintenanceError("archive_sensitive_ack_required")
     with _errors():
@@ -481,7 +496,8 @@ def create_backup(data_dir: Path, destination: Path, *, acknowledge_sensitive_da
                 raise MaintenanceError("archive_invalid") from None
             stage = Path(directory)
             entries: list[dict[str, Any]] = []
-            for name in DATABASES:
+            databases = (*DATABASES, *PLUGIN_DATABASES) if any(os.path.lexists(source / name) for name in PLUGIN_DATABASES) else DATABASES
+            for name in databases:
                 path = source / name
                 if name == DATABASES[3] and not os.path.lexists(path):
                     entries.append({"name": name, "present": False, "bytes": 0, "sha256": None, "schema_version": None})
@@ -528,13 +544,13 @@ def create_backup(data_dir: Path, destination: Path, *, acknowledge_sensitive_da
             digest = _digest(temporary)
             os.link(temporary, target)  # Atomic create-only publication; never replace.
             _sync_directory(target.parent)
-        return {"format_version": 2, "archive_path": str(target), "archive_sha256": digest, "manifest": manifest}
+        return {"format_version": manifest['format_version'], "archive_path": str(target), "archive_sha256": digest, "manifest": manifest}
 
 
 def _marker(receipt: dict[str, Any], published: list[str]) -> dict[str, Any]:
     result: dict[str, Any] = {"format_version": receipt["format_version"], "archive_sha256": receipt["archive_sha256"],
                              "databases": receipt["manifest"]["databases"], "phase": "publishing", "published": published}
-    if receipt["format_version"] == 2:
+    if receipt["format_version"] >= 2:
         result["assets"] = receipt["manifest"]["assets"]
     return result
 
@@ -584,7 +600,7 @@ def _owned_leaves(target: Path, present: dict[str, dict[str, Any]]) -> list[tupl
                 result.append((name, path))
             else:
                 raise MaintenanceError("restore_conflict")
-            if len(result) > 2 * (MAX_ASSETS + 4) + 3:
+            if len(result) > 2 * (MAX_ASSETS + len(DATABASES) + len(PLUGIN_DATABASES)) + 3:
                 raise MaintenanceError("restore_conflict")
     return result
 

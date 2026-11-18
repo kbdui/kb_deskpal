@@ -17,7 +17,7 @@ from .chat import ChatCoordinator
 from .pet_window import clamp_position
 from .preferences import GuiPreferences
 from .studio_surface import StudioSurface
-from .tool_results import operation_records
+from .tool_results import operation_records, studio_operation_records
 
 PAGES = ("chat", "plans", "memory", "plugins", "settings")
 SETTINGS = ("role", "appearance", "notifications", "data", "model", "mobile")
@@ -29,6 +29,7 @@ PET_EXPRESSIONS = {"pet": "neutral", "pet_thinking": "thinking", "pet_focused": 
 PREFERENCES = (
     "theme", "pet_visible", "pet_enabled", "pet_scale", "pet_on_top", "close_to_tray",
     "notifications_enabled", "user_display_name", "character_display_name",
+    "execution_width",
 )
 ACTIVE_TASKS = ["Created", "Planning", "Running", "Waiting", "NeedsReview", "AwaitingInput", "Paused", "Uncertain"]
 
@@ -89,6 +90,7 @@ class StudioChatSurface(StudioSurface):
         coordinator.task_changed.connect(self._task_changed)
         coordinator.ready_changed.connect(self._push_chat)
         coordinator.draft_changed.connect(self._draft)
+        coordinator.message_accepted.connect(self._message_accepted)
         coordinator.notice.connect(self._toast)
         coordinator.appearance.image_changed.connect(self._image)
         coordinator.bridge.privacy_changed.connect(self._privacy)
@@ -183,14 +185,14 @@ class StudioChatSurface(StudioSurface):
                 reviews[task] = {"review": review, "grants": sorted(c.grants.get(task, [])),
                                  "pending": task in c.task_pending}
                 if task == self.selected_task:
-                    reviews[task]["records"] = operation_records(review)
+                    reviews[task]["records"] = studio_operation_records(review)
                 events[task] = scheduled_from_review(review)
         submissions = [{key: item.get(key) for key in ("request", "state", "retryable")} | {"command_id": command}
                        for command, item in c.submissions.items() if item["conversation_id"] == identity]
         display_items = []
         for item in items:
             result = c.reviews.get(str(item.get("task_id", "")), {}).get("task", {}).get("result")
-            if (item.get("kind") == "assistant_message" and not item.get("body_truncated")
+            if (item.get("id") == str(item.get('task_id')) + ':assistant_message' and item.get("kind") == "assistant_message" and not item.get("body_truncated")
                     and not item.get("body_start") and isinstance(result, dict)
                     and isinstance(result.get("tool_results"), list)):
                 facts = [fact for fact in result["tool_results"] if isinstance(fact, dict)]
@@ -204,6 +206,7 @@ class StudioChatSurface(StudioSurface):
                          for key, item in c.conversations.items()],
             "moreSessions": c.directory_more, "archived": c.archived, "submissions": submissions,
             "draft": c.draft(identity).text if identity else "",
+            "awaitingInput": selected.get('awaiting_input', []),
             "reviews": reviews, "events": events, "available": c.available and bool(identity),
             "modelReady": c.model_ready, "canSend": bool(c.available and c.model_ready and identity and
                 not (selected.get("archived_at") or selected.get("archived") or selected.get("deleted_at"))),
@@ -237,6 +240,10 @@ class StudioChatSurface(StudioSurface):
     def _draft(self, identity: str, text: str, revision: int) -> None:
         if self.attached and identity == self.identity and text != self._input_origin:
             self.port.publish("draft", {"id": identity, "text": text})
+
+    def _message_accepted(self, identity: str, task: str, revision: int) -> None:
+        if self.attached:
+            self.port.publish('message-accepted', dict(id=identity, task=task, revision=revision))
 
     def _privacy(self, *_: Any) -> None:
         self.identity = ""
@@ -333,7 +340,8 @@ class StudioChatSurface(StudioSurface):
                 finally:
                     self._input_origin = None
                 if accepted and action == "submit":
-                    c.submit(self.identity)
+                    c.submit(self.identity, target_task=str(args.get('target') or ''),
+                             target_revision=args.get('revision'))
                     self._reset_history()
                     self._push_chat()
         elif action == "retry":
@@ -648,7 +656,7 @@ class StudioWindow(StudioChatSurface):
             self._cleanup()
         elif action == "tool":
             self._tool(args.get("id"))
-        elif action in {"plugin-page", "plugin-option"}:
+        elif action in {"plugin-page", "plugin-option", "plugin-command"}:
             self._plugin(action, args)
         elif action in {"plan-chat", "memory-chat", "event"}:
             self._linked_action(action, args)
@@ -839,6 +847,9 @@ class StudioWindow(StudioChatSurface):
 
         if action == "plugin-page":
             load()
+        elif action == 'plugin-command' and isinstance(args.get('parameters'), dict):
+            self.operations.send('plugin_command', {'plugin_id': identity, 'action': args.get('operation'),
+                'parameters': args['parameters']}, lambda data: self.port.publish('plugin', data))
         elif type(args.get("value")) is bool and type(args.get("revision")) is int:
             self.operations.send("plugin_set_option", {"plugin_id": identity, "key": args.get("key"),
                                  "value": args["value"], "expected_revision": args["revision"]}, lambda _: load())

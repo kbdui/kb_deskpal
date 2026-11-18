@@ -140,7 +140,7 @@ class LearningStore:
         if not 1 <= limit <= 100:
             raise ValueError('Invalid learning page size')
         with self.memory._lock:
-            result = [dict(row) for row in self.memory._db.execute('SELECT r.*,j.refs AS sources,j.status AS work_status,o.status AS role_delivery FROM learning_record r JOIN learning_job j ON j.id=r.job_id LEFT JOIN learning_role_outbox o ON o.job_id=r.job_id ORDER BY r.created_at DESC,r.id LIMIT ?', (limit,))]
+            result = [dict(row) for row in self.memory._db.execute("SELECT r.*,j.refs AS sources,j.status AS work_status,o.status AS role_delivery FROM learning_record r JOIN learning_job j ON j.id=r.job_id LEFT JOIN learning_role_outbox o ON o.job_id=r.job_id WHERE r.action!='management' ORDER BY r.created_at DESC,r.id LIMIT ?", (limit,))]
             for row in result:
                 row['sources'] = json.loads(row['sources'])
             return result

@@ -122,6 +122,10 @@ class ConversationRepository:
         result = dict(row)
         result.pop("next_sequence", None)
         result.pop("next_turn", None)
+        result['awaiting_input'] = [dict(task_id=item['id'], revision=item['revision'],
+            title=item['request'][:120], question=str(item['question'] or '')[:600])
+            for item in conn.execute("SELECT t.id,t.revision,substr(t.request,1,120) AS request,substr(json_extract(t.result,'$.response'),1,600) AS question FROM task t JOIN turn_ref r ON r.task_id=t.id WHERE r.conversation_id=? AND r.epoch=? AND t.status='AwaitingInput' AND t.scrubbed=0 ORDER BY r.sequence LIMIT 100",
+                                     (row['id'], row['context_epoch']))]
         return {**result, "conversation_id": row["id"], "epoch": row["context_epoch"], **self._meta(conn)}
 
     def _row(self, conn: sqlite3.Connection, identity: str, epoch: int | None = None,
@@ -320,7 +324,7 @@ class ConversationRepository:
             ascending = after is not None
             relation, anchor = (">", after) if ascending else ("<", before if before is not None else conversation["next_sequence"])
             order = "ASC" if ascending else "DESC"
-            rows = conn.execute(f"SELECT i.*,t.status,t.revision AS task_revision,t.cancel_requested FROM conversation_item i LEFT JOIN task t ON t.id=i.task_id WHERE i.conversation_id=? AND i.sequence{relation}? ORDER BY i.sequence {order} LIMIT ?",
+            rows = conn.execute(f"SELECT i.*,t.status,t.revision AS task_revision,t.cancel_requested FROM (SELECT * FROM conversation_item UNION ALL SELECT * FROM conversation_exchange) i LEFT JOIN task t ON t.id=i.task_id WHERE i.conversation_id=? AND i.sequence{relation}? ORDER BY i.sequence {order} LIMIT ?",
                                 (identity, anchor, limit + 1)).fetchall()
             chosen = rows[:limit]
             items: list[dict[str, Any]] = []
@@ -339,7 +343,7 @@ class ConversationRepository:
                 item["task"] = {"id": row["task_id"], "status": row["status"], "revision": row["task_revision"], "cancel_requested": bool(row["cancel_requested"])} if row["task_id"] else None
                 plan = conn.execute("SELECT canonical_json FROM immutableplan WHERE task_id=? AND scrubbed=0", (row["task_id"],)).fetchone()
                 has_steps = plan is not None and bool(json.loads(plan[0]).get("steps"))
-                item["visible"] = row["kind"] != "task_card" or row["status"] in {"Waiting", "NeedsReview", "Uncertain", "Paused"} or has_steps
+                item["visible"] = row["kind"] != "task_card" or row["status"] in {"Waiting", "NeedsReview", "Uncertain", "Paused", "AwaitingInput"} or has_steps
                 items.append(item)
             if not ascending:
                 items.reverse()
@@ -356,7 +360,7 @@ class ConversationRepository:
         with self.store.read_connection() as conn:
             self.store.check_privacy(conn)
             self._row(conn, identity)
-            row = conn.execute("SELECT body,revision,redacted_at FROM conversation_item WHERE id=? AND conversation_id=?", (item_id, identity)).fetchone()
+            row = conn.execute("SELECT body,revision,redacted_at FROM (SELECT * FROM conversation_item UNION ALL SELECT * FROM conversation_exchange) WHERE id=? AND conversation_id=?", (item_id, identity)).fetchone()
             if row is None:
                 raise KeyError(item_id)
             # Character offset avoids splitting multi-byte characters across pages.
@@ -403,9 +407,9 @@ class ConversationRepository:
             self._row(conn, identity, epoch)
             privacy_epoch = self._meta(conn)["privacy_epoch"]
             terms = tuple(term.lower() for term in search_terms[:8] if term)
-            matches = " OR ".join("instr(lower(COALESCE(u.body,'')),?)>0 OR instr(lower(a.body),?)>0" for _ in terms)
+            matches = " OR ".join("instr(lower(COALESCE(u.body,'')),?)>0 OR instr(lower(a.body),?)>0 OR EXISTS(SELECT 1 FROM conversation_exchange e WHERE e.task_id=r.task_id AND e.redacted_at IS NULL AND instr(lower(e.body),?)>0)" for _ in terms)
             search_filter = " AND (" + matches + ")" if matches else ""
-            search_args = tuple(term for term in terms for _ in range(2))
+            search_args = tuple(term for term in terms for _ in range(3))
             rows = [dict(row) for row in conn.execute(
                 """SELECT r.sequence,r.task_id,COALESCE(u.body,'') AS request,a.body AS response,
                           a.use_policy,c.refs,c.facts,t.revision AS task_revision,
@@ -439,7 +443,12 @@ class ConversationRepository:
                 refs = tuple(ConversationRef('dialogue_turn', row['task_id'] + ':' + side,
                     row['sequence'], row['use_policy']) for side in ('user', 'assistant'))
                 facts = tuple(str(fact) for fact in json.loads(row["facts"]))
-                turn = ConversationTurn(row["sequence"], row["task_id"], row["request"], row["response"], refs, row["use_policy"], facts)
+                exchanges = conn.execute('SELECT kind,body FROM conversation_exchange WHERE task_id=? AND redacted_at IS NULL ORDER BY sequence', (row['task_id'],)).fetchall()
+                from .exchanges import user_text
+                request = user_text(conn, row['task_id'], row['request'])
+                questions = [item['body'] for item in exchanges if item['kind'] == 'assistant_message']
+                response = ''.join('[此前的澄清问题]\n' + question + '\n\n' for question in questions) + row['response']
+                turn = ConversationTurn(row["sequence"], row["task_id"], request, response, refs, row["use_policy"], facts)
                 size = turn.history_bytes + sum(len(fact.encode("utf-8")) for fact in facts)
                 if used + size > MAX_HISTORY_BYTES:
                     if terms:
@@ -483,6 +492,7 @@ class ConversationRepository:
                 conn.execute("UPDATE task SET cancel_requested=1 WHERE id=? AND status NOT IN ('Completed','Failed','Cancelled')", (task_id,))
                 scrub(task_id)
             conn.execute("UPDATE conversation_item SET body='',redacted_at=?,revision=revision+1 WHERE conversation_id=? AND redacted_at IS NULL", (now, identity))
+            conn.execute("UPDATE conversation_exchange SET body='',redacted_at=?,revision=revision+1 WHERE conversation_id=? AND redacted_at IS NULL", (now, identity))
             conn.execute("UPDATE desktop_reminder_inbox SET conversation_id=NULL WHERE conversation_id=?", (identity,))
             conn.execute("UPDATE task SET request='[聊天记录已清空]' WHERE id IN (SELECT task_id FROM turn_ref WHERE conversation_id=?)", (identity,))
             conn.execute("UPDATE conversation_turn SET refs='[]',facts='[]',published=0 WHERE task_id IN (SELECT task_id FROM turn_ref WHERE conversation_id=?)", (identity,))

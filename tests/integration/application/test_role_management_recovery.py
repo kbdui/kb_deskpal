@@ -104,14 +104,14 @@ def test_two_distinct_role_changes_in_one_task_use_separate_receipts(app_model):
 def test_cancel_after_partial_completion_keeps_effect_and_reports_it(app_model):
     app, model = app_model
     original = app.interaction_snapshot()["character_card"]["text"]
-    model.decide = lambda: (LLMResponse("", (ToolCall("memory_remember", {"content": "合成记忆：喜欢茶"}, "remember"),))
+    model.decide = lambda: (LLMResponse("", (ToolCall("time", {}, "first-time"),))
         if len(model.planning_inputs) == 1 else change(app, "仍待授权的角色卡"))
     conversation = app.conversation_ensure_default()
-    task = app.submit("先记住偏好，再申请修改角色卡", conversation_id=conversation["id"],
+    task = app.submit("先查询时间，再申请修改角色卡", conversation_id=conversation["id"],
                       expected_context_epoch=conversation["context_epoch"])
     assert app.wait(task.id, 10).status == TaskStatus.WAITING
     before_cancel = app.task_review(task.id)
-    assert [s["tool_name"] for s in before_cancel["execution_progress"]["completed"]] == ["memory_remember"]
+    assert [s["tool_name"] for s in before_cancel["execution_progress"]["completed"]] == ["time"]
     assert [s["tool_name"] for s in before_cancel["steps"]] == ["role_update"]
     assert "不会撤销" in before_cancel["cancellation_notice"]
     facade = DesktopFacade(app)
@@ -127,8 +127,7 @@ def test_cancel_after_partial_completion_keeps_effect_and_reports_it(app_model):
     assert review["status"] == "Cancelled" and "仍然保留" in review["cancellation_notice"]
     timeline = app.conversation_timeline(app.conversation_ensure_default()["id"])["items"]
     assert any("此前已完成的操作仍然保留" in item.get("body", "") for item in timeline)
-    memory_id = app.journal.attempts(task.id)[0].result.output["id"]
-    assert app.core.memory_runtime.repository.get(memory_id) is not None
+    assert app.journal.attempts(task.id)[0].result.success
 
 
 def test_cancel_receipt_survives_reopen_and_rejects_identity_reuse(app_model):

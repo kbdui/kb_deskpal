@@ -85,29 +85,6 @@ class InteractionCoordinator:
         self.persistence.renew_memory(task_id, "", 0, turn.planning_items,
             extra_refs=tuple(("memory", identity, revision) for identity, revision in refs))
 
-    def refresh_memory(self, task_id: str, memory_id: str, revision: int, replacement_id: str) -> PreparedTurn:
-        turn = self._prepared[task_id]
-        self.privacy.check(turn.privacy_epoch)
-        if not self.memory.valid(((replacement_id, revision),)):
-            raise WorkflowBlocked("更正后的记忆已经再次变化。")
-        def refers(item: Mapping[str, Any]) -> bool:
-            return any(kind == "memory" and identity == memory_id for kind, identity, _ in _refs(item.get("refs", ())))
-        # 依赖旧记忆的完整历史单元全部省略，实际更正结果在工具观察中提供。
-        revoked_tasks = {str(item.get("source_ref", {}).get("id", "")).rsplit(":", 1)[0]
-                         for item in turn.planning_items if refers(item)}
-        items = tuple(item for item in turn.planning_items if not refers(item) and
-                      str(item.get("source_ref", {}).get("id", "")).rsplit(":", 1)[0] not in revoked_tasks)
-        history = tuple(item for item in turn.history if not refers(item))
-        self.persistence.renew_memory(task_id, memory_id, revision, items, replacement_id)
-        snapshot = self.persistence.context(task_id, 'planning')
-        records = self._memory_records(snapshot['refs'] if snapshot else ())
-        updated = replace(turn, planning_items=items, history=history,
-            conversation_summary=next((item for item in items if item.get("kind") == "conversation_summary"), None),
-            memories=tuple(row.content for row in records), memory_records=records)
-        self._prepared[task_id] = updated
-        self.check(task_id)
-        return updated
-
     def refresh_role(self, task_id: str, expected_revision: int) -> PreparedTurn:
         turn = self._prepared[task_id]
         self.privacy.check(turn.privacy_epoch)

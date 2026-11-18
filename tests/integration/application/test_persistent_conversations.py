@@ -16,7 +16,7 @@ from deskpal.conversation.runtime import ConversationConflict, ConversationRunti
 from deskpal.tasks.models import TaskStatus
 from deskpal.workflow.humanization import HumanizationStore
 from deskpal.workflow.journal import ExecutionJournal
-from deskpal.workflow.migrations import SCHEMA_2
+from deskpal.workflow.migrations import SCHEMA_2, SCHEMA_VERSION
 from deskpal.workflow.models import WorkflowBlocked
 from deskpal.workflow.store import WorkflowStore, _SCHEMA
 from deskpal.workflow.tasks import PersistentTaskManager
@@ -84,7 +84,7 @@ def test_schema_two_backup_default_protection_and_no_fabricated_history(tmp_path
         assert repository.timeline(default["id"])["items"] == []
         with store.read_connection() as connection:
             assert connection.execute("SELECT request,result FROM task WHERE id='old-task'").fetchone()[:] == ("old synthetic request", '{"response":"old result"}')
-            assert connection.execute("SELECT version FROM schema_version").fetchone()[0] == 5
+            assert connection.execute("SELECT version FROM schema_version").fetchone()[0] == SCHEMA_VERSION
         with pytest.raises(ValueError, match="archived"):
             repository.update(default["id"], default["revision"], "archive-default", archived=True)
         with pytest.raises(ValueError, match="title"):

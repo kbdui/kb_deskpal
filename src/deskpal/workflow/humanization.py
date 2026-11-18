@@ -12,7 +12,7 @@ from .tasks import dependency_ref
 from deskpal.llm.diagnostics import sanitize
 
 
-_PURPOSES = frozenset({"context_understanding", "planning", "expression", "memory_evaluation"})
+_PURPOSES = frozenset({"context_understanding", "planning", "expression", "memory_evaluation", "plugin_expression"})
 
 
 class HumanizationStore:
@@ -194,7 +194,7 @@ class HumanizationStore:
     def reserve_call(self, task_id: str, purpose: str, limit: int = 1) -> str:
         if purpose not in _PURPOSES or type(limit) is not int or not 1 <= limit <= 1:
             raise ValueError("Callers cannot override the host model-call budget")
-        limit = 24 if purpose == "planning" else 3 if purpose == "memory_evaluation" else 1
+        limit = 24 if purpose == "planning" else 3 if purpose == "memory_evaluation" else 8 if purpose == 'plugin_expression' else 1
         with self.store.transaction() as conn:
             self.store.check_dependencies(conn, task_id)
             self.store.check_context_dependencies(conn, task_id, purpose)

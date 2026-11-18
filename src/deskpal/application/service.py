@@ -94,8 +94,6 @@ class ApplicationService:
         if not isinstance(runtime, MemoryCoordinator):
             raise ValueError('Application learning requires MemoryCoordinator')
         self.learning = FeedbackLearning(self, runtime)
-        core.attach_feedback(self.learning)
-        core.attach_interaction(self._interaction)
         journal.add_validator(self._validate_memory)
         journal.add_validator(proposals.validate_task)
         self._dispatcher = SubmissionDispatcher(core, tasks, journal,
@@ -112,6 +110,8 @@ class ApplicationService:
             raise ValueError("Application requires the host tool registry")
         for tool in management_tools(self):
             self.tools.register_plugin_tool(AGENT, tool)
+        from deskpal.plugins.qq.runtime import MANIFEST as QQ
+        self.tools.declare_plugin(QQ)
         self.plugins = PluginRuntime(store, self.tools.plugin_manifests())
         self.task_control = TaskControl(store)
         core._task_control = self.task_control
@@ -127,6 +127,23 @@ class ApplicationService:
             on_occurrence=partial(record_schedule_occurrence, self.plugins.data(SCHEDULE.id)),
         )
         register_schedule_page(self.plugins, self._reminders.detail)
+        from deskpal.plugins.execution import ChannelHost, ChannelInteraction, ChannelFeedback
+        from deskpal.plugins.qq.runtime import QqRuntime, QqTool, UnavailableQq
+        import sqlite3
+        self.channels = ChannelHost(self)
+        try:
+            self.qq: Any = QqRuntime(self, self.channels)
+        except (sqlite3.Error, ValueError, OSError):
+            self.qq = UnavailableQq(self)
+        if isinstance(self.qq, QqRuntime):
+            self.channels.register('qq', self.qq)
+            for name in self.qq.tool_names:
+                self.tools.register_plugin_tool(QQ, QqTool(self.qq, name))
+        self.tools.set_channel_policy(self.channels.policy.check)
+        journal.add_validator(self.channels.validate_task)
+        core._channels = self.channels
+        core.attach_feedback(ChannelFeedback(self.channels, self.learning))
+        core.attach_interaction(ChannelInteraction(self.channels, self._interaction))
         self._reminder_pump = ReminderPump(self._reminders)
         observe = getattr(self.tools, "set_result_observer", None)
         if callable(observe):
@@ -134,6 +151,9 @@ class ApplicationService:
         # Resume deletion before recovery can expose a persisted request/plan.
         self._cleanup_pending = False
         self._retry_deletions()
+        if not self._cleanup_pending:
+            # 先投递已提交的整理结果，再检查旧计划；不把自身更正误判为外部篡改。
+            self.learning.recover()
         self.recovered_tasks = journal.recover() if not self._cleanup_pending else ()
 
     def start(self) -> None:
@@ -143,11 +163,12 @@ class ApplicationService:
             return
         try:
             self._reminder_pump.start()
-            if self.config.proactive.enabled:
-                self._rule_thread = Thread(target=self._poll_rules, name="deskpal-proposals", daemon=True)
-                self._rule_thread.start()
+            # 归档期限属于本机存储维护，即使关闭主动行为也必须检查。
+            self._rule_thread = Thread(target=self._poll_rules, name="deskpal-proposals", daemon=True)
+            self._rule_thread.start()
             self._dispatcher.start()
             self._started = True
+            self.qq.start()
         except BaseException:
             self._reminder_pump.shutdown(self.config.workflow.shutdown_timeout_seconds)
             self._rule_stop.set()
@@ -254,6 +275,17 @@ class ApplicationService:
         self._ready()
         return self.plugins.set_option(plugin_id, key, value, expected_revision)
 
+    def plugin_command(self, plugin_id: str, action: str, parameters: dict[str, Any]) -> dict[str, Any]:
+        self._ready()
+        from deskpal.plugins.runtime import PluginCommandError
+        try:
+            self.plugins.command(plugin_id, action, parameters)
+            return self.plugins.page(plugin_id)
+        except PluginCommandError as error:
+            result = self.plugins.page(plugin_id)
+            result['command_error'] = str(error)
+            return result
+
     def reminder_feed(self, *, cursor: str | None = None, limit: int = 50, unread: bool = False) -> dict[str, Any]:
         self._ready()
         return self._reminders.feed(cursor=cursor, limit=limit, unread=unread)
@@ -278,6 +310,12 @@ class ApplicationService:
             raise ValueError("A bounded command identity is required")
         with self.store.read_connection() as connection:
             self.store.check_privacy(connection)
+            amendment = connection.execute('SELECT a.task_id,t.status,t.scrubbed FROM task_amendment a JOIN task t ON t.id=a.task_id WHERE a.command_id=?', (command_id,)).fetchone()
+            if amendment:
+                if amendment['scrubbed']:
+                    raise WorkflowBlocked('补充内容已清理。')
+                return dict(known=True, accepted=True, task_id=amendment['task_id'], status=amendment['status'],
+                            current_process_execution_authority=False)
             control = connection.execute('SELECT task_id,operation FROM task_control_receipt WHERE command_id=?', (command_id,)).fetchone()
             if control:
                 task = self.tasks.get(control['task_id'])
@@ -528,22 +566,6 @@ class ApplicationService:
         result["privacy_invalidated"] = False
         result["privacy_epoch"] = int(self._humanization.privacy()["epoch"])
         return result
-
-    def forget_during_task(self, memory_id: str, expected_revision: int, task_id: str) -> dict[str, Any]:
-        """唯一执行线程内的已授权遗忘；本轮移除旧依赖后继续组织回复。"""
-        turn = self._interaction.current_turn(task_id)
-        with self._privacy.publication(turn.privacy_epoch):
-            receipt = self._memory_runtime.forget(memory_id, expected_revision)
-            self._interaction.settle_learning(task_id, {memory_id}, drop_summary=True)
-            self.core._task_dependencies[task_id] = tuple(ref for ref in
-                self.core._task_dependencies.get(task_id, ()) if ref[0] != memory_id)
-            affected = self.journal.scrub_memory(memory_id, keep_task=task_id)
-            self._conversation_repository.invalidate_memory_summaries(memory_id)
-        self.core.revoke_pending(affected)
-        self._dispatcher.clear_cached(affected)
-        return dict(memory_id=memory_id, revision=receipt.revision, status='Completed',
-            cleared=['指定记忆及其旧版本、检索索引'],
-            retained=['聊天记录', '其他记忆与人格', '执行记录与日程提醒'])
 
     def request_forget(self, memory_id: str, expected_revision: int,
                        command_id: str) -> dict[str, Any]:
@@ -829,16 +851,34 @@ class ApplicationService:
         self._ready()
         return self.notification_policy.set(kind, paused, until_at, command_id)
 
-    def answer_task(self, task_id: str, content: str, command_id: str) -> dict[str, Any]:
+    def answer_task(self, task_id: str, content: str, command_id: str, *,
+                    conversation_id: str | None = None, expected_context_epoch: int | None = None,
+                    expected_revision: int | None = None) -> dict[str, Any]:
         self._ready()
+        if expected_revision is not None and (type(expected_revision) is not int or expected_revision < 1):
+            raise ValueError('Invalid target revision')
         with self._dispatcher.control():
             with self.store.transaction() as conn:
+                self.store.check_privacy(conn, task_id)
+                if conversation_id is not None:
+                    self._conversation_repository._row(conn, conversation_id, expected_context_epoch, writable=True)
+                    link = conn.execute('SELECT conversation_id,epoch FROM turn_ref WHERE task_id=?', (task_id,)).fetchone()
+                    if link is None or (link[0], link[1]) != (conversation_id, expected_context_epoch):
+                        raise WorkflowBlocked('任务不属于当前会话，草稿已保留。')
                 if conn.execute("SELECT 1 FROM task_amendment WHERE command_id=?", (command_id,)).fetchone():
                     return self.journal.append_amendment(task_id, content, command_id)
                 task = self.tasks.get(task_id)
                 if task is None or task.status != TaskStatus.AWAITING_INPUT:
                     raise WorkflowBlocked("只有等待补充信息的任务可以在这里续办。")
+                if expected_revision is not None and task.revision != expected_revision:
+                    raise WorkflowBlocked('任务状态已变化，请核对后再发送；草稿已保留。')
+                from deskpal.conversation.exchanges import question, supplement
+                # 兼容升级前仍将澄清问题放在最终回复占位中的旧任务。
+                response = (task.result or {}).get('response', '') if isinstance(task.result, dict) else ''
+                if response:
+                    question(conn, task_id, response)
                 receipt = self.journal.append_amendment(task_id, content, command_id)
+                supplement(conn, task_id, command_id, content)
                 snapshot = self.journal.get_plan(task_id)
                 if snapshot is None:
                     raise WorkflowBlocked("缺少可续办的上下文。")
@@ -988,18 +1028,25 @@ class ApplicationService:
                 self._humanization.discard_effects()
                 self.learning.recover()
                 self.learning.resume_work()
+                self.qq.poll()
             finally:
                 self.flush_audit()
 
     def _poll_rules(self) -> None:
+        next_proactive = 0.0
         while not self._rule_stop.is_set():
             try:
                 if not self._cleanup_pending:
-                    self.proactive.poll()
+                    self.learning.repository.archive_due_candidates()
+                    self.plugins.tick()
+                    if self.config.proactive.enabled and monotonic() >= next_proactive:
+                        self.proactive.poll()
+                        next_proactive = monotonic() + self.config.proactive.poll_interval_seconds
                     self._rule_error = None
             except Exception as exc:
                 self._rule_error = type(exc).__name__
-            self._rule_stop.wait(self.config.proactive.poll_interval_seconds)
+            interval = self.config.proactive.poll_interval_seconds
+            self._rule_stop.wait(min(interval, 1.0) if self.plugins.has_ticks else interval)
 
     def diagnostics(self) -> dict[str, Any]:
         if self._closed:
@@ -1023,6 +1070,8 @@ class ApplicationService:
             self._shutdown_started = True
             self._closing = True
             self._rule_stop.set()
+            self.qq.stopping = True
+            self.qq.stop_receiver()
             self._reminder_pump.stop()
             self._dispatcher.stop_accepting()
 
@@ -1048,6 +1097,7 @@ class ApplicationService:
             self.flush_audit()
             self._reviewed.clear()
             self._live_pending.clear()
+            self.qq.close()
             self._release_resources()
             self._closed = True
             return True

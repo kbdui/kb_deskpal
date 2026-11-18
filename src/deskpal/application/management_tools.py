@@ -6,7 +6,6 @@ from deskpal.workflow.store import canonical
 from deskpal.workflow.models import WorkflowBlocked
 from typing import Any
 
-from deskpal.memory.contracts import UsePolicy
 from deskpal.tools.models import PermissionLevel, ToolContext, ToolResult, ToolSpec
 
 
@@ -15,7 +14,7 @@ class ManagementTool:
         self.app, self.name = app, name
         self.spec = ToolSpec(name, description, {"type": "object", "properties": properties,
             "required": required, "additionalProperties": False},
-            PermissionLevel.CONFIRM if name in {"memory_forget", "role_update"} else PermissionLevel.AUTOMATIC,
+            PermissionLevel.CONFIRM if name == "role_update" else PermissionLevel.AUTOMATIC,
             contract_version="2" if name == "role_update" else "1")
 
     def execute(self, arguments: Mapping[str, Any], context: ToolContext) -> ToolResult:
@@ -51,20 +50,6 @@ class ManagementTool:
             app._interaction.admit_tool_memories(context.task_id, bundle.revisions)
             output = {"items": [{"id": item.id, "content": item.content} for item in bundle.records],
                       "revisions": [list(ref) for ref in bundle.revisions]}
-        elif self.name == "memory_remember":
-            item = app._memory_runtime.remember(arguments["content"], task_id=context.task_id,
-                use_policy=UsePolicy(app._humanization.task_policy(context.task_id)))
-            turn = app._humanization.turn(context.task_id)
-            if turn:
-                app.learning.store.link(item.id, [dict(kind='dialogue_turn', id=context.task_id + ':user',
-                    revision=turn['sequence'], conversation_id=turn['conversation_id'], available=True)])
-            output = {"id": item.id, "revision": item.revision, "content": item.draft.content, "status": "saved"}
-        elif self.name == "memory_correct":
-            item = app._memory_runtime.correct(arguments["memory_id"], arguments["expected_revision"], arguments["content"])
-            app._conversation_repository.invalidate_memory_summaries(arguments['memory_id'])
-            output = {"id": item.id, "previous_id": arguments["memory_id"], "revision": item.revision, "content": item.draft.content, "status": "saved"}
-        elif self.name == "memory_forget":
-            output = app.forget_during_task(arguments['memory_id'], arguments['expected_revision'], context.task_id)
         elif self.name == "role_read":
             turn = app._humanization.turn(context.task_id)
             output = app.core.companion_runtime.context(turn["conversation_id"], turn["epoch"], context.task_id,
@@ -122,10 +107,7 @@ def management_tools(app: Any) -> tuple[ManagementTool, ...]:
         ManagementTool(app, 'reflection_record', '主动任务记录值得保留的一份内部思考成果：topic主题、content简短结论、reason依据及不确定性。不是聊天或外部事实，不保存推理过程；可随后quiet。每任务至多一份，记忆采用以反馈学习回执为准', {'topic':text, 'content':text, 'reason':text}, ['topic','content','reason']),
         ManagementTool(app, 'attention_schedule', '统一安排后续复查；mode=internal内部维护，chat考虑主动交流，reflection继续自主思考。不是提醒或操作授权，最短间隔15分钟', {'goal':text, 'reason':text, 'due_at':identity, 'mode':{'type':'string','enum':['internal','chat','reflection']}}, ['goal','reason','due_at']),
         ManagementTool(app, 'attention_end', '结束当前主动关注，不再追问；随后安静结束', {}, []),
-        ManagementTool(app, "memory_search", "检索当前角色记忆；更正或遗忘前读取真实id和revision", {"query": text}, ["query"]),
-        ManagementTool(app, "memory_remember", "保存用户明确要求记住的内容；不要将推测直接当事实", {"content": text}, ["content"]),
-        ManagementTool(app, "memory_correct", "更正一条当前记忆，必须使用实际revision", {"memory_id": identity, "expected_revision": revision, "content": text}, ["memory_id", "expected_revision", "content"]),
-        ManagementTool(app, "memory_forget", "按真实 id 和 revision 遗忘指定提炼记忆及其修订、索引；保留聊天、其他记忆、人格、执行记录和安排。仅用于明确遗忘请求，事项完成应更新状态。Pending 仅表示受理，不能声称清理完成。", {"memory_id": identity, "expected_revision": revision}, ["memory_id", "expected_revision"]),
+        ManagementTool(app, "memory_search", "检索当前角色记忆及真实编号、版本；写入、更正和遗忘统一交给后续记忆整理", {"query": text}, ["query"]),
         ManagementTool(app, "role_read", "读取角色卡、相处习惯与状态；修改角色卡使用返回对象最外层 revision，而非 character_card.revision", {}, []),
         ManagementTool(app, "role_update", "仅在用户明确要求修改角色卡或角色身份时使用，执行前需用户授权；先 role_read，expected_revision 取最外层 revision。相处习惯调整由反馈学习处理，不要复制进角色卡；成功后不要重复调用", {"text": text, "expected_revision": revision}, ["text", "expected_revision"]),
         ManagementTool(app, "task_cancel", "取消指定其它任务的后续步骤，不撤销已经完成的操作", {"task_id": identity}, ["task_id"]),

@@ -93,8 +93,8 @@ class MemoryConfig:
     max_context_bytes: int = 8000
     max_candidates: int = 5
     semantic_threshold: float = 0.55
-    evaluation_timeout_seconds: float = 40.0
-    evaluation_max_output_tokens: int = 8192
+    evaluation_timeout_seconds: float = 120.0
+    evaluation_max_output_tokens: int = 16384
 
 
 @dataclass(frozen=True)
@@ -347,14 +347,14 @@ def load_config(path: str | Path | None = None, *, environ: Mapping[str, str] | 
         "memory", "max_context_bytes", 8000, "DESKPAL_MEMORY_MAX_CONTEXT_BYTES", True)
     max_candidates = positive_number("memory", "max_candidates", 5, "DESKPAL_MEMORY_MAX_CANDIDATES", True)
     threshold = positive_number("memory", "semantic_threshold", 0.55, "DESKPAL_MEMORY_SEMANTIC_THRESHOLD")
-    evaluation_timeout = positive_number("memory", "evaluation_timeout_seconds", 40.0,
+    evaluation_timeout = positive_number("memory", "evaluation_timeout_seconds", 120.0,
                                          "DESKPAL_MEMORY_EVALUATION_TIMEOUT_SECONDS")
-    evaluation_tokens = positive_number("memory", "evaluation_max_output_tokens", 8192,
+    evaluation_tokens = positive_number("memory", "evaluation_max_output_tokens", 16384,
                                         "DESKPAL_MEMORY_EVALUATION_MAX_OUTPUT_TOKENS", True)
     if max_context_bytes > 65536 or max_candidates > 20 or threshold > 1:
         raise ConfigError("Memory limits must be <=65536 bytes, <=20 candidates, and threshold <=1")
-    if evaluation_timeout > 60 or evaluation_tokens > 8192:
-        raise ConfigError("Memory evaluation must use <=60 seconds and <=8192 output tokens")
+    if evaluation_timeout > 120 or evaluation_tokens > 16384:
+        raise ConfigError("Memory evaluation must use <=120 seconds and <=16384 output tokens")
     return AppConfig(
         llm=LLMConfig(provider, model, base_url, api_key_env,
                       positive_number("llm", "timeout_seconds", 30.0, "DESKPAL_LLM_TIMEOUT_SECONDS"), api_key,

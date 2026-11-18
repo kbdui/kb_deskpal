@@ -39,6 +39,11 @@ class ExecutionJournal:
 
     def origin(self, task_id: str) -> dict[str, Any]:
         with self.store.read_connection() as conn:
+            channel = conn.execute("SELECT items FROM context_snapshot WHERE task_id=? AND purpose='plugin_execution'", (task_id,)).fetchone()
+            if channel:
+                context = json.loads(channel[0])
+                return {'kind': 'plugin', 'basis': '受管插件渠道事件', 'plugin_id': context['plugin_id'],
+                        'principal_id': context['principal_id']}
             row = conn.execute("SELECT kind,basis FROM task_origin WHERE task_id=?", (task_id,)).fetchone()
             return dict(row) if row else {"kind": "user", "basis": "current user request"}
 
@@ -101,6 +106,10 @@ class ExecutionJournal:
             data["reply"] = plan.reply
             data["action"] = plan.action
             data['organize_memory'] = plan.organize_memory
+            if plan.memory_requests:
+                data['memory_requests'] = list(plan.memory_requests)
+            elif not plan.steps and plan.action in {'answer', 'clarify', 'quiet'}:
+                data.pop('memory_requests', None)
             data["memory_refs"] = list(memory_refs)
             data["use_policy"] = conn.execute("SELECT use_policy FROM task WHERE id=?", (task_id,)).fetchone()[0]
             data["dependencies"] = [(ref.kind, ref.object_id, ref.revision) for ref in self.get_dependencies(task_id)]
@@ -160,6 +169,8 @@ class ExecutionJournal:
         value = {"task_id": task_id, "reply": plan.reply, "action": plan.action, "steps": calls, "tool_specs": specs,
                  "workspace_dir": str(workspace_dir), "memory_refs": list(memory_refs), "policy_version": "2", "loop_version": 1}
         value['organize_memory'] = plan.organize_memory
+        if plan.memory_requests:
+            value['memory_requests'] = list(plan.memory_requests)
         with self.store.transaction() as conn:
             self.set_dependencies(task_id, memory_refs)
             self.store.check_dependencies(conn, task_id)
@@ -210,8 +221,10 @@ class ExecutionJournal:
             policy_version = str(data.get("policy_version", "1"))
             if policy_version not in {"1", "2"}:
                 raise WorkflowBlocked("Unsupported immutable plan policy version")
+            from deskpal.memory.management import requests
             plan = Plan(data["reply"], tuple(ToolCall(call["name"], call["arguments"], call["call_id"]) for call in data["steps"]),
-                        data.get("action", "answer"), organize_memory=data.get('organize_memory', data.get('action') != 'quiet'))
+                        data.get("action", "answer"), organize_memory=data.get('organize_memory', data.get('action') != 'quiet'),
+                        memory_requests=requests(data.get('memory_requests', [])))
             if type(plan.organize_memory) is not bool:
                 raise WorkflowBlocked('Invalid persisted memory organization decision')
             specs = tuple(ToolSpec(spec["name"], spec["description"], spec["parameters"],

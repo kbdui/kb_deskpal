@@ -18,7 +18,7 @@ from .diagnostics import failure, sanitize
 
 
 _T = TypeVar("_T")
-_PURPOSES = frozenset({"context_understanding", "planning", "expression", "memory_evaluation"})
+_PURPOSES = frozenset({"context_understanding", "planning", "expression", "memory_evaluation", "plugin_expression"})
 
 
 class ModelCallGateway:
@@ -55,7 +55,7 @@ class ModelCallGateway:
         with self._lock:
             key = (task_id, purpose)
             count = sum(1 for task, item in self._attempts if task == task_id and item.split(":")[0] == purpose)
-            if count >= (24 if purpose == "planning" else 3 if purpose == "memory_evaluation" else 1):
+            if count >= (24 if purpose == "planning" else 3 if purpose == "memory_evaluation" else 8 if purpose == 'plugin_expression' else 1):
                 raise LLMError("Model call budget exhausted")
             call_id = str(uuid4())
             self._attempts[(task_id, purpose + ":" + str(count))] = call_id
@@ -122,6 +122,10 @@ class _BoundProvider:
         self._task_id = task_id
         self._purpose = purpose
         self._guard = guard
+
+    def annotate(self, values: dict[str, object]) -> None:
+        """业务解析结果归到这次任务、用途的实际调用；网关仍负责脱敏。"""
+        self._gateway.annotate(self._task_id, self._purpose, values)
 
     @property
     def supports_json_output(self) -> bool:
