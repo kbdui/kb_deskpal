@@ -16,7 +16,7 @@ def report(index=0, status='applied', reason='按本轮明确要求处理'):
     return dict(request=index, status=status, reason=reason)
 
 
-def install(model, requests, *, search=None):
+def install(model, requests, *, search=None, reply='准备处理记忆要求。'):
     original = model.chat
     counts = []
     def chat(messages, *, tools=()):
@@ -24,7 +24,7 @@ def install(model, requests, *, search=None):
             counts.append([tool.name for tool in tools])
             if search and len(counts) == 1:
                 return LLMResponse('', (ToolCall('memory_search', {'query': search}, 'lookup'),))
-            return LLMResponse(json.dumps(dict(action='answer', reply='准备处理记忆要求。',
+            return LLMResponse(json.dumps(dict(action='answer', reply=reply,
                 organize_memory=False, memory_requests=requests), ensure_ascii=False))
         return original(messages, tools=tools)
     model.chat = chat
@@ -43,7 +43,10 @@ def test_explicit_remember_forces_one_learning_call_and_is_not_a_tool(app_model)
     assert 'memory_search' in planned[0]
     assert app.tasks.get(result.task_id).result['organize_memory'] is True
     assert app.journal.get_plan(result.task_id).plan.memory_requests == (intent('remember', text),)
+    assert len(model.expressions) == 1
     assert model.expressions[-1]['learning_receipt']['management'][0]['status'] == 'applied'
+    assert model.expressions[-1]['unverified_assistant_draft'] == '准备处理记忆要求。'
+    assert model.expressions[-1]['history'] == [] and model.expressions[-1]['role_context'] is None
 
 
 def test_search_then_correction_refreshes_reply_and_preserves_other_memory_and_chat(app_model):
@@ -63,7 +66,7 @@ def test_search_then_correction_refreshes_reply_and_preserves_other_memory_and_c
     assert current.draft.content == '用户喜欢红茶' and current.revision == old.revision + 1
     assert app.memory.repository.get(other.id).draft.content == other.draft.content
     expression = model.expressions[-1]
-    assert '用户喜欢咖啡' not in json.dumps(expression['memory_claims'], ensure_ascii=False)
+    assert expression['memory_claims'] == [] and expression['tool_results'] == []
     assert expression['learning_receipt']['saved_understandings'][0]['content'] == current.draft.content
     assert expression['learning_receipt']['status'] == 'completed'
     with app.store.read_connection() as db:
@@ -75,7 +78,7 @@ def test_forget_directly_preserves_chat_and_other_records(app_model):
     old = app.memory_command('remember', content='用户喜欢咖啡')
     other = app.memory_command('remember', content='用户喜欢散步')
     text = '请遗忘关于我喜欢咖啡的那条记忆'
-    install(model, [intent('forget', text, old.id)], search='咖啡')
+    install(model, [intent('forget', text, old.id)], search='咖啡', reply='复述旧记忆：用户喜欢咖啡')
     model.fn = lambda data: dict(reviews=[dict(id=old.id, decision='forget', reason='明确要求')], management=[report()])
     result = turn(app, text)
     assert len(model.inputs) == 1
@@ -85,6 +88,8 @@ def test_forget_directly_preserves_chat_and_other_records(app_model):
     receipt = model.expressions[-1]['learning_receipt']
     assert receipt['status'] == 'completed' and receipt['saved_understandings'][0]['action'] == 'forget'
     assert 'content' not in receipt['saved_understandings'][0]
+    assert model.expressions[-1]['unverified_assistant_draft'] == ''
+    assert model.expressions[-1]['tool_results'] == []
     with app.store.read_connection() as db:
         assert db.execute('SELECT 1 FROM conversation_item WHERE body=?', (text,)).fetchone()
         assert not db.execute("SELECT 1 FROM dependency WHERE task_id=? AND kind='memory' AND object_id=?", (result.task_id, old.id)).fetchone()
@@ -131,10 +136,14 @@ def test_invalid_management_cannot_partially_write(app_model, fault):
             value['memories'] = [draft('重新保存咖啡', '用户喜欢咖啡', sources=[source])]
         return value
     model.fn = bad
-    turn(app, text)
+    result = turn(app, text)
     assert app.memory.repository.get(old.id).status != MemoryStatus.DELETED
     assert app.memory.repository.get(other.id).status != MemoryStatus.DELETED
-    assert model.expressions[-1]['learning_receipt']['status'] == 'failed'
+    assert app.tasks.get(result.task_id).result['learning_receipt']['status'] == 'failed'
+    if fault == 'no_request':
+        assert not model.expressions
+    else:
+        assert model.expressions[-1]['learning_receipt']['status'] == 'failed'
 
 
 def test_committed_forget_cleanup_recovers_without_another_model_call(app_model, monkeypatch):

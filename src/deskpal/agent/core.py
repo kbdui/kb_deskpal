@@ -20,7 +20,7 @@ from deskpal.planner.models import Plan
 from deskpal.planner.output import PlanningOutputError
 from deskpal.planner.ports import Planner
 from deskpal.response.composer import ResponseComposer
-from deskpal.response.templates import terminal_response, tool_response_fallback
+from deskpal.response.templates import memory_receipt_fallback, terminal_response, tool_response_fallback
 from deskpal.sandbox.errors import PathViolation, PermissionDenied, ToolNotFound
 from deskpal.tasks.models import Task, TaskStatus
 from deskpal.tasks.ports import TaskManager
@@ -735,24 +735,36 @@ class AgentCore:
                     except Exception:
                         learning_receipt = {"status": "unavailable", "saved_understandings": []}
                         warnings.append("本轮学习回执暂不可用，不能确认保存成功。")
-            phase = "reflection"
-            # 工具结果是事实来源；回复模型只负责组织表达，不获得工具调用能力。
-            self._stage(task_id, "Reflect")
-            response = plan.reply
-            style = prepared.style if prepared is not None else self._companion_style(
-                request, companion_generation, warnings)
-            if not tool_delivery and plan.action != "quiet" and (results or style or (prepared is not None and (prepared.history or prepared.role_json))):
+            facts = tuple(_result_data(item) for item in results)
+            response = plan.reply.strip()
+            receipt_needed = not tool_delivery and plan.action == "answer" and bool(plan.memory_requests)
+            receipt_facts = tuple(item for item in facts if item["tool_name"] != "memory_search") if receipt_needed else facts
+
+            def fallback() -> str:
+                if receipt_needed:
+                    summary = memory_receipt_fallback(plan.memory_requests, learning_receipt)
+                    if receipt_facts:
+                        summary += "\n" + tool_response_fallback(receipt_facts, expression_failed=False)
+                    return summary
+                return tool_response_fallback(facts) if facts else "回复暂不可用，请重试。"
+
+            if receipt_needed:
+                phase = "reflection"
+                self._stage(task_id, "Reflect")
+                reports = learning_receipt.get("management") or ()
+                draft_safe = not (any(item["action"] == "forget" for item in plan.memory_requests)
+                    and (learning_receipt.get("status") in {"delivery_pending", "unavailable"}
+                         or any(isinstance(item, dict) and item.get("action") == "forget" and item.get("status") == "applied"
+                                for item in reports)))
                 try:
                     self._boundary(task_id)
                     client = self._interaction.calls(task_id, "expression") if self._interaction else self.llm
-                    composed = ResponseComposer(client).compose(request=request, draft=plan.reply,
-                        style=style, history=tuple(dict(item) for item in prepared.history) if prepared else (),
-                        memories=prepared.memories if prepared else (),
-                        role_context=json.loads(prepared.role_json) if prepared and prepared.role_json else None,
-                        conversation_summary=prepared.conversation_summary if prepared else None,
-                        response_intent="clarify" if clarifying else "answer",
-                        context_warnings=tuple(warnings), learning_receipt=learning_receipt,
-                        tool_results=tuple(_result_data(item) for item in results),
+                    composed = ResponseComposer(client).compose(request=request, draft=response if draft_safe else "",
+                        style=prepared.style if prepared is not None else self._companion_style(request, companion_generation, warnings),
+                        additional_requirements=self._journal.consumed_amendments(task_id) if self._journal else (),
+                        authorization_rejected=bool(self._journal and self._journal.rejected_authorizations(task_id)),
+                        memory_management_requested=True, learning_receipt=learning_receipt,
+                        tool_results=receipt_facts,
                         structured=getattr(client, "supports_json_output", False) is True)
                     self._boundary(task_id)
                     # Only host-generated, bounded protocol paths/codes cross
@@ -769,7 +781,7 @@ class AgentCore:
                         if composed.degraded_reason:
                             warnings.append(composed.degraded_reason)
                     else:
-                        response = tool_response_fallback(tuple(_result_data(item) for item in results)) if results else "回复整理暂不可用，请重试。"
+                        response = fallback()
                         warnings.append("Expression was reset; generated text and signals were discarded")
                 except (_Cancelled, TaskCancellationRequested):
                     raise
@@ -779,10 +791,10 @@ class AgentCore:
                     # changes permit a neutral, still-valid response.
                     if self._interaction is not None:
                         self._interaction.check(task_id)
-                    response = tool_response_fallback(tuple(_result_data(item) for item in results)) if results else "回复整理暂不可用，请重试。"
+                    response = fallback()
                     warnings.append("Expression context changed; using neutral feedback")
                 except Exception:
-                    response = tool_response_fallback(tuple(_result_data(item) for item in results)) if results else "回复整理暂不可用，请重试。"
+                    response = fallback()
                     warnings.append("Response generation failed; authoritative evidence is unchanged")
             self._boundary(task_id)
             if prepared is not None and prepared.origin == 'proactive':
@@ -795,7 +807,7 @@ class AgentCore:
                 # Order publication with privacy reset as well as generation.
                 # Optional memory work may have outlasted the expression call.
                 if companion_generation != self._companion_generation:
-                    response = tool_response_fallback(tuple(_result_data(item) for item in results)) if results else "回复整理暂不可用，请重试。"
+                    response = fallback()
                     response_signals = {}
                     warnings.append("Expression context was reset before completion; optional expression was discarded")
                 if self._interaction is not None:
@@ -803,18 +815,21 @@ class AgentCore:
                         self._interaction.check(task_id, expression=True)
                     except WorkflowBlocked:
                         self._interaction.check(task_id)
-                        response = tool_response_fallback(tuple(_result_data(item) for item in results)) if results else "回复整理暂不可用，请重试。"
+                        response = fallback()
                         response_signals = {}
                 if self._journal is not None and self._journal.unconsumed_amendments(task_id):
                     warnings.append("有追加要求未赶上最后一次模型判断，未纳入本次执行；请继续发起续办。")
-                if tool_delivery or plan.action == 'quiet' or (prepared is not None and prepared.origin == 'proactive' and self._proactive_publication is not None and not self._proactive_publication(task_id)):
+                if tool_delivery or plan.action == 'quiet' or (
+                    prepared is not None and prepared.origin == 'proactive' and self._proactive_publication is not None
+                    and not self._proactive_publication(task_id)
+                ):
                     response = ''
-                payload = {"response": response, "tool_results": [_result_data(item) for item in results],
+                payload = {"response": response, "tool_results": list(facts),
                            "warnings": list(warnings), "memory_effects": memory_effects,
                            "final_action": plan.action, "organize_memory": plan.organize_memory,
                            "learning_receipt": learning_receipt}
                 if clarifying:
-                    # 问题也经过统一表达，但尚未完成的交流不触发反馈学习或完成发布。
+                    # 定稿的澄清问题直接显示，不触发反馈学习或完成发布。
                     self._transition(task_id, TaskStatus.AWAITING_INPUT, result=payload)
                     return AgentResult(task_id, TaskStatus.AWAITING_INPUT, response, tuple(results),
                         warnings=tuple(warnings))
@@ -824,7 +839,7 @@ class AgentCore:
                     if latest is not None and latest.status == TaskStatus.COMPLETED:
                         try:
                             self._interaction.publish(prepared, request, response,
-                                facts=tuple(_result_data(item) for item in results), signals=response_signals)
+                                facts=facts, signals=response_signals)
                         except Exception:
                             # Optional presentation/context cannot rewrite a
                             # reliably committed task or replay its tools.

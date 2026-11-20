@@ -12,6 +12,23 @@ from deskpal.workflow.store import canonical
 from .policy import NotificationPolicy
 
 
+_FOLLOWUP_ARTIFACT_TOOLS = ('write_text', 'document_copy', 'document_move', 'document_delete', 'screenshot_capture')
+_HAS_FOLLOWUP_RESULT = f"""EXISTS(
+    SELECT 1 FROM attempt a WHERE a.task_id=t.id
+    AND json_extract(a.result,'$.tool_name') IN ({','.join('?' for _ in _FOLLOWUP_ARTIFACT_TOOLS)})
+    AND json_extract(a.result,'$.outcome')='known'
+    AND (
+        (a.status='Succeeded' AND json_extract(a.result,'$.success')=1
+         AND json_type(a.result,'$.output')='object'
+         AND COALESCE(json_extract(a.result,'$.output.changed'),1)!=0
+         AND COALESCE(json_extract(a.result,'$.output.status'),'') NOT IN ('unchanged','previously_applied'))
+        OR (a.status='Failed' AND json_extract(a.result,'$.tool_name')='document_move'
+            AND json_extract(a.result,'$.output.destination_created')=1
+            AND json_extract(a.result,'$.output.source_removed')=0)
+    )
+)"""
+
+
 class ProactiveCoordinator:
     MIN_INTERVAL = 900
     MAX_ATTENTIONS = 1000
@@ -203,6 +220,12 @@ class ProactiveCoordinator:
         with self.store.read_connection() as db:
             if not db.execute('SELECT enabled FROM proactive_method WHERE name=?', (row['method'],)).fetchone()[0]:
                 return False
+            if row['method'] == 'opportunity':
+                key = row['source_key']
+                if not key.startswith('opportunity:') or not db.execute(
+                    f"SELECT 1 FROM task t WHERE t.id=? AND t.status='Completed' AND t.scrubbed=0 AND {_HAS_FOLLOWUP_RESULT}",
+                    (key.removeprefix('opportunity:'), *_FOLLOWUP_ARTIFACT_TOOLS)).fetchone():
+                    return False
         for ref in json.loads(row['refs']):
             if ref['kind'] == 'proposal':
                 try:
@@ -247,15 +270,21 @@ class ProactiveCoordinator:
                 refs=[dict(kind='proposal', id=item.id, revision=item.revision)], expires_at=item.expires_at)
 
     def opportunity(self) -> None:
+        earliest = (self.clock() - timedelta(minutes=10)).isoformat()
         with self.store.read_connection() as db:
-            rows = db.execute("SELECT t.id,r.sequence,t.created_at FROM task t JOIN turn_ref r ON r.task_id=t.id LEFT JOIN task_origin o ON o.task_id=t.id WHERE t.status='Completed' AND t.scrubbed=0 AND (o.kind IS NULL OR o.kind='user') AND EXISTS(SELECT 1 FROM attempt a WHERE a.task_id=t.id) ORDER BY t.updated_at DESC LIMIT 8").fetchall()
+            rows = db.execute(
+                f"""SELECT t.id,r.sequence FROM task t JOIN turn_ref r ON r.task_id=t.id
+                    LEFT JOIN task_origin o ON o.task_id=t.id
+                    WHERE t.status='Completed' AND t.scrubbed=0 AND t.created_at>=?
+                    AND (o.kind IS NULL OR o.kind='user')
+                    AND NOT EXISTS(SELECT 1 FROM context_snapshot s WHERE s.task_id=t.id AND s.purpose='plugin_execution')
+                    AND NOT EXISTS(SELECT 1 FROM attention f WHERE f.source_key='opportunity:' || t.id)
+                    AND {_HAS_FOLLOWUP_RESULT} ORDER BY t.updated_at DESC LIMIT 8""",
+                (earliest, *_FOLLOWUP_ARTIFACT_TOOLS)).fetchall()
         for row in rows:
-            # 只处理近期实际工作；重开不补播长期积压。
-            if (self.clock() - datetime.fromisoformat(row['created_at'])).total_seconds() > 600:
-                continue
             self.offer(key='opportunity:' + row['id'], method='opportunity',
-                goal='结合这项实际工作的结果和最新交流，判断是否有值得主动表达的后续关心；无必要则安静结束。',
-                basis='近期完成了一项用户发起的实际工作；这只是检查机会，不是再次执行原任务的要求。',
+                goal='核对本次实际结果和已发给用户的答复。只有尚未告诉用户的新结果、具体变化或确实需要跟进的未了事项才值得开口；没有则安静结束。',
+                basis='用户发起的文件或截图操作有可核实的效果；这只是回访机会，不是重做原任务的要求。',
                 refs=[dict(kind='dialogue_turn', id=row['id'] + ':user', revision=row['sequence'])])
 
     def _enqueue_review(self, identity: str) -> None:

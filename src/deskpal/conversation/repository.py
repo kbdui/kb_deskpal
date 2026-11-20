@@ -21,6 +21,19 @@ from .summary import validate_summary
 
 MAX_DIRECTORY_ENTRIES = 10000
 MAX_TIMELINE_ITEMS = 100000
+_PLANNING_FAILED = "(t.status='Failed' AND json_extract(t.result,'$.failure_code')='planning_output_invalid')"
+
+
+def _planning_notice(conn: sqlite3.Connection, task_id: str) -> tuple[str, bool]:
+    counts = conn.execute(
+        "SELECT count(*), count(CASE WHEN status='Succeeded' THEN 1 END) FROM attempt WHERE task_id=?",
+        (task_id,)).fetchone()
+    text = "没能生成这轮答复。"
+    if counts[0]:
+        completed = f"已完成 {counts[1]} 项工具操作，结果仍保留。" if counts[1] else "已保留工具执行记录。"
+        return text + completed + "如需继续，请先核对执行记录，再只提出尚未完成的部分。", True
+    proactive = conn.execute("SELECT 1 FROM task_origin WHERE task_id=? AND kind='proactive'", (task_id,)).fetchone()
+    return text + "本轮没有执行工具。" + ("" if proactive else "你可以重新发送原问题。"), False
 
 
 class ConversationRepository:
@@ -324,7 +337,7 @@ class ConversationRepository:
             ascending = after is not None
             relation, anchor = (">", after) if ascending else ("<", before if before is not None else conversation["next_sequence"])
             order = "ASC" if ascending else "DESC"
-            rows = conn.execute(f"SELECT i.*,t.status,t.revision AS task_revision,t.cancel_requested FROM (SELECT * FROM conversation_item UNION ALL SELECT * FROM conversation_exchange) i LEFT JOIN task t ON t.id=i.task_id WHERE i.conversation_id=? AND i.sequence{relation}? ORDER BY i.sequence {order} LIMIT ?",
+            rows = conn.execute(f"SELECT i.*,t.status,t.revision AS task_revision,t.cancel_requested,{_PLANNING_FAILED} AS planning_failed FROM (SELECT * FROM conversation_item UNION ALL SELECT * FROM conversation_exchange) i LEFT JOIN task t ON t.id=i.task_id WHERE i.conversation_id=? AND i.sequence{relation}? ORDER BY i.sequence {order} LIMIT ?",
                                 (identity, anchor, limit + 1)).fetchall()
             chosen = rows[:limit]
             items: list[dict[str, Any]] = []
@@ -333,6 +346,11 @@ class ConversationRepository:
             remaining = 2 * 1024 * 1024
             for row in chosen:
                 item = {key: row[key] for key in ("id", "conversation_id", "sequence", "kind", "task_id", "revision", "body", "use_policy", "created_at", "redacted_at")}
+                is_notice = bool(row["planning_failed"] and not row["redacted_at"]
+                                 and row["id"] == row["task_id"] + ":assistant_message")
+                if is_notice:
+                    item["kind"] = "system_notice"
+                    item["body"], item["has_execution_record"] = _planning_notice(conn, row["task_id"])
                 body = str(item["body"])
                 encoded = body.encode("utf-8")
                 budget = min(32768, remaining)
@@ -341,9 +359,12 @@ class ConversationRepository:
                 item["body"] = encoded[:budget].decode("utf-8", errors="ignore")
                 remaining -= len(str(item["body"]).encode("utf-8"))
                 item["task"] = {"id": row["task_id"], "status": row["status"], "revision": row["task_revision"], "cancel_requested": bool(row["cancel_requested"])} if row["task_id"] else None
+                if row["planning_failed"] and not row["redacted_at"]:
+                    item["task"]["failure_code"] = "planning_output_invalid"
                 plan = conn.execute("SELECT canonical_json FROM immutableplan WHERE task_id=? AND scrubbed=0", (row["task_id"],)).fetchone()
                 has_steps = plan is not None and bool(json.loads(plan[0]).get("steps"))
-                item["visible"] = row["kind"] != "task_card" or row["status"] in {"Waiting", "NeedsReview", "Uncertain", "Paused", "AwaitingInput"} or has_steps
+                item["visible"] = row["kind"] != "task_card" or (not row["planning_failed"] and (
+                    row["status"] in {"Waiting", "NeedsReview", "Uncertain", "Paused", "AwaitingInput"} or has_steps))
                 items.append(item)
             if not ascending:
                 items.reverse()
@@ -407,11 +428,12 @@ class ConversationRepository:
             self._row(conn, identity, epoch)
             privacy_epoch = self._meta(conn)["privacy_epoch"]
             terms = tuple(term.lower() for term in search_terms[:8] if term)
-            matches = " OR ".join("instr(lower(COALESCE(u.body,'')),?)>0 OR instr(lower(a.body),?)>0 OR EXISTS(SELECT 1 FROM conversation_exchange e WHERE e.task_id=r.task_id AND e.redacted_at IS NULL AND instr(lower(e.body),?)>0)" for _ in terms)
+            assistant_text = f"CASE WHEN {_PLANNING_FAILED} THEN '' ELSE a.body END"
+            matches = " OR ".join(f"instr(lower(COALESCE(u.body,'')),?)>0 OR instr(lower({assistant_text}),?)>0 OR EXISTS(SELECT 1 FROM conversation_exchange e WHERE e.task_id=r.task_id AND e.redacted_at IS NULL AND instr(lower(e.body),?)>0)" for _ in terms)
             search_filter = " AND (" + matches + ")" if matches else ""
             search_args = tuple(term for term in terms for _ in range(3))
             rows = [dict(row) for row in conn.execute(
-                """SELECT r.sequence,r.task_id,COALESCE(u.body,'') AS request,a.body AS response,
+                f"""SELECT r.sequence,r.task_id,COALESCE(u.body,'') AS request,{assistant_text} AS response,
                           a.use_policy,c.refs,c.facts,t.revision AS task_revision,
                           COALESCE(u.revision,0) AS user_revision,a.revision AS assistant_revision
                    FROM turn_ref r JOIN conversation_turn c ON c.task_id=r.task_id

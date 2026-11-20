@@ -249,6 +249,30 @@ def tool_response_fallback(tool_results: Sequence[dict[str, Any]], *, expression
     return "\n".join(lines) if lines else "暂时无法整理回复，请查看任务状态。"
 
 
+def memory_receipt_fallback(requests: Sequence[dict[str, Any]], receipt: dict[str, Any]) -> str:
+    status = receipt.get("status")
+    if status == "failed":
+        return "这次记忆操作没能完成。"
+    if status == "delivery_pending":
+        return "记忆操作还有后续处理，暂时不能确认全部完成。"
+    if status != "completed":
+        return "暂时无法确认这次记忆操作的结果。"
+    reports = {row["request"]: row for row in (receipt.get("management") or ())
+               if isinstance(row, dict) and type(row.get("request")) is int}
+    applied = {"remember": "已记录。", "correct": "已更正指定记忆。", "forget": "已遗忘指定记忆，聊天记录仍保留。"}
+    clarify = {"remember": "你希望我记住什么？", "correct": "你想更正哪条记忆，改成什么？",
+               "forget": "你希望遗忘哪条记忆？"}
+    lines = []
+    for index, request in enumerate(requests):
+        action = request["action"]
+        report = reports.get(index, {})
+        result = report.get("status") if report.get("action") == action else None
+        body = (applied[action] if result == "applied" else clarify[action] if result == "clarify"
+                else "无需修改记忆。" if result == "unchanged" else "暂时无法确认处理结果。")
+        lines.append(f"第 {index + 1} 项：{body}" if len(requests) > 1 else body)
+    return "\n".join(lines)
+
+
 def terminal_response(status: str, tool_results: Sequence[dict[str, Any]] = ()) -> str:
     prefix = {"waiting": CONFIRMATION_REQUIRED, "cancelled": CANCELLED,
               "failed": FAILED, "uncertain": UNCERTAIN, "needsreview": UNCERTAIN}.get(status.casefold(), "任务结果以下方记录为准。")

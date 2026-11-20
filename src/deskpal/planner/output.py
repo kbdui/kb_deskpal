@@ -6,6 +6,7 @@ from typing import Any
 
 from deskpal._json import snapshot_json
 from deskpal.llm.models import LLMResponse
+from deskpal.response.protocol import MAX_REPLY_BYTES
 from deskpal.tools.models import ToolCall
 from .models import Plan
 
@@ -137,9 +138,11 @@ def parse(response: Any, *, initial: bool, origin: str, max_steps: int) -> tuple
             raise PlanningOutputError(field, 'wrong_type', expected=expected, actual=value_type(decision[field]))
     action = decision['action']
     try:
-        decision['reply'].encode('utf-8')
+        reply_bytes = len(decision['reply'].encode('utf-8'))
     except UnicodeError:
         raise PlanningOutputError('reply', 'invalid_text') from None
+    if reply_bytes > MAX_REPLY_BYTES:
+        raise PlanningOutputError('reply', 'byte_limit')
     if action not in {'answer', 'clarify', 'quiet'}:
         raise PlanningOutputError('action', 'invalid_choice')
     if action == 'quiet' and origin == 'user':

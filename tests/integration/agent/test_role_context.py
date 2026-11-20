@@ -62,15 +62,20 @@ def requirement(scope="conversation", layer="interaction_approach"):
             "nature": "explicit", "scope": scope, "expires_at": None, "replaces": []}
 
 
-def test_card_is_mandatory_and_same_in_planning_and_expression(app_model):
+def latest_planning_role(model):
+    ref = next(m.content for m in model.planning[-1] if "HISTORICAL REFERENCES" in m.content)
+    data = json.loads(ref.split("\n", 1)[1])
+    return next(item["data"] for item in data if item["kind"] == "role_context")
+
+
+def test_card_is_mandatory_in_planning_and_reply_does_not_need_expression(app_model):
     app, model = app_model
     state = app.interaction_snapshot()
     app.interaction_command("character_card", expected_revision=state["revision"], text="来自海边的园艺师，喜欢先观察实际条件。")
-    turn(app, "说明矩阵乘法")
-    ref = next(m.content for m in model.planning[-1] if "HISTORICAL REFERENCES" in m.content)
-    data = json.loads(ref.split("\n", 1)[1])
-    role = next(item["data"] for item in data if item["kind"] == "role_context")
-    assert role == model.expressions[-1]["role_context"]
+    result = turn(app, "说明矩阵乘法")
+    role = latest_planning_role(model)
+    assert not model.expressions
+    assert result.response == app.journal.get_plan(result.task_id).plan.reply
     assert "园艺师" in role["character_card"]["text"]
 
 
@@ -99,11 +104,11 @@ def test_model_scoped_requirement_persists_only_in_its_conversation(app_model):
     turn(app, "我只想倾诉", first)
     model.entries = []
     turn(app, "接着说", first)
-    assert model.expressions[-1]["role_context"]["interaction_approach"]
+    assert latest_planning_role(model)["interaction_approach"]
     other = app.conversation_create("代码任务", "create-other")
     turn(app, "帮我写程序", other)
-    assert model.expressions[-1]["role_context"]["interaction_approach"] == []
-    assert model.expressions[-1]["role_context"]["current_emotion"] is None
+    assert latest_planning_role(model)["interaction_approach"] == []
+    assert latest_planning_role(model)["current_emotion"] is None
 
 
 def test_clear_conversation_removes_scoped_state_and_preserves_memory(app_model):
@@ -157,7 +162,7 @@ def test_invalid_model_understanding_does_not_claim_saved(app_model):
     result = turn(app, "含糊的临时要求")
     assert any("未能解析或保存" in warning for warning in result.warnings)
     assert app.interaction_snapshot()["interaction_approach"] == []
-    assert any("未能解析或保存" in warning for warning in model.expressions[-1]["context_warnings"])
+    assert model.expressions == []
 
 
 def test_four_emotion_fields_and_habits_are_separate_from_user_state(tmp_path):

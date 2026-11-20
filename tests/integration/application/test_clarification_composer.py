@@ -17,9 +17,10 @@ def clarify(app, model, count=1):
 
     def chat(messages, *, tools=()):
         if messages[0].content.startswith('[EXPRESSION]'):
-            payload = json.loads(messages[-1].content)
-            return LLMResponse('要处理哪个对象？' if payload['response_intent'] == 'clarify' else '已经处理好了。')
-        return LLMResponse(json.dumps(dict(action=next(decisions), reply='具体对象', organize_memory=False)))
+            pytest.fail('澄清和普通答复不应调用最终收尾')
+        action = next(decisions)
+        reply = '要处理哪个对象？' if action == 'clarify' else '已经处理好了。'
+        return LLMResponse(json.dumps(dict(action=action, reply=reply, organize_memory=False)))
 
     model.chat = chat
     conversation = app.conversation_ensure_default()

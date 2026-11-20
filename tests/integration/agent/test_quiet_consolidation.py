@@ -125,15 +125,15 @@ def test_quiet_thought_is_saved_but_not_organized(env):
     assert not app.learning.store.organized_messages({'reflection:' + task.id: result.tool_results[0].output['content']})
 
 
-def test_hidden_answer_still_learns_before_expression(env):
+def test_hidden_answer_still_learns_without_expression(env):
     app, model, _, _ = env
     app.notification_control('chat', True, 'pause-chat')
     model.decide = lambda: LLMResponse('我想说一段话。')
     task = app.submit_proactive('合成主动交流', '合成机会', 'hidden-answer')
     result = app.wait(task.id, 10)
     assert result.status == TaskStatus.COMPLETED and result.response == ''
-    assert len(model.feedback) == 1 and len(model.expressions) == 1
-    assert model.order == ['planning', 'learning', 'expression']
+    assert len(model.feedback) == 1 and not model.expressions
+    assert model.order == ['planning', 'learning']
     assert app.tasks.get(task.id).result['final_action'] == 'answer'
     assert app.learning.receipt(task.id)['status'] == 'completed'
 
@@ -146,13 +146,14 @@ def test_normal_answer_absorbs_a_single_deferred_thought_without_extra_call(env)
         return dict(memories=[dict(content='角色正在探索自己的审美。', quote=row['content'],
             claim_type='hypothesis', destination='episode', subject=row['speaker_id'],
             reason='来自角色的实际内部成果，仍是设想', sources=[key],
-            review_after=(clock() + timedelta(days=1)).isoformat())])
+            review_after=(clock() + timedelta(days=1)).isoformat(),
+            archive_after=(clock() + timedelta(days=7)).isoformat())])
     model.learn = learn
     model.decide = lambda: LLMResponse('继续聊这件事。')
     conversation = app.conversation_ensure_default()
     task = app.submit('我们接着聊', conversation_id=conversation['id'], expected_context_epoch=conversation['context_epoch'])
     assert app.wait(task.id, 10).status == TaskStatus.COMPLETED
-    assert len(model.feedback) == 1 and len(model.expressions) == 1
+    assert len(model.feedback) == 1 and not model.expressions
     assert any(item.source.origin == 'character_reflection' for item in app.memory.list_items())
     assert all(item['ref']['id'] != quiet.id for item in app.learning.materials.pending())
 
@@ -276,11 +277,12 @@ def test_quiet_keeps_actual_external_tool_results(env):
 def test_answer_can_defer_learning_and_preserve_actual_published_text(env):
     app, model, _, _ = env
     model.organize = False
+    model.decide = lambda: LLMResponse('这是规划写好的答复。')
     conversation = app.conversation_ensure_default()
     task = app.submit('你好', conversation_id=conversation['id'], expected_context_epoch=conversation['context_epoch'])
     result = app.wait(task.id, 10)
-    assert result.status == TaskStatus.COMPLETED and result.response
-    assert not model.feedback and len(model.expressions) == 1
+    assert result.status == TaskStatus.COMPLETED and result.response == '这是规划写好的答复。'
+    assert model.order == ['planning']
     assert app.tasks.get(task.id).result['organize_memory'] is False
     assert app.learning.receipt(task.id)['reason'] == 'model_deferred'
     assert app.journal.get_plan(task.id).plan.organize_memory is False

@@ -67,11 +67,11 @@ def test_feedback_time_instruction_matches_strict_timezone_validation():
 
 
 def test_planning_and_learning_agree_forgetting_preserves_chat_and_personality():
-    from deskpal.planner.llm_planner import PLANNING_INSTRUCTION
+    from deskpal.planner.llm_planner import USER_DECISION
     from deskpal.application.management_tools import management_tools
-    assert '不清除聊天、其他记忆或人格' in PLANNING_INSTRUCTION
+    assert '不清除聊天、其他记忆或人格' in USER_DECISION
     assert '不删除聊天或其他人格资料' in INSTRUCTIONS
-    assert 'clears related chat' not in PLANNING_INSTRUCTION
+    assert 'clears related chat' not in USER_DECISION
     names = {tool.spec.name for tool in management_tools(None)}
     assert 'memory_search' in names
     assert not names.intersection({'memory_remember', 'memory_correct', 'memory_forget'})

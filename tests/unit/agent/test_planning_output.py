@@ -7,7 +7,7 @@ from deskpal.llm.calls import ModelCallGateway
 from deskpal.llm.models import LLMResponse
 from deskpal.planner.llm_planner import LLMPlanner
 from deskpal.planner.output import PlanningOutputError
-from deskpal.tools.models import ToolCall
+from deskpal.tools.models import ToolCall, ToolSpec
 from deskpal.workflow.humanization import HumanizationStore
 from deskpal.workflow.store import WorkflowStore
 from deskpal.workflow.tasks import PersistentTaskManager
@@ -30,6 +30,7 @@ class Responses:
     def __init__(self, *responses):
         self.responses = list(responses)
         self.calls = []
+        self.tools = []
         self.diagnostics = []
 
     def annotate(self, values):
@@ -37,7 +38,9 @@ class Responses:
 
     def chat(self, messages, *, tools=()):
         self.calls.append(messages)
-        return LLMResponse(self.responses.pop(0))
+        self.tools.append(tools)
+        response = self.responses.pop(0)
+        return response if isinstance(response, LLMResponse) else LLMResponse(response)
 
 
 @pytest.mark.parametrize('wrapper', ['```json\n%s\n```', '\ufeff  %s  ', '```\n%s\n```'])
@@ -89,6 +92,32 @@ def test_late_context_is_included_in_the_same_single_correction_budget():
     model = Responses('{"action":"answer","reply":"回复","organize_memory":false,"context":{"entries":[]}}', VALID)
     assert LLMPlanner(model).plan('请求').reply == '我明白你的意思。'
     assert len(model.calls) == 2 and 'context' in model.calls[1][0].content
+
+
+def test_post_tool_format_retry_only_repairs_the_ending():
+    model = Responses('格式不合约定的正文', VALID)
+    references = (
+        {'kind': 'task_origin', 'data': {'kind': 'user'}},
+        {'kind': 'role_context', 'data': {'character_card': {'text': '关心自然接话'}}},
+        {'kind': 'context_clock', 'now': '2026-11-20T03:30:00Z'},
+        {'kind': 'execution_observations', 'additional_requirements': ['只讨论，不执行'],
+         'authorization_rejections': [{'operations': [{'tool_name': 'example'}]}]},
+    )
+    tool = ToolSpec('example', '示例工具', {'type': 'object'})
+    plan = LLMPlanner(model).plan_context('你怎么看？', references=references, tools=(tool,), llm=model)
+    assert plan.reply == '我明白你的意思。'
+    assert model.tools == [(tool,), ()]
+    for messages in model.calls:
+        instruction = messages[0].content
+        assert '[AFTER_TOOLS]' in instruction and 'authorization_rejections' in instruction
+        assert '[FIRST_DECISION]' not in instruction and '[PROACTIVE]' not in instruction
+        assert '只讨论，不执行' in messages[-2].content
+
+    model = Responses('格式不合约定的正文', LLMResponse(tool_calls=(ToolCall('example', {}, 'call'),)))
+    with pytest.raises(PlanningOutputError) as caught:
+        LLMPlanner(model).plan_context('你怎么看？', references=references, tools=(tool,), llm=model)
+    assert caught.value.field == 'tool_calls'
+    assert model.tools == [(tool,), ()]
 
 
 @pytest.mark.parametrize('bad', ['前后说明：' + VALID, VALID + '\n' + VALID])

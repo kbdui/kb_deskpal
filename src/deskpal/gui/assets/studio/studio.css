@@ -58,6 +58,7 @@ background:rgba(255,255,255,.9);color:#171a21;z-index:3}
 #deskpal-studio .ds-detail p,#deskpal-studio .ds-observation p{white-space:pre-wrap;overflow-wrap:anywhere}
 #deskpal-studio .ds-technical{white-space:pre-wrap;overflow-wrap:anywhere;margin:8px 0}
 #deskpal-studio .ds-task{padding:14px;border:1px solid var(--ds-line);border-radius:12px;background:var(--ds-bg)}
+#deskpal-studio .ds-chat-notice{display:grid;gap:6px;font-size:13px;line-height:1.6}
 #deskpal-studio .ds-task ol{padding-left:24px}
 #deskpal-studio .ds-task label{display:block;margin:8px 0}
 #deskpal-studio .ds-task-completed{margin:12px 0;padding:12px 14px;background:#eff5f1;border:1px solid #dce8df;border-radius:10px;font-size:12px;color:#526b5b}

@@ -85,6 +85,13 @@ class ExecutionJournal:
         with self.store.read_connection() as conn:
             return int(conn.execute("SELECT COUNT(*) FROM task_amendment WHERE task_id=? AND consumed_round IS NULL", (task_id,)).fetchone()[0])
 
+    def consumed_amendments(self, task_id: str) -> tuple[str, ...]:
+        with self.store.read_connection() as conn:
+            self.store.check_privacy(conn, task_id)
+            return tuple(row["content"] for row in conn.execute(
+                "SELECT content FROM task_amendment WHERE task_id=? AND consumed_round IS NOT NULL ORDER BY sequence",
+                (task_id,)))
+
     def save_round(self, task_id: str, plan: Plan, tool_specs: tuple[ToolSpec, ...], workspace_dir: str,
                    memory_refs: tuple[tuple[str, int], ...] = (), *, replace_unstarted: bool = False) -> PlanSnapshot:
         """追加新的不可变快照；旧计划与已执行步骤从不覆盖。"""

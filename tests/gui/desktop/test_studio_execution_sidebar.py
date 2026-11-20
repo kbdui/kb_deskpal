@@ -65,6 +65,21 @@ def open_records(qtbot, widget):
     qtbot.waitUntil(lambda: evaluate(qtbot, widget, "document.querySelector('.ds-execution-body')?.textContent.includes('关于自己的兴趣')"))
 
 
+def test_planning_failure_notice_routes_to_records_only_in_main_window(surface, qtbot):
+    widget, _, chat, _ = surface
+    received = []
+    widget.port.action.connect(lambda name, args: received.append((name, args)))
+    notice = dict(kind='system_notice', task_id='task', body='已保留工具执行记录。', has_execution_record=True)
+    widget.port.publish('chat', {**chat, 'items': [notice]})
+    qtbot.waitUntil(lambda: evaluate(qtbot, widget, "!!document.querySelector('.ds-chat-notice [data-record]')"))
+    assert evaluate(qtbot, widget, "document.querySelector('.ds-chat-notice').textContent.includes('系统提示')")
+    evaluate(qtbot, widget, "document.querySelector('.ds-chat-notice [data-record]').click();true")
+    qtbot.waitUntil(lambda: ('records', {'id': 'task'}) in received)
+    widget.port.publish('init', dict(mode='pet', lifecycle='Ready', prefs={}))
+    qtbot.waitUntil(lambda: evaluate(qtbot, widget, "document.querySelector('.ds-chat-notice')?.textContent.includes('主窗口')===true"))
+    assert evaluate(qtbot, widget, "!document.querySelector('.ds-chat-notice [data-record]')")
+
+
 def test_readable_results_and_raw_data_are_separate(surface, qtbot):
     widget, _, _, _ = surface
     open_records(qtbot, widget)

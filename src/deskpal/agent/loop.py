@@ -187,7 +187,7 @@ def _canonical(value: Any) -> str:
 
 def _result(result: ToolResult) -> dict[str, Any]:
     return {"success": result.success, "output": result.output, "error": result.error,
-            "tool_name": result.tool_name, "call_id": result.call_id}
+            "tool_name": result.tool_name, "call_id": result.call_id, "outcome": result.outcome}
 
 
 def _retry_errors() -> tuple[type[Exception], ...]:

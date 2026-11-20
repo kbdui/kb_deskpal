@@ -161,21 +161,41 @@ def test_three_model_rounds_observe_actual_results_without_replay(app_model):
 def test_append_requirement_does_not_wait_for_active_tool(app_model):
     app, model, probe = app_model
     entered, release = Event(), Event()
+    deciding, finish = Event(), Event()
+    expressions = []
     original = probe.execute
+    original_chat = model.chat
     def block(arguments, context):
         entered.set()
         assert release.wait(10)
         return original(arguments, context)
+    def chat(messages, *, tools=()):
+        system = messages[0].content
+        if system.startswith('[PLANNING]') and model.rounds == 2:
+            deciding.set()
+            assert finish.wait(10)
+        if system.startswith('[EXPRESSION]'):
+            expressions.append(json.loads(messages[-1].content))
+        return original_chat(messages, tools=tools)
     probe.execute = block
+    model.chat = chat
     task = app.submit("先观察")
     try:
         assert entered.wait(5)
         receipt = app.append_requirement(task.id, "第二步只观察，不修改文件", "amend-1")
         assert receipt["accepted"]
+        release.set()
+        assert deciding.wait(5)
+        assert app.append_requirement(task.id, "刚追加：重做第一步", "amend-late")["accepted"]
     finally:
         release.set()
-    assert app.wait(task.id, timeout=10).status == TaskStatus.COMPLETED
+        finish.set()
+    result = app.wait(task.id, timeout=10)
+    assert result.status == TaskStatus.COMPLETED
     assert "第二步只观察" in model.observations[1]
+    assert expressions == []
+    assert "刚追加：重做第一步" not in model.observations[-1]
+    assert any("未纳入本次执行" in warning for warning in result.warnings)
     assert not app.append_requirement(task.id, "已错过收尾", "late")["accepted"]
 
 

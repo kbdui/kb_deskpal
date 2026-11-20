@@ -99,15 +99,18 @@ def test_unknown_structures_are_recorded_but_user_json_strings_stay_literal() ->
 
 class TimerPlanner:
     def plan_context(self, request: str, *, memories: Any = (), references: Any = (), tools: Any = (), llm: Any = None) -> Plan:
-        if any(item.get('kind') == 'execution_observations' for item in references):
-            return Plan('计时器已建立。')
+        observation = next((item for item in references if item.get('kind') == 'execution_observations'), None)
+        if observation is not None:
+            result = observation['results'][0]
+            assert result['success'] is True and result['outcome'] == 'known'
+            return Plan(f"已建立「{result['output']['label']}」计时器。")
         return self.plan(request, tools=tools)
 
     def plan(self, request: str, *, memories: Any = (), tools: Any = ()) -> Plan:
         return Plan("建立一个计时器。", (ToolCall("timer_create", {"duration_seconds": 60, "label": "休息一下"}, "timer-call"),))
 
 
-def test_real_core_composer_and_facade_publish_natural_timer_reply_but_keep_exact_archive(tmp_path: Path) -> None:
+def test_core_publishes_natural_post_tool_answer_and_keeps_exact_archive(tmp_path: Path) -> None:
     config = load_config(environ={"DESKPAL_LLM_PROVIDER": "offline", "DESKPAL_WORKSPACE_DIR": str(tmp_path / "workspace"),
                                   "DESKPAL_DATA_DIR": str(tmp_path / "data")})
     with create_application(config, planner=TimerPlanner()) as app:
@@ -128,4 +131,6 @@ def test_real_core_composer_and_facade_publish_natural_timer_reply_but_keep_exac
         timeline = facade.execute("conversation_timeline", {"id": conversation["id"], "limit": 50})
         replies = [item["body"] for item in timeline["items"] if item["kind"] == "assistant_message"]
         assert replies == [result.response]
+        assert not any(call['purpose'] == 'expression' for call in app._humanization.call_diagnostics()
+                       if call['task_id'] == task.id)
 

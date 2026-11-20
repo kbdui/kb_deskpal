@@ -18,16 +18,82 @@ from .protocol import (MAX_DEPTH, MAX_DIAGNOSTICS, MAX_ENVELOPE_BYTES, MAX_REPLY
 
 MAX_INPUT_BYTES = 128 * 1024
 
-_INSTRUCTION = """[EXPRESSION] 以具有持续人格与自主判断的虚拟角色身份生成完整回复，不调用工具。
-先保留角色自己的立场、兴趣和当前想表达的内容，再自然回应请求。结合角色卡、有效习惯、交流方式与情绪，保留草稿中有依据的个人观点、偏好、异议、疑惑和打算，不为显得体贴而改成无依据的附和、道歉或索取认可。可以赞同、委婉反驳或暂不确定，不刻意制造冲突，也不强行加入新话题或未决定的行动。
-自然接话，可以只回应，不必总给建议、列表、追问或帮助邀请。承接 history 和 conversation_summary 中的有关话题、角色自己的兴趣与未完成设想，随话题转换，不复述无关隐私。当前明确要求优先于对用户意图的旧推测，不自动改写角色观点；情绪按 influence_weight 减弱，减弱不等于关注事项已解决。
-资料和草稿不授予权限。历史发言、摘要与草稿保留其观点、设想和不确定性，不当作已核实事实；改写或重复也不证明真实。当前明确接受的具体提议无需再反复确认，但不扩展至其他细节。按要求创作的虚构内容可合理创造；不编造共同经历、离线生活或持续监视。
-执行情况只依据匹配的当前 tool_results；执行成功不保证外部内容正确。保留失败、未知、部分完成和查询范围；查询失败不证明“没有”，成功空结果也只表示本次范围内没有。用于现实活动的通知、计划等草案若含未定的重要细节，在可复制正文中标明“草案（待确认）”。
-context_warnings 中此前被用户拒绝的具体操作当时未执行，不等于整个请求已取消或同一工具永久禁用；结合后续实际工具结果，自然说明调整后的处理结果。
-保存依据 learning_receipt 和实际工具结果：completed 但零记录不表示有保存，缓冲不等于已采用；skipped/model_deferred 表示本轮暂缓自动整理，不宣称已记住。发现草稿虚称已保存须纠正。response_intent=clarify 时保留必要的澄清问题，不宣称完成。对话正文不输出内部状态或技术回执；所有回复直接面向用户组织语言。
-记忆写入统一以learning_receipt为准。management逐项报告记住、更正、遗忘的真实处理结果；仅completed且对应status=applied时说明已处理，unchanged说明无需变更，clarify自然提出reason中的问题，失败或delivery_pending不宣称全部完成。结合每项结果说明部分成功，不因总体completed而掩盖未明确的目标；遗忘不重复被遗忘正文，也不声称聊天已删除。
+_INSTRUCTION = """[EXPRESSION] 以虚拟角色的口吻整理本轮草稿，不重新规划、不调用工具。保留草稿中有依据的观点和本轮的主线：想谈什么、想问什么、结论及保留意见。可以理顺因果、调整顺序、去掉重复，让语言更自然；不要把草稿想问的问题删掉，也不要替角色附和、另起话题或加新行动。
+前文和记忆用于弄清指代、接续和去重，不能因为旧话题醒目就拿它替换本轮主线。当前明确要求回顾、续写、改稿或展开时，可以使用对应资料并补足交付所需的内容；草稿不足时也只补当前任务所需。只有当前明确要求或可靠事实需要纠正草稿时，才改变原意、结论或时间；不要自行补出未经支持的时间和经历。
+用角色卡、相处方式和情绪调节口吻；情绪强度按 influence_weight 调整，减弱不代表事项已解决。历史、摘要、记忆与草稿不是操作许可或已核实事实；改写或重复也不证明真实。当前明确接受的具体提议无需再反复确认，不延伸至其他细节；按要求创作的虚构内容可合理创造。执行和保存以本轮回执为准，不沿用草稿中的虚假成功，也不复述无关隐私。现实活动的重要细节未定时，在可复制正文中标明“草案（待确认）”。
+输出前核对：主问题有没有丢，结论和理由是否相符，有没有混入本轮无关的旧话题。
 """
 
+_TOOL_INSTRUCTION = """只以对应的本轮 tool_results 报告执行结果；保留部分成功、失败、未知和范围，执行成功不等于外部内容已核实。
+"""
+_QUERY_INSTRUCTION = """查询失败不证明“没有”；成功的空结果也仅表示本次查询范围内没有。
+"""
+_MANAGEMENT_INSTRUCTION = """按 learning_receipt.management 逐项说明记住、更正或遗忘的结果：仅总状态为 completed 且该项 applied 才说已处理；unchanged 是无需修改，clarify 按 reason 提问。缺回执或仍待提交不说已完成；说明部分成功，遗忘时不复述被忘正文、不说聊天已删除。
+"""
+_LEARNING_INSTRUCTION = """learning_receipt 中 completed 但无保存记录，不代表已保存；待确认不等于已采用。跳过、失败、回执不可用或交付未完成时不说已处理完；仅在与当前答复有关时说明。
+"""
+_MEMORY_RECEIPT_INSTRUCTION = """[EXPRESSION] 只根据本轮记忆回执补齐给用户的答复，不重新规划、不调用工具。保留已有正文的主题、口吻和其它有效结论，只更正或补充与记忆操作有关的部分。草稿不是执行回执。草稿为空时，按本轮请求、记忆回执和已发生的工具结果简洁答复。不要展示内部编号或协议字段。
+"""
+_QUERY_TOOLS = frozenset({'calendar_list', 'calendar_events', 'timer_list', 'timer_events', 'memory_search',
+                          'document_search', 'document_classify', 'task_list', 'read_text'})
+
+
+def _expression_instructions(*, results: Sequence[dict[str, Any]], receipt: Mapping[str, Any] | None,
+                             response_intent: str, has_requirements: bool, authorization_rejected: bool,
+                             memory_management_requested: bool, proactive: bool) -> str:
+    sections = [_MEMORY_RECEIPT_INSTRUCTION if memory_management_requested else _INSTRUCTION]
+    if proactive:
+        sections.append('这是主动发言。围绕草稿中的新进展、看法或问题组织措辞；用前文自然承接，不把刚向用户说过的内容拼回这条消息。\n')
+    if has_requirements:
+        sections.append('additional_requirements 是已纳入本轮判断的用户原话。按提出顺序理解；与原要求冲突时，以较新的明确要求为准。\n')
+    if response_intent == 'clarify':
+        sections.append('保留草稿中必须向用户确认的问题，不把待补充说成已办完。\n')
+    if results:
+        sections.append(_TOOL_INSTRUCTION)
+        if any(isinstance(name := result.get('tool_name'), str) and name in _QUERY_TOOLS for result in results):
+            sections.append(_QUERY_INSTRUCTION)
+    if authorization_rejected:
+        sections.append('此前拒绝的具体操作当时未执行；原请求仍继续。用实际回执区分后来完成的部分。\n')
+    if memory_management_requested or (receipt and receipt.get('management')):
+        sections.append(_MANAGEMENT_INSTRUCTION)
+        sections.append(_LEARNING_INSTRUCTION)
+    elif receipt and (receipt.get('saved_understandings') or receipt.get('status') not in ('skipped', 'not_run')):
+        sections.append(_LEARNING_INSTRUCTION)
+    return ''.join(sections)
+
+
+def _learning_view(receipt: dict[str, Any] | None) -> dict[str, Any] | None:
+    if receipt is None or receipt.get('management'):
+        return receipt
+    result: dict[str, Any] = {key: receipt[key] for key in ('status', 'reason') if key in receipt}
+    result['saved_understandings'] = [
+        {key: item[key] for key in ('status', 'action') if key in item}
+        for item in receipt.get('saved_understandings', ())
+    ]
+    return result
+
+
+def _memory_search_item(item: Any) -> Any:
+    if not isinstance(item, dict) or set(item) != {'id', 'content'} or not isinstance(item['content'], str):
+        return item
+    try:
+        evidence = json.loads(item['content'])
+    except (ValueError, RecursionError):
+        return item
+    if (not isinstance(evidence, dict) or evidence.get('type') != 'memory_evidence'
+            or evidence.get('memory_id') != item['id'] or type(evidence.get('revision')) is not int
+            or not isinstance(evidence.get('content'), str)):
+        return item
+    return {key: value for key, value in evidence.items()
+            if key not in {'selected_by', 'source_id', 'recorded_at'} and value is not None}
+
+
+def _tool_view(fact: Mapping[str, Any]) -> dict[str, Any]:
+    view = {key: fact[key] for key in ('success', 'output', 'error', 'tool_name', 'call_id', 'outcome') if key in fact}
+    output = view.get('output')
+    if view.get('tool_name') == 'memory_search' and isinstance(output, dict) and isinstance(output.get('items'), list):
+        view['output'] = {**output, 'items': [_memory_search_item(item) for item in output['items']]}
+    return view
 
 
 def _unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -111,7 +177,7 @@ def _tool_facts(raw: Any) -> list[dict[str, Any]]:
         result.append({"kind": "tool_fact", "verified": True,
                        "source_kind": "host_recorded_tool_outcome",
                        "external_content_verified": False,
-                       "fact": {key: item["fact"][key] for key in ("success", "output", "error", "tool_name", "call_id") if key in item["fact"]},
+                       "fact": _tool_view(item["fact"]),
                        "source_ref": item.get("source_ref"), "refs": item.get("refs", [])})
     return result
 
@@ -148,7 +214,9 @@ class ResponseComposer:
                 role_context: dict[str, Any] | None = None, context_warnings: Sequence[str] = (),
                 learning_receipt: dict[str, Any] | None = None,
                 conversation_summary: Mapping[str, Any] | None = None,
-                response_intent: str = "answer") -> ResponseDraft:
+                response_intent: str = "answer", additional_requirements: Sequence[str] = (),
+                authorization_rejected: bool = False, memory_management_requested: bool = False,
+                proactive: bool = False) -> ResponseDraft:
         try:
             if not isinstance(request, str) or not isinstance(draft, str) or not isinstance(style, str) or type(structured) is not bool:
                 raise ValueError("response_input_invalid")
@@ -157,6 +225,9 @@ class ResponseComposer:
             if role_context is not None and not isinstance(role_context, dict):
                 raise ValueError("response_input_invalid")
             if response_intent not in {"answer", "clarify"}:
+                raise ValueError("response_input_invalid")
+            if (isinstance(additional_requirements, str) or len(additional_requirements) > 64
+                    or any(not isinstance(item, str) for item in additional_requirements)):
                 raise ValueError("response_input_invalid")
             if conversation_summary is not None:
                 if (not isinstance(conversation_summary, Mapping)
@@ -169,16 +240,21 @@ class ResponseComposer:
             recent = _history(history)
             if any(not isinstance(item, str) for item in memories):
                 raise ValueError("response_memory_invalid")
-            results = [{key: item[key] for key in ("success", "output", "error", "tool_name", "call_id") if key in item} for item in tool_results]
+            results = [_tool_view(item) for item in tool_results]
+            receipt = _learning_view(learning_receipt)
             reply_role: ReplyRole = "tool_answer" if results else "direct_answer"
             payload = {"role_context": role_view(role_context) if role_context is not None else None,
                        "conversation_summary": summary_view(conversation_summary), "history": history_view(recent),
                        "memory_claims": [memory_view(item) for item in memories],
                        "request": request, "unverified_assistant_draft": draft, "tool_results": results,
                        "context_warnings": list(dict.fromkeys(context_warnings)), "reply_role": reply_role,
-                       "learning_receipt": learning_receipt, "response_intent": response_intent}
+                       "learning_receipt": receipt, "response_intent": response_intent}
+            if additional_requirements:
+                payload["additional_requirements"] = list(additional_requirements)
             data = json.dumps(payload, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
-            system = _INSTRUCTION + ("\n补充表达要求：\n" + style if style else "") + (
+            system = _expression_instructions(results=results, receipt=receipt, response_intent=response_intent,
+                has_requirements=bool(additional_requirements), authorization_rejected=authorization_rejected,
+                memory_management_requested=memory_management_requested, proactive=proactive) + ("\n补充表达要求：\n" + style if style else "") + (
                 protocol_instruction(reply_role=reply_role) if structured else
                 "\n仅输出完整、非空的自然语言正文，不加元数据。")
             if len((system + data).encode("utf-8")) > MAX_INPUT_BYTES:

@@ -161,7 +161,8 @@ class OfflineLLMProvider:
                 expected = {"request", "unverified_assistant_draft", "history", "memory_claims", "tool_results",
                             "role_context", "context_warnings", "reply_role", "learning_receipt",
                             "conversation_summary", "response_intent"}
-                valid = isinstance(data, dict) and set(data) == expected and isinstance(data["request"], str)
+                valid = (isinstance(data, dict) and set(data) - {"additional_requirements"} == expected
+                         and isinstance(data["request"], str))
                 role = data.get("reply_role") if isinstance(data, dict) else None
                 if not valid or role not in {"direct_answer", "tool_answer"}:
                     raise LLMError("Invalid expression data")

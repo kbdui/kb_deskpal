@@ -274,9 +274,42 @@ def test_proactive_answer_published_once_and_never_user_instruction(setup):
     app.proactive.poll()
     app.proactive.poll()
     items = [item for item in app.conversation_timeline(conversation['id'])['items'] if item['task_id'] == active]
-    assert len([i for i in items if i['kind']=='assistant_message' and i['body']]) == 1
+    assert [i['body'] for i in items if i['kind'] == 'assistant_message' and i['body']] == ['这是实际回复。']
     assert not [i for i in items if i['kind']=='user_message']
     assert attention_task(app, identity)['attempts'] == 1
+
+
+def test_automatic_work_followup_requires_a_concrete_effect_and_rechecks_old_queue(setup):
+    app, model, _, _, _ = setup
+    conversation = app.conversation_ensure_default()
+
+    def run_tool(name, arguments, grants=()):
+        decisions = iter((LLMResponse('', (ToolCall(name, arguments),)),
+                          LLMResponse('{"action":"answer","reply":"已核对本轮结果。","organize_memory":false}')))
+        model.fn = lambda messages, tools: next(decisions)
+        task = app.submit('合成操作：' + name, conversation_id=conversation['id'],
+                          expected_context_epoch=conversation['context_epoch'], authorized_tools=grants)
+        result = app.wait(task.id, 10)
+        assert result.status == TaskStatus.COMPLETED
+        assert result.tool_results[0].success
+        return task
+
+    echo = run_tool('echo', {'text': 'test'})
+    run_tool('document_search', {'query': '不会命中的文件'})
+    written = run_tool('write_text', {'path': 'note.txt', 'text': '一份草稿', 'overwrite': True}, ('write_text',))
+    app.proactive.opportunity()
+    app.proactive.opportunity()
+    items = app.proactive.page()['items']
+    assert len(items) == 1
+    automatic = attention_task(app, items[0]['id'])
+    assert automatic['source_key'] == 'opportunity:' + written.id and app.proactive.valid(automatic)
+
+    origin = app._humanization.turn(echo.id)
+    legacy = app.proactive.offer(key='opportunity:' + echo.id, method='opportunity', goal='旧版回访',
+        basis='旧版工具记录', refs=[dict(kind='dialogue_turn', id=echo.id+':user', revision=origin['sequence'])])
+    assert not app.proactive.valid(attention_task(app, legacy))
+    explicit = offer(app, echo, key='explicit-review')
+    assert app.proactive.valid(attention_task(app, explicit))
 
 
 def test_new_pause_during_model_suppresses_late_publish(setup):
@@ -665,18 +698,7 @@ def test_attention_page_readable_and_manual_approval_retired(setup):
 
 def test_pause_clarification_preserves_question(setup):
     app, model, _, _, _=setup
-    original = model.chat
-    expressions = []
-    def chat(messages, *, tools=()):
-        if messages[0].content.startswith('[EXPRESSION]'):
-            payload = json.loads(messages[-1].content)
-            expressions.append(payload)
-            assert payload['response_intent'] == 'clarify'
-            # 提示词模式输出正文；替身也须保留原问题，不能用固定完成语替换。
-            return LLMResponse('我想先确认一下：' + payload['unverified_assistant_draft'])
-        return original(messages, tools=tools)
-    model.chat = chat
-    model.fn=lambda messages, tools: LLMResponse('{"action":"clarify","reply":"要处理哪一项？"}')
+    model.fn=lambda messages, tools: LLMResponse('{"action":"clarify","reply":"我想先确认一下：要处理哪一项？"}')
     task=app.submit('处理这个')
     first = app.wait(task.id, 10)
     assert first.status==TaskStatus.AWAITING_INPUT
@@ -684,7 +706,7 @@ def test_pause_clarification_preserves_question(setup):
     app.pause_task(task.id, 'pause-question')
     assert app.continue_task(task.id, 'continue-question').status==TaskStatus.AWAITING_INPUT
     assert app.wait(task.id, 10).response==first.response
-    assert len(model.requests)==1 and len(expressions)==1
+    assert len(model.requests)==1
 
 
 def test_internal_trigger_register_and_remove_only_its_pending_attention(setup):

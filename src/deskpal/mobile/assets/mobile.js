@@ -165,6 +165,9 @@ function taskCard(item){
 function render(bottom=false){
     const thread=$("#thread"),stick=thread.scrollHeight-thread.clientHeight-thread.scrollTop<100,top=thread.scrollTop;
     const html=S.items.filter(item=>!item.redacted_at).map(item=>{
+        if(item.kind==="system_notice")return '<aside class="task"><h3>系统提示</h3><p>'+esc(item.body)+'</p>'+
+            (item.has_execution_record?'<button data-detail="'+esc(item.task_id)+'">查看执行记录</button>':"")+'</aside>';
+        if(item.kind==="task_card" && item.task?.failure_code==="planning_output_invalid")return "";
         if(item.kind==="task_card")return taskCard(item);
         if(!["user_message","assistant_message"].includes(item.kind)||!item.body)return "";
         const user=item.kind==="user_message", name=S.session.names[user?"user":"assistant"];

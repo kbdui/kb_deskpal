@@ -314,6 +314,14 @@ function chatPage() {
         const day = stamp ? new Date(stamp).toLocaleDateString("zh-CN") : "";
         const separator = day && day!==lastDay ? '<div class="ds-date">'+esc(day)+'</div>' : "";
         if (day) lastDay = day;
+        if (item.kind==="system_notice") {
+            const record = item.has_execution_record && state.mode!=="pet" ?
+                buttonRow('<button type="button" class="ds-btn" data-record="'+attr(item.task_id)+'">查看执行记录</button>') : "";
+            const petHint = item.has_execution_record && state.mode==="pet" ?
+                '<p class="ds-muted">执行记录可在主窗口查看。</p>' : "";
+            return separator+'<aside class="ds-task ds-chat-notice" data-task-card="'+attr(item.task_id)+'">'+
+                '<h3>系统提示</h3><p>'+esc(item.body)+'</p>'+petHint+record+'</aside>';
+        }
         const extra = (state.mode==="pet"?[]:chat.events?.[item.task_id] || []).map(scheduleCard).join("");
         const more = item.body_truncated?'<button type="button" class="ds-link" data-message="'+attr(item.id)+'" data-offset="'+attr(item.body_offset || item.body.length)+'">继续阅读</button>':"";
         return separator+message(item.kind==="user_message" || item.kind==="user"?"user":"assistant",item.body,extra+more);
@@ -1173,7 +1181,7 @@ function servicePage() {
             row("凭据操作","填写密钥时自动选择替换",'<select name="credential_action"><option value="keep">保留</option><option value="replace">替换</option><option value="remove">移除</option></select>')+
             row("密钥环境变量名","",edit("api_key_env","OPENAI_API_KEY"))+
             row("超时秒数","",edit("timeout_seconds",30,"number"))+
-            row("表达格式","",dropdown("expression_output_format",[["prompt","自然语言正文"],["json_object","原生 JSON"]],"prompt"))+
+            row("表达格式","仅用于记忆操作的回执答复",dropdown("expression_output_format",[["prompt","自然语言正文"],["json_object","原生 JSON"]],"prompt"))+
             row("允许新聊天输入由云服务处理","",dropdown("request_use_default",[["true","允许"],["false","关闭"]],"true"))+
             row("工作区目录","",edit("workspace_dir"))+row("数据目录","",edit("data_dir"))+
             row("记忆写入","",dropdown("memory_mode",[["automatic","自动学习"],["paused","暂停"]],"automatic"))+

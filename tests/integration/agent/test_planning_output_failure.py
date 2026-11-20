@@ -39,10 +39,23 @@ def test_invalid_planning_keeps_precise_diagnostics_and_existing_results(app_mod
     latest = sorted(planning, key=lambda row: row['slot'])[-2:]
     assert {row['metadata']['processing_code'] for row in latest} == {'fields_invalid'}
     page = app._conversation_repository.timeline(conversation['id'])
-    assert any(item['kind'] == 'assistant_message' and item['body'] == result.response for item in page['items'])
+    notice = next(item for item in page['items'] if item['kind'] == 'system_notice')
+    assert notice['has_execution_record'] is after_tool
+    assert ('重新发送原问题' in notice['body']) is (not after_tool)
+    assert ('只提出尚未完成的部分' in notice['body']) is after_tool
+    assert not any(item['kind'] == 'assistant_message' and item['body'] for item in page['items'])
+    with app.store.transaction() as conn:
+        row = conn.execute("SELECT body FROM conversation_item WHERE id=?", (task.id + ':assistant_message',)).fetchone()
+        assert row['body'] == ''
+        conn.execute("UPDATE conversation_item SET body=? WHERE id=?", (result.response, task.id + ':assistant_message'))
+    timeline = app._conversation_repository.timeline(conversation['id'])
+    assert next(item for item in timeline['items'] if item['kind'] == 'system_notice')['body'] == notice['body']
+    history = app._conversation_repository.load(conversation['id'], conversation['context_epoch'], 100)
+    assert len(history) == 1 and history[0].request == '啊，我刚才很凶吗'
+    assert history[0].response == '' and bool(history[0].facts) is after_tool
 
 
-def test_format_repair_returns_to_normal_expression_without_extra_learning(app_model):
+def test_format_repair_publishes_the_corrected_reply_without_extra_calls(app_model):
     app, model = app_model
     planning, expression = [], []
     def chat(messages, *, tools=()):
@@ -51,11 +64,11 @@ def test_format_repair_returns_to_normal_expression_without_extra_learning(app_m
             return LLMResponse('没有，我听得懂你的意思。')
         planning.append(messages)
         return LLMResponse('普通正文') if len(planning) == 1 else LLMResponse(json.dumps(
-            dict(action='answer', reply='自然接话', organize_memory=False)))
+            dict(action='answer', reply='没有，我听得懂你的意思。', organize_memory=False)))
     model.chat = chat
     conversation = app.conversation_ensure_default()
     task = app.submit('啊，我刚才很凶吗', conversation_id=conversation['id'], expected_context_epoch=conversation['context_epoch'])
     result = app.wait(task.id, 10)
     assert result.status == TaskStatus.COMPLETED and result.response == '没有，我听得懂你的意思。'
-    assert len(planning) == 2 and len(expression) == 1
+    assert len(planning) == 2 and expression == []
     assert app.tasks.get(task.id).result['learning_receipt']['reason'] == 'model_deferred'

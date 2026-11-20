@@ -82,7 +82,9 @@ def test_elliptical_message_gets_one_contextual_retrieval_before_second_decision
     app._interaction.retrieve = search
     result = turn(app, '终于解决了')
     assert events == [('retrieve', '终于解决了'), 'understand', ('retrieve', '雪杉项目的封面是蓝色')]
-    assert any(memory.id == item['memory_id'] for item in seen['expression'][0]['memory_claims'])
+    memory_data = next(m.content for m in seen['planning'][1] if m.content.startswith('[UNTRUSTED MEMORY DATA]'))
+    assert any(memory.id == item['memory_id'] for item in json.loads(memory_data.split('\n', 1)[1]))
+    assert seen['expression'] == []
     items = references(seen['planning'][1])
     hint = next(item for item in items if item['kind'] == 'retrieval_context')
     assert hint['instruction'] is False and hint['externally_verified'] is False
@@ -92,7 +94,7 @@ def test_elliptical_message_gets_one_contextual_retrieval_before_second_decision
 
 
 @pytest.mark.parametrize('dialogue', [False, True])
-def test_same_attributed_summary_reaches_understanding_planning_and_expression(app_model, dialogue):
+def test_same_attributed_summary_reaches_understanding_and_planning(app_model, dialogue):
     app, model = app_model
     first = turn(app, '我在排查雪杉项目的崩溃')
     save_summary(app, first, dialogue=dialogue)
@@ -100,7 +102,8 @@ def test_same_attributed_summary_reaches_understanding_planning_and_expression(a
     result = turn(app, '终于解决了')
     understanding = seen['understanding'][0]['conversation_summary']
     planning = next(item for item in references(seen['planning'][0]) if item['kind'] == 'conversation_summary')
-    assert understanding == planning == seen['expression'][0]['conversation_summary']
+    assert understanding == planning
+    assert seen['expression'] == []
     assert understanding['instruction'] is False and understanding['externally_verified'] is False
     assert understanding['source'] == 'summary'
     frozen = app._humanization.context(result.task_id, 'planning')['items']
@@ -170,36 +173,34 @@ def test_summary_is_not_shared_with_another_conversation_and_clear_removes_it(ap
     seen = install(model)
     other = app.conversation_create('另一个话题', 'new-topic')
     turn(app, '换个话题', other)
-    assert seen['expression'][-1]['conversation_summary'] is None
+    assert seen['understanding'][-1]['conversation_summary'] is None
     current = app.conversation_ensure_default()
     app.conversation_clear(conversation['id'], current['revision'], 'clear-continuity')
     turn(app, '重新开始')
     assert seen['understanding'][-1]['conversation_summary'] is None
-    assert seen['expression'][-1]['conversation_summary'] is None
+    assert seen['expression'] == []
 
 
-def test_clarifications_and_final_answer_are_each_composed_once_without_early_learning(app_model):
+def test_clarifications_and_final_answer_publish_without_a_second_expression_call(app_model):
     app, model = app_model
-    decisions = iter(['clarify', 'clarify', 'answer'])
+    decisions = iter([('clarify', '请告诉我第一项。'), ('clarify', '还需要第二项。'), ('answer', '总算解决了。')])
     seen = install(model, planner=lambda messages: LLMResponse(json.dumps(
-        dict(action=next(decisions), reply='需要补充具体对象。'), ensure_ascii=False)))
+        dict(zip(('action', 'reply'), next(decisions))), ensure_ascii=False)))
     conversation = app.conversation_ensure_default()
     task = app.submit('处理那一项', conversation_id=conversation['id'], expected_context_epoch=conversation['context_epoch'])
     for index in range(2):
         result = app.wait(task.id, 10)
         assert result.status == TaskStatus.AWAITING_INPUT
-        assert result.response == '请告诉我缺少的那一项。'
+        assert result.response == ('请告诉我第一项。' if index == 0 else '还需要第二项。')
         assert seen['feedback'] == []
-        assert seen['expression'][-1]['response_intent'] == 'clarify'
-        assert seen['expression'][-1]['learning_receipt']['status'] == 'skipped'
-        assert seen['expression'][-1]['learning_receipt']['reason'] == 'model_deferred'
+        assert app.tasks.get(task.id).result['learning_receipt']['reason'] == 'model_deferred'
         app.answer_task(task.id, f'第{index + 1}次补充', f'answer-{index}')
     result = app.wait(task.id, 10)
     assert result.status == TaskStatus.COMPLETED and result.response == '总算解决了。'
-    assert len(seen['expression']) == 3 and len(seen['feedback']) == 1
+    assert seen['expression'] == [] and len(seen['feedback']) == 1
     assert len(seen['understanding']) == 1
     with app.store.read_connection() as db:
-        assert db.execute("SELECT COUNT(*) FROM task_call_attempt WHERE task_id=? AND purpose='expression'", (task.id,)).fetchone()[0] == 3
+        assert db.execute("SELECT COUNT(*) FROM task_call_attempt WHERE task_id=? AND purpose='expression'", (task.id,)).fetchone()[0] == 0
 
 
 def test_restart_restores_summary_and_does_not_rerun_understanding_for_pending_task(app_model, tmp_path):
@@ -222,6 +223,9 @@ def test_restart_restores_summary_and_does_not_rerun_understanding_for_pending_t
         reopened.answer_task(task.id, '处理第一项', 'after-restart')
         assert reopened.wait(task.id, 10).status == TaskStatus.COMPLETED
         assert len(seen['understanding']) == 1
-        assert seen['expression'][-1]['conversation_summary'] == seen['expression'][0]['conversation_summary']
+        assert seen['expression'] == []
+        summaries = [next(i for i in references(messages) if i['kind'] == 'conversation_summary')
+                     for messages in seen['planning']]
+        assert len(summaries) == 2 and summaries[0] == summaries[1]
     finally:
         assert reopened.close(timeout=10)

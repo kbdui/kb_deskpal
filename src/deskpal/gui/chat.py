@@ -916,6 +916,17 @@ class ChatView(QWidget):
             body = replies.get(str(item.get("id", "")), str(item.get("body", "")))
             if not body:
                 continue
+            if kind == "system_notice":
+                self.messages.addWidget(text_label("系统提示\n" + body))
+                if item.get("has_execution_record"):
+                    if self.compact:
+                        self.messages.addWidget(text_label("执行记录可在主窗口查看。"))
+                    else:
+                        records = QPushButton("查看执行记录")
+                        records.clicked.connect(lambda checked=False, task_id=str(item["task_id"]):
+                                                self.coordinator.tool_results_requested.emit(task_id))
+                        self.messages.addWidget(records)
+                continue
             frame = QFrame(); frame.setObjectName("user_message" if kind in {"user_message", "user"} else "message")
             layout = QVBoxLayout(frame); layout.setContentsMargins(16, 12, 16, 12); layout.setSpacing(8)
             author = QHBoxLayout()

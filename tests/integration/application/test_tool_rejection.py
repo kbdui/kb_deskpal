@@ -35,7 +35,7 @@ def recorded(app_model):
     return app, model, captured
 
 
-def test_reject_replans_then_runs_learning_and_expression(recorded):
+def test_reject_replans_then_learns_and_publishes_without_second_expression(recorded):
     app, model, captured = recorded
     before = app.interaction_snapshot()["character_card"]
     model.decide = lambda: change(app, "应当拒绝的角色卡") if len(model.planning_inputs) == 1 else LLMResponse("不会修改角色卡，我会继续处理你的要求。")
@@ -52,10 +52,10 @@ def test_reject_replans_then_runs_learning_and_expression(recorded):
     assert app.interaction_snapshot()["character_card"] == before
     assert not app.journal.attempts(task.id)
     assert len(model.planning_inputs) == 2
-    assert len(captured["learning"]) == 1 and len(captured["expression"]) == 1
+    assert len(captured["learning"]) == 1 and captured["expression"] == []
     assert "authorization_rejections" in str(model.planning_inputs[-1])
     assert "authorization_rejections" in str(captured["learning"][0])
-    assert "用户已拒绝此前列出的具体操作" in str(captured["expression"][0])
+    assert result.response == "不会修改角色卡，我会继续处理你的要求。"
     assert "role_update" in model.planning_tools[-1]
     assert app.journal.rejected_authorizations(task.id)[0]["operations"][0]["arguments"]["text"] == "应当拒绝的角色卡"
     assert app.command_status("reject-operations")["operation"] == "reject_tools"
@@ -81,13 +81,15 @@ def test_same_tool_can_propose_a_different_operation_after_rejection(recorded):
     assert not (app.core.workspace_dir / "A.txt").exists()
     assert not (app.core.workspace_dir / "B.txt").exists()
     confirm(app, task.id, "approve-B")
-    assert app.wait(task.id, 10).status == TaskStatus.COMPLETED
+    result = app.wait(task.id, 10)
+    assert result.status == TaskStatus.COMPLETED
     assert not (app.core.workspace_dir / "A.txt").exists()
     assert (app.core.workspace_dir / "B.txt").read_text(encoding="utf-8") == "新的文件内容"
     assert app.task_review(task.id)["rejected_operations"][0]["summary"] == "写入文本：A.txt"
     assert len(app.journal.attempts(task.id)) == 1
     assert len(model.planning_inputs) == 3
-    assert len(captured["expression"]) == 1 and len(captured["learning"]) == 1
+    assert captured["expression"] == [] and len(captured["learning"]) == 1
+    assert result.response == "没有写入A，经过授权写入了B。"
     assert "confirm" not in app.task_review(task.id)["available_actions"]
 
 
@@ -113,7 +115,7 @@ def test_previous_effects_survive_and_other_allowed_tools_can_run(recorded):
     assert all(a.status == "Succeeded" for a in attempts)
     assert attempts[0].result.success
     assert app.interaction_snapshot()["character_card"] == before
-    assert captured["learning"] and captured["expression"]
+    assert captured["learning"] and not captured["expression"]
 
 
 def test_rejection_is_idempotent_and_old_confirmation_cannot_execute(recorded):
@@ -215,4 +217,4 @@ def test_rejection_keeps_the_last_opportunity_to_rethink(recorded):
     assert app.journal.round_count(task.id) == 7
     reject(app, task.id)
     assert app.wait(task.id, 10).status == TaskStatus.COMPLETED
-    assert captured["learning"] and captured["expression"]
+    assert captured["learning"] and not captured["expression"]

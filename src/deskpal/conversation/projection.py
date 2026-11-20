@@ -32,13 +32,16 @@ def publish_task_state(store: WorkflowStore, conn: sqlite3.Connection, task_id: 
         completed = conn.execute("SELECT 1 FROM attempt WHERE task_id=? AND status='Succeeded' LIMIT 1", (task_id,)).fetchone()
         text = ("后续步骤已取消；此前已完成的操作仍然保留，可查看执行记录。" if completed
                 else "请求已取消，没有已完成的工具操作。")
-    if not text:
+    planning_failed = status == "Failed" and data.get("failure_code") == "planning_output_invalid"
+    if planning_failed:
+        text = ""
+    elif not text:
         text = {"Waiting": "这项安排需要你确认后继续。", "NeedsReview": "这项工作需要重新审阅。",
                 "Uncertain": "执行结果需要人工核实。", "Failed": "这次请求未能完成，具体原因请查看执行详情。",
                 "Cancelled": "已取消这次请求。"}.get(status, "")
     if not text and "memory_id" in data and status == "Completed":
         text = "已保存这条记忆。"
-    if not text:
+    if not text and not planning_failed:
         return
     if status == 'AwaitingInput':
         from .exchanges import question

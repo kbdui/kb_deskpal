@@ -209,7 +209,8 @@ def test_reusable_draft_guidance_preserves_specific_confirmation_and_creative_fr
 def test_tool_answer_guidance_requires_complete_answer_without_extra_calls() -> None:
     provider = RecordingProvider(envelope("内容已读到，但保存没有成功。"))
     facts = [{"tool_name": "read_text", "call_id": "READ_ID", "success": True, "output": "text", "error": None},
-             {"tool_name": "write_text", "call_id": "WRITE_ID", "success": False, "output": "partial", "error": "failed"}]
+             {"tool_name": "write_text", "call_id": "WRITE_ID", "success": False, "output": "partial", "error": "failed",
+              "outcome": "unknown"}]
     policy = {"verbosity": "brief", "humor_allowed": False, "followup_allowed": False}
     result = ResponseComposer(provider).compose(request="告诉我结果", tool_results=facts,
         style="\n[EXPRESSION_POLICY]" + json.dumps(policy))
@@ -217,6 +218,44 @@ def test_tool_answer_guidance_requires_complete_answer_without_extra_calls() -> 
     system = provider.calls[0][0][0].content
     assert "查询失败不证明“没有”" in system
     assert json.loads(provider.calls[0][0][1].content)["tool_results"] == facts
+
+
+def test_plain_chat_omits_unrelated_rules_but_preserves_character_voice() -> None:
+    provider = RecordingProvider("晚上好。")
+    result = ResponseComposer(provider).compose(request="晚上好", draft="晚上好。", structured=False,
+        learning_receipt={"status": "skipped", "reason": "model_deferred", "saved_understandings": []})
+    assert result.reply_text == "晚上好。"
+    messages, _ = provider.calls[0]
+    system = messages[0].content
+    assert "不重新规划" in system and "保留草稿中有依据的观点" in system
+    assert all(rule not in system for rule in ("查询失败", "逐项说明", "必须向用户确认", "此前拒绝"))
+
+
+def test_memory_search_facts_compact_without_losing_uncertainty_or_query_scope() -> None:
+    provider = RecordingProvider("这条仍待确认。")
+    record = {"type": "memory_evidence", "memory_id": "memory-1", "revision": 3,
+              "scope": "session", "speaker_name": "用户", "source_origin": "user_message",
+              "source_time": "2026-11-18T00:00:00Z", "status": "candidate", "valid_to": None,
+              "content": "可能调整时间", "reason": "尚未确定", "uncertainty": "未做决定",
+              "source_id": "internal-source", "selected_by": ["lexical"]}
+    other = {"id": "other", "content": "不是有效的记忆结构"}
+    facts = [{"tool_name": "memory_search", "success": True, "outcome": "known",
+              "output": {"items": [{"id": "memory-1", "content": json.dumps(record)}, other], "truncated": True}}]
+    result = ResponseComposer(provider).compose(request="上次定了吗？", structured=False, tool_results=facts)
+    assert result.reply_text == "这条仍待确认。"
+    messages, _ = provider.calls[0]
+    projected = json.loads(messages[1].content)["tool_results"][0]
+    assert projected["outcome"] == "known" and projected["output"]["truncated"] is True
+    assert projected["output"]["items"] == [{key: value for key, value in record.items()
+        if key not in {"source_id", "selected_by", "valid_to"}}, other]
+    assert isinstance(facts[0]["output"]["items"][0]["content"], str)
+
+
+def test_explicit_memory_request_without_receipt_still_gets_management_rules() -> None:
+    provider = RecordingProvider("刚才没能保存。")
+    ResponseComposer(provider).compose(request="请记住这件事", structured=False,
+        memory_management_requested=True, learning_receipt={"status": "failed", "saved_understandings": []})
+    assert "缺回执" in provider.calls[0][0][0].content
 
 
 class NativeRecordingProvider(RecordingProvider):

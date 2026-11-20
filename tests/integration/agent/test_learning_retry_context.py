@@ -44,7 +44,7 @@ def test_invalid_review_time_then_timeout_keeps_correction_and_refreshes_now(app
         assert '"processing_rule":"review_schedule"' in system
     assert datetime.fromisoformat(model.inputs[2]['now']) > datetime.fromisoformat(model.inputs[1]['now'])
     assert app.learning.store.job('turn:' + result.task_id)['status'] == ('failed' if final_timeout else 'completed')
-    assert len(app.memory.list_items()) == (0 if final_timeout else 1) and len(model.expressions) == 1
+    assert len(app.memory.list_items()) == (0 if final_timeout else 1) and not model.expressions
     rows = sorted([row for row in app._humanization.call_diagnostics() if row['task_id'] == result.task_id
                    and row['purpose'] == 'memory_evaluation'], key=lambda row: row['slot'])
     assert [row['metadata']['learning_correction'] for row in rows] == [0, 1, 1]

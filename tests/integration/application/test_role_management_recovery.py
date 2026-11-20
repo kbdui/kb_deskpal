@@ -8,7 +8,7 @@ from deskpal.companion import CompanionRuntime
 from deskpal.companion.errors import CompanionRevisionConflict, CompanionValidationError
 from deskpal.config import load_config
 from deskpal.llm.models import LLMResponse
-from deskpal.planner.llm_planner import PLANNING_INSTRUCTION
+from deskpal.planner.llm_planner import USER_DECISION
 from deskpal.tasks.models import TaskStatus
 from deskpal.tools.manager import _execution_error
 from deskpal.tools.models import PermissionLevel, ToolCall
@@ -268,5 +268,5 @@ def test_role_errors_have_specific_safe_diagnostics(error, expected):
 
 
 def test_prompt_separates_habits_and_role_card():
-    assert "相处习惯交由本轮反馈学习" in PLANNING_INSTRUCTION
-    assert "不把习惯清单搬进角色卡" in PLANNING_INSTRUCTION
+    assert "相处习惯交由本轮反馈学习" in USER_DECISION
+    assert "不把习惯清单搬进角色卡" in USER_DECISION
